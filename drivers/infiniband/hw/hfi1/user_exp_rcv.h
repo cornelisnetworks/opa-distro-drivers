@@ -25,7 +25,8 @@ struct tid_user_buf {
 };
 
 struct tid_rb_node {
-	struct mmu_rb_node mmu;
+	struct mmu_interval_notifier notifier;
+	struct hfi1_filedata *fdata;
 	unsigned long phys;
 	struct tid_group *grp;
 	u32 rcventry;
@@ -56,7 +57,7 @@ int hfi1_user_exp_rcv_invalid(struct hfi1_filedata *fd,
 
 static inline struct mm_struct *mm_from_tid_node(struct tid_rb_node *node)
 {
-	return node->mmu.handler->mm;
+	return node->notifier.mm;
 }
 
 #endif /* _HFI1_USER_EXP_RCV_H */
