@@ -81,5 +81,7 @@
 #define HFI1_IOCTL_TID_INVAL_READ	_IOWR(RDMA_IOCTL_MAGIC, 0xED, struct hfi1_tid_info)
 /* get the version of the user cdev */
 #define HFI1_IOCTL_GET_VERS		_IOR(RDMA_IOCTL_MAGIC,  0xEE, int)
+/* Retrieve pin cache statistics */
+#define HFI1_IOCTL_PIN_STATS		_IOWR(RDMA_IOCTL_MAGIC, 0xEF, struct hfi1_pin_stats)
 
 #endif /* RDMA_USER_IOCTL_H */
