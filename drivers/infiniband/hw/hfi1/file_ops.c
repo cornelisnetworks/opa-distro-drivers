@@ -22,6 +22,7 @@
 #include "user_sdma.h"
 #include "user_exp_rcv.h"
 #include "aspm.h"
+#include "pinning.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -73,6 +74,8 @@ static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 static vm_fault_t vma_fault(struct vm_fault *vmf);
 static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 			    unsigned long arg);
+static int get_pinning_stats(struct hfi1_filedata *fd, unsigned long arg,
+			     u32 len);
 
 static const struct file_operations hfi1_file_ops = {
 	.owner = THIS_MODULE,
@@ -248,7 +251,9 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 		if (put_user(uval, (int __user *)arg))
 			return -EFAULT;
 		break;
-
+	case HFI1_IOCTL_PIN_STATS:
+		ret = get_pinning_stats(fd, arg, _IOC_SIZE(cmd));
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -1710,4 +1715,48 @@ int hfi1_device_create(struct hfi1_devdata *dd)
 void hfi1_device_remove(struct hfi1_devdata *dd)
 {
 	user_remove(dd);
+}
+
+static int get_pinning_stats(struct hfi1_filedata *fd, unsigned long arg,
+			     u32 len)
+{
+	struct hfi1_pin_stats stats;
+	unsigned int memtype;
+	int index;
+	int ret;
+	struct hfi1_user_sdma_pkt_q *pq;
+	int lockidx;
+
+	if (sizeof(stats) != len)
+		return -EINVAL;
+
+	if (copy_from_user(&stats, (void __user *)arg, len))
+		return -EFAULT;
+
+	if (!pinning_type_supported(stats.memtype))
+		return -EINVAL;
+
+	memtype = stats.memtype;
+	index = stats.index;
+	memset(&stats, 0, sizeof(stats));
+	stats.memtype = memtype;
+	stats.index = index;
+
+	lockidx = srcu_read_lock(&fd->pq_srcu);
+	pq = srcu_dereference(fd->pq, &fd->pq_srcu);
+	if (!pq) {
+		srcu_read_unlock(&fd->pq_srcu, lockidx);
+		return -EIO;
+	}
+
+	ret = pinning_interfaces[memtype].get_stats(pq, index, &stats);
+	srcu_read_unlock(&fd->pq_srcu, lockidx);
+
+	if (ret)
+		return ret;
+
+	if (copy_to_user((void __user *)arg, &stats, len))
+		return -EFAULT;
+
+	return 0;
 }
