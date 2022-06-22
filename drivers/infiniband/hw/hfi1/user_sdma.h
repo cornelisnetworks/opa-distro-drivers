@@ -18,6 +18,8 @@
 
 /* The maximum number of Data io vectors per message/request */
 #define MAX_VECTORS_PER_REQ 8
+static_assert(MAX_VECTORS_PER_REQ <= HFI1_MAX_MEMINFO_ENTRIES);
+
 /*
  * Maximum number of packet to send from each message/request
  * before moving to the next one.
@@ -32,6 +34,8 @@
 	(((x) >> HFI1_SDMA_REQ_VERSION_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
 #define req_iovcnt(x) \
 	(((x) >> HFI1_SDMA_REQ_IOVCNT_SHIFT) & HFI1_SDMA_REQ_IOVCNT_MASK)
+#define req_has_meminfo(x) \
+	(((x) >> HFI1_SDMA_REQ_MEMINFO_SHIFT) & HFI1_SDMA_REQ_MEMINFO_MASK)
 
 /* Number of BTH.PSN bits used for sequence number in expected rcvs */
 #define BTH_SEQ_MASK 0x7ffull
@@ -94,7 +98,7 @@ struct hfi1_user_sdma_pkt_q {
 	enum pkt_q_sdma_state state;
 	wait_queue_head_t wait;
 	unsigned long unpinned;
-	struct mmu_rb_handler *handler;
+	struct pinning_state pinning_state;
 	atomic_t n_locked;
 };
 
@@ -106,6 +110,10 @@ struct hfi1_user_sdma_comp_q {
 struct user_sdma_iovec {
 	struct list_head list;
 	struct iovec iov;
+	/* memory type for this vector */
+	unsigned int type;
+	/* memory type context for this vector */
+	u64 context;
 	/*
 	 * offset into the virtual address space of the vector at
 	 * which we last left off.
@@ -122,6 +130,9 @@ struct evict_data {
 struct user_sdma_request {
 	/* This is the original header from user space */
 	struct hfi1_pkt_header hdr;
+
+	/* Memory type information for each data iovec entry. */
+	struct sdma_req_meminfo meminfo;
 
 	/* Read mostly fields */
 	struct hfi1_user_sdma_pkt_q *pq ____cacheline_aligned_in_smp;
