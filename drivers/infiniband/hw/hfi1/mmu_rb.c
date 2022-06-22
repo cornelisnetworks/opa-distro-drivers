@@ -15,9 +15,8 @@
 
 static unsigned long mmu_node_start(struct mmu_rb_node *);
 static unsigned long mmu_node_last(struct mmu_rb_node *);
-static void mmu_notifier_range_start(struct mmu_notifier *,
-				     struct mm_struct *,
-				     unsigned long, unsigned long);
+static int mmu_notifier_range_start(struct mmu_notifier *mn,
+		const struct mmu_notifier_range *range);
 static struct mmu_rb_node *__mmu_rb_search(struct mmu_rb_handler *,
 					   unsigned long, unsigned long);
 static void release_immediate(struct kref *refcount);
@@ -249,6 +248,7 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg)
 			__mmu_int_rb_remove(rbnode, &handler->root);
 			/* move from LRU list to delete list */
 			list_move(&rbnode->list, &del_list);
+			++handler->internal_evictions;
 		}
 		if (stop)
 			break;
@@ -261,10 +261,28 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg)
 	}
 }
 
-static void mmu_notifier_range_start(struct mmu_notifier *mn,
-				     struct mm_struct *mm,
-				     unsigned long start,
-				     unsigned long end)
+unsigned long hfi1_mmu_rb_for_n(struct mmu_rb_handler *handler,
+				unsigned long start, int count,
+				void (*fn)(const struct mmu_rb_node *rb_node, void *),
+				void *arg)
+{
+	struct mmu_rb_node *node = NULL, *next;
+	int i;
+
+	next = __mmu_int_rb_iter_first(&handler->root, start, ~0ULL - start);
+	for (i = 0; i < count; i++) {
+		node = next;
+		if (!node)
+			return ~0UL;
+
+		next = __mmu_int_rb_iter_next(node, start + node->len, ~0ULL);
+		fn(node, arg);
+	}
+	return node->addr;
+}
+
+static int mmu_notifier_range_start(struct mmu_notifier *mn,
+		const struct mmu_notifier_range *range)
 {
 	struct mmu_rb_handler *handler =
 		container_of(mn, struct mmu_rb_handler, mn);
@@ -273,18 +291,20 @@ static void mmu_notifier_range_start(struct mmu_notifier *mn,
 	unsigned long flags;
 
 	spin_lock_irqsave(&handler->lock, flags);
-	for (node = __mmu_int_rb_iter_first(root, start, end - 1);
+	for (node = __mmu_int_rb_iter_first(root, range->start, range->end - 1);
 	     node; node = ptr) {
 		/* Guard against node removal. */
-		ptr = __mmu_int_rb_iter_next(node, start, end - 1);
+		ptr = __mmu_int_rb_iter_next(node, range->start, range->end - 1);
 		trace_hfi1_mmu_mem_invalidate(node);
 		/* Remove from rb tree and lru_list. */
 		__mmu_int_rb_remove(node, root);
 		list_del_init(&node->list);
 		kref_put(&node->refcount, release_nolock);
+		handler->external_evictions++;
 	}
 	spin_unlock_irqrestore(&handler->lock, flags);
 
+	return 0;
 }
 
 /*
