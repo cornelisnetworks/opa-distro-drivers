@@ -30,6 +30,8 @@ struct pinning_interface {
 				  struct user_sdma_txreq *tx,
 				  struct user_sdma_iovec *iovec,
 				  u32 *pkt_data_remaining);
+	int (*get_stats)(struct hfi1_user_sdma_pkt_q *pq, int index,
+			 struct hfi1_pin_stats *stats);
 };
 
 #define PINNING_MAX_INTERFACES BIT(HFI1_MEMINFO_TYPE_ENTRY_BITS)
