@@ -47,6 +47,10 @@ struct mmu_rb_handler {
 	struct work_struct del_work;
 	struct list_head del_list;
 	struct workqueue_struct *wq;
+	size_t hits;
+	size_t misses;
+	size_t internal_evictions;
+	size_t external_evictions;
 	void *free_ptr;
 };
 
@@ -63,5 +67,9 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg);
 struct mmu_rb_node *hfi1_mmu_rb_get_first(struct mmu_rb_handler *handler,
 					  unsigned long addr,
 					  unsigned long len);
+unsigned long hfi1_mmu_rb_for_n(struct mmu_rb_handler *handler,
+				unsigned long start, int count,
+				void (*fn)(const struct mmu_rb_node *rb_node, void *),
+				void *arg);
 
 #endif /* _HFI1_MMU_RB_H */

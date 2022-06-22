@@ -246,6 +246,7 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg)
 			__mmu_int_rb_remove(rbnode, &handler->root);
 			/* move from LRU list to delete list */
 			list_move(&rbnode->list, &del_list);
+			++handler->internal_evictions;
 		}
 		if (stop)
 			break;
@@ -256,6 +257,26 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg)
 		trace_hfi1_mmu_rb_evict(rbnode);
 		kref_put(&rbnode->refcount, release_immediate);
 	}
+}
+
+unsigned long hfi1_mmu_rb_for_n(struct mmu_rb_handler *handler,
+				unsigned long start, int count,
+				void (*fn)(const struct mmu_rb_node *rb_node, void *),
+				void *arg)
+{
+	struct mmu_rb_node *node = NULL, *next;
+	int i;
+
+	next = __mmu_int_rb_iter_first(&handler->root, start, ~0ULL - start);
+	for (i = 0; i < count; i++) {
+		node = next;
+		if (!node)
+			return ~0UL;
+
+		next = __mmu_int_rb_iter_next(node, start + node->len, ~0ULL);
+		fn(node, arg);
+	}
+	return node->addr;
 }
 
 static int mmu_notifier_range_start(struct mmu_notifier *mn,
@@ -278,6 +299,7 @@ static int mmu_notifier_range_start(struct mmu_notifier *mn,
 		__mmu_int_rb_remove(node, root);
 		list_del_init(&node->list);
 		kref_put(&node->refcount, release_nolock);
+		handler->external_evictions++;
 	}
 	spin_unlock_irqrestore(&handler->lock, flags);
 
