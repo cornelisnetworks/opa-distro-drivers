@@ -112,12 +112,14 @@ static struct sdma_mmu_node *find_system_node(struct mmu_rb_handler *handler,
 	spin_lock_irqsave(&handler->lock, flags);
 	rb_node = hfi1_mmu_rb_get_first(handler, start, (end - start));
 	if (!rb_node) {
+		handler->misses++;
 		spin_unlock_irqrestore(&handler->lock, flags);
 		return NULL;
 	}
 
 	/* "safety" kref to prevent release before add_system_iovec_to_sdma_packet() */
 	kref_get(&rb_node->refcount);
+	handler->hits++;
 	spin_unlock_irqrestore(&handler->lock, flags);
 
 	return container_of(rb_node, struct sdma_mmu_node, rb);
@@ -452,10 +454,80 @@ static int add_system_pages_to_sdma_packet(struct user_sdma_request *req,
 	return 0;
 }
 
+static void add_system_stats(const struct mmu_rb_node *node, void *arg)
+{
+	struct hfi1_pin_stats *stats = arg;
+
+	stats->cache_entries++;
+	/*
+	 * '- 1' to account for kref held by mmu_rb_handler.
+	 *
+	 * We're assured that mmu_rb_handler has kref for node because:
+	 * - This function is called in a for-each loop over mmu_rb_handler's rb_nodes
+	 * - That loop is called inside of an mmu_rb_handler->lock critical section
+	 * - Once added to an mmu_rb_handler's cache, mmu_rb_nodes can only be
+	 *    destroyed or queued for destruction inside an mmu_rb_handler->lock
+	 *    critical section
+	 *
+	 * So the fact that node was passed in here means it is still in an mmu_rb_handler's cache.
+	 *
+	 * That said, kref_read() here can overcount the number of actual
+	 * sdma_descs holding references to node. That is because user_sdma
+	 * and mmu_rb_handler code take additional krefs to prevent
+	 * mmu_rb_nodes from being destroyed after the user SDMA request is
+	 * submitted and gets as far as pinning pages, even if the userspace
+	 * virtual address range is invalidated in the meantime. I.e. once the
+	 * user SDMA request gets as far as pinning pages, those pages will
+	 * remain resident up until the SDMA engine completes the request.
+	 */
+	stats->total_refcounts += kref_read(&node->refcount) - 1;
+	stats->total_bytes += node->len;
+}
+
+static int get_system_stats(struct hfi1_user_sdma_pkt_q *pq, int index,
+			    struct hfi1_pin_stats *stats)
+{
+	struct mmu_rb_handler *handler =
+		PINNING_STATE(pq, HFI1_MEMINFO_TYPE_SYSTEM);
+	unsigned long next = 0;
+
+	if (index == -1) {
+		stats->index = 1;
+		return 0;
+	}
+
+	if (index != 0)
+		return -EINVAL;
+
+	stats->id = 0;
+	while (next != ~0UL) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&handler->lock, flags);
+		/* Take stats on 100 nodes at a time.
+		 * This is a balance between time/cost of the operation and
+		 * the latency of other operations waiting for the lock.
+		 */
+		next = hfi1_mmu_rb_for_n(handler, next, 100, add_system_stats,
+					 stats);
+		spin_unlock_irqrestore(&handler->lock, flags);
+		/* This is to allow the lock to be acquired from other places. */
+		ndelay(100);
+	}
+
+	stats->hits = handler->hits;
+	stats->misses = handler->misses;
+	stats->internal_evictions = handler->internal_evictions;
+	stats->external_evictions = handler->external_evictions;
+
+	return 0;
+};
+
 static struct pinning_interface system_pinning_interface = {
 	.init = init_system_pinning,
 	.free = free_system_pinning,
 	.add_to_sdma_packet = add_system_pages_to_sdma_packet,
+	.get_stats = get_system_stats,
 };
 
 void register_system_pinning_interface(void)

@@ -171,4 +171,22 @@ struct hfi1_base_info {
 	__aligned_u64 subctxt_rcvegrbuf;
 	__aligned_u64 subctxt_rcvhdrbuf;
 };
+
+struct hfi1_pin_stats {
+	int memtype;
+	/*
+	 * If -1, driver returns total number of stats entries for the given
+	 * memtype, otherwise returns stats for the given { memtype, index }.
+	 */
+	int index;
+	__u64 id;
+	__u64 cache_entries;
+	__u64 total_refcounts;
+	__u64 total_bytes;
+	__u64 hits;
+	__u64 misses;
+	__u64 internal_evictions; /* due to self-imposed size limit */
+	__u64 external_evictions; /* system-driven evictions */
+};
+
 #endif /* _LINIUX__HFI1_IOCTL_H */
