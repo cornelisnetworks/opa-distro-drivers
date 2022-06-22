@@ -192,14 +192,17 @@ enum sdma_req_opcode {
 #define HFI1_SDMA_REQ_VERSION_SHIFT 0x0
 #define HFI1_SDMA_REQ_OPCODE_MASK 0xF
 #define HFI1_SDMA_REQ_OPCODE_SHIFT 0x4
-#define HFI1_SDMA_REQ_IOVCNT_MASK 0xFF
+#define HFI1_SDMA_REQ_IOVCNT_MASK 0x7F
 #define HFI1_SDMA_REQ_IOVCNT_SHIFT 0x8
+#define HFI1_SDMA_REQ_MEMINFO_MASK 0x1
+#define HFI1_SDMA_REQ_MEMINFO_SHIFT 0xF
 
 struct sdma_req_info {
 	/*
 	 * bits 0-3 - version (currently unused)
 	 * bits 4-7 - opcode (enum sdma_req_opcode)
-	 * bits 8-15 - io vector count
+	 * bits 8-14 - io vector count
+	 * bit  15 - meminfo present
 	 */
 	__u16 ctrl;
 	/*
@@ -221,6 +224,30 @@ struct sdma_req_info {
 	 */
 	__u16 comp_idx;
 } __attribute__((__packed__));
+
+#define HFI1_MEMINFO_TYPE_ENTRY_BITS 4
+#define HFI1_MEMINFO_TYPE_ENTRY_MASK ((1 << HFI1_MEMINFO_TYPE_ENTRY_BITS) - 1)
+#define HFI1_MEMINFO_TYPE_ENTRY_GET(m, n)              \
+	(((m) >> ((n) * HFI1_MEMINFO_TYPE_ENTRY_BITS)) & \
+	 HFI1_MEMINFO_TYPE_ENTRY_MASK)
+#define HFI1_MEMINFO_TYPE_ENTRY_SET(m, n, e)    \
+	((m) |= ((e) & HFI1_MEMINFO_TYPE_ENTRY_MASK) \
+	     << ((n) * HFI1_MEMINFO_TYPE_ENTRY_BITS))
+#define HFI1_MAX_MEMINFO_ENTRIES \
+	(sizeof(__u64) * 8 / HFI1_MEMINFO_TYPE_ENTRY_BITS)
+
+#define HFI1_MEMINFO_TYPE_SYSTEM 0
+
+struct sdma_req_meminfo {
+	/*
+	 * Packed memory type indicators for each data iovec entry.
+	 */
+	__u64 types;
+	/*
+	 * Type-specific context for each data iovec entry.
+	 */
+	__u64 context[HFI1_MAX_MEMINFO_ENTRIES];
+};
 
 /*
  * SW KDETH header.
