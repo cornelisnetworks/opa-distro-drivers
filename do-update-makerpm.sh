@@ -76,6 +76,7 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/opa_compat.h
 	drivers/infiniband/hw/hfi1/pcie.c
 	drivers/infiniband/hw/hfi1/pin_system.c
+	drivers/infiniband/hw/hfi1/pinning.c
 	drivers/infiniband/hw/hfi1/pinning.h
 	drivers/infiniband/hw/hfi1/pio.c
 	drivers/infiniband/hw/hfi1/pio_copy.c
