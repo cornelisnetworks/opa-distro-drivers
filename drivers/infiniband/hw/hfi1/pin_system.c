@@ -32,13 +32,20 @@ static struct mmu_rb_ops sdma_rb_ops = {
 	.remove = sdma_rb_remove,
 };
 
-int hfi1_init_system_pinning(struct hfi1_user_sdma_pkt_q *pq)
+static int add_system_pages_to_sdma_packet(struct user_sdma_request *req,
+					   struct user_sdma_txreq *tx,
+					   struct user_sdma_iovec *iovec,
+					   u32 *pkt_remaining);
+
+static int init_system_pinning(struct hfi1_user_sdma_pkt_q *pq)
 {
 	struct hfi1_devdata *dd = pq->dd;
+	struct mmu_rb_handler **handler = (struct mmu_rb_handler **)
+		&PINNING_STATE(pq, HFI1_MEMINFO_TYPE_SYSTEM);
 	int ret;
 
 	ret = hfi1_mmu_rb_register(pq, &sdma_rb_ops, dd->pport->hfi1_wq,
-				   &pq->handler);
+				   handler);
 	if (ret)
 		dd_dev_err(dd,
 			   "[%u:%u] Failed to register system memory DMA support with MMU: %d\n",
@@ -46,19 +53,24 @@ int hfi1_init_system_pinning(struct hfi1_user_sdma_pkt_q *pq)
 	return ret;
 }
 
-void hfi1_free_system_pinning(struct hfi1_user_sdma_pkt_q *pq)
+static void free_system_pinning(struct hfi1_user_sdma_pkt_q *pq)
 {
-	if (pq->handler)
-		hfi1_mmu_rb_unregister(pq->handler);
+	struct mmu_rb_handler *handler =
+		PINNING_STATE(pq, HFI1_MEMINFO_TYPE_SYSTEM);
+
+	if (handler)
+		hfi1_mmu_rb_unregister(handler);
 }
 
 static u32 sdma_cache_evict(struct hfi1_user_sdma_pkt_q *pq, u32 npages)
 {
 	struct evict_data evict_data;
+	struct mmu_rb_handler *handler =
+		PINNING_STATE(pq, HFI1_MEMINFO_TYPE_SYSTEM);
 
 	evict_data.cleared = 0;
 	evict_data.target = npages;
-	hfi1_mmu_rb_evict(pq->handler, &evict_data);
+	hfi1_mmu_rb_evict(handler, &evict_data);
 	return evict_data.cleared;
 }
 
@@ -186,7 +198,7 @@ static int add_system_pinning(struct user_sdma_request *req,
 	node->pq = pq;
 	ret = pin_system_pages(req, start, len, node, PFN_DOWN(len));
 	if (ret == 0) {
-		ret = hfi1_mmu_rb_insert(pq->handler, &node->rb);
+		ret = hfi1_mmu_rb_insert(PINNING_STATE(pq, HFI1_MEMINFO_TYPE_SYSTEM), &node->rb);
 		if (ret)
 			free_system_node(node);
 		else
@@ -206,6 +218,8 @@ static int get_system_cache_entry(struct user_sdma_request *req,
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
 	u64 start = ALIGN_DOWN(req_start, PAGE_SIZE);
 	u64 end = PFN_ALIGN(req_start + req_len);
+	struct mmu_rb_handler *handler =
+		PINNING_STATE(pq, HFI1_MEMINFO_TYPE_SYSTEM);
 	int ret;
 
 	if ((end - start) == 0) {
@@ -219,7 +233,7 @@ static int get_system_cache_entry(struct user_sdma_request *req,
 
 	while (1) {
 		struct sdma_mmu_node *node =
-			find_system_node(pq->handler, start, end);
+			find_system_node(handler, start, end);
 		u64 prepend_len = 0;
 
 		SDMA_DBG(req, "node %p start %llx end %llu", node, start, end);
@@ -398,10 +412,10 @@ static int add_system_iovec_to_sdma_packet(struct user_sdma_request *req,
  * the offset value in req->iov[req->iov_idx] to reflect the data that has been
  * consumed.
  */
-int hfi1_add_pages_to_sdma_packet(struct user_sdma_request *req,
-				  struct user_sdma_txreq *tx,
-				  struct user_sdma_iovec *iovec,
-				  u32 *pkt_data_remaining)
+static int add_system_pages_to_sdma_packet(struct user_sdma_request *req,
+					   struct user_sdma_txreq *tx,
+					   struct user_sdma_iovec *iovec,
+					   u32 *pkt_data_remaining)
 {
 	size_t remaining_to_add = *pkt_data_remaining;
 	/*
@@ -409,7 +423,8 @@ int hfi1_add_pages_to_sdma_packet(struct user_sdma_request *req,
 	 * are pinned and mapped, add data to the packet until no more
 	 * data remains to be added or the iovec entry type changes.
 	 */
-	while (remaining_to_add > 0) {
+	while ((remaining_to_add > 0) &&
+	       (iovec->type == HFI1_MEMINFO_TYPE_SYSTEM)) {
 		struct user_sdma_iovec *cur_iovec;
 		size_t from_this_iovec;
 		int ret;
@@ -435,6 +450,24 @@ int hfi1_add_pages_to_sdma_packet(struct user_sdma_request *req,
 	*pkt_data_remaining = remaining_to_add;
 
 	return 0;
+}
+
+static struct pinning_interface system_pinning_interface = {
+	.init = init_system_pinning,
+	.free = free_system_pinning,
+	.add_to_sdma_packet = add_system_pages_to_sdma_packet,
+};
+
+void register_system_pinning_interface(void)
+{
+	register_pinning_interface(HFI1_MEMINFO_TYPE_SYSTEM,
+				   &system_pinning_interface);
+	pr_info("%s System memory DMA support enabled\n", class_name());
+}
+
+void deregister_system_pinning_interface(void)
+{
+	deregister_pinning_interface(HFI1_MEMINFO_TYPE_SYSTEM);
 }
 
 static bool sdma_rb_filter(struct mmu_rb_node *node, unsigned long addr,
