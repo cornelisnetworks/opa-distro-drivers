@@ -29,6 +29,7 @@
 #include "vnic.h"
 #include "exp_rcv.h"
 #include "netdev.h"
+#include "pinning.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -1380,6 +1381,8 @@ static int __init hfi1_mod_init(void)
 {
 	int ret;
 
+	register_system_pinning_interface();
+
 	ret = dev_init();
 	if (ret)
 		goto bail;
@@ -1473,6 +1476,8 @@ static void __exit hfi1_mod_cleanup(void)
 	WARN_ON(!xa_empty(&hfi1_dev_table));
 	dispose_firmware();	/* asymmetric with obtain_firmware() */
 	dev_cleanup();
+
+	deregister_system_pinning_interface();
 }
 
 module_exit(hfi1_mod_cleanup);
