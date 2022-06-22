@@ -169,7 +169,7 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 
 	cq->nentries = hfi1_sdma_comp_ring_size;
 
-	ret = hfi1_init_system_pinning(pq);
+	ret = init_pinning_interfaces(pq);
 	if (ret)
 		goto pq_mmu_fail;
 
@@ -230,7 +230,7 @@ int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd,
 			pq->wait,
 			!atomic_read(&pq->n_reqs));
 		kfree(pq->reqs);
-		hfi1_free_system_pinning(pq);
+		free_pinning_interfaces(pq);
 		bitmap_free(pq->req_in_use);
 		kmem_cache_destroy(pq->txreq_cache);
 		flush_pq_iowait(pq);
@@ -288,6 +288,7 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	u8 pcount = initial_pkt_count;
 	struct sdma_req_info info;
 	struct user_sdma_request *req;
+	size_t header_offset;
 	u8 opcode, sc, vl;
 	u16 pkey;
 	u32 slid;
@@ -372,8 +373,7 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	if (req_opcode(info.ctrl) == EXPECTED) {
 		/* expected must have a TID info and at least one data vector */
 		if (req->data_iovs < 2) {
-			SDMA_DBG(req,
-				 "Not enough vectors for expected request");
+			SDMA_DBG(req, "Not enough vectors for expected request: 0x%x", info.ctrl);
 			ret = -EINVAL;
 			goto free_req;
 		}
@@ -387,8 +387,24 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 		goto free_req;
 	}
 
+	if (req_has_meminfo(info.ctrl)) {
+		/* Copy the meminfo from the user buffer */
+		ret = copy_from_user(&req->meminfo,
+				     iovec[idx].iov_base + sizeof(info),
+				     sizeof(req->meminfo));
+		if (ret) {
+			SDMA_DBG(req, "Failed to copy meminfo (%d)", ret);
+			ret = -EFAULT;
+			goto free_req;
+		}
+		header_offset = sizeof(info) + sizeof(req->meminfo);
+	} else {
+		req->meminfo.types = 0;
+		header_offset = sizeof(info);
+	}
+
 	/* Copy the header from the user buffer */
-	ret = copy_from_user(&req->hdr, iovec[idx].iov_base + sizeof(info),
+	ret = copy_from_user(&req->hdr, iovec[idx].iov_base + header_offset,
 			     sizeof(req->hdr));
 	if (ret) {
 		SDMA_DBG(req, "Failed to copy header template (%d)", ret);
@@ -428,6 +444,7 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	slid = be16_to_cpu(req->hdr.lrh[3]);
 	if (egress_pkey_check(dd->pport, slid, pkey, sc, PKEY_CHECK_INVALID)) {
 		ret = -EINVAL;
+		SDMA_DBG(req, "P_KEY check failed\n");
 		goto free_req;
 	}
 
@@ -456,6 +473,16 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 
 	/* Save all the IO vector structures */
 	for (i = 0; i < req->data_iovs; i++) {
+		req->iovs[i].type =
+			HFI1_MEMINFO_TYPE_ENTRY_GET(req->meminfo.types, i);
+		if (!pinning_type_supported(req->iovs[i].type)) {
+			SDMA_DBG(req, "Pinning type not supported: %u\n",
+				 req->iovs[i].type);
+			req->data_iovs = i;
+			ret = -EINVAL;
+			goto free_req;
+		}
+		req->iovs[i].context = req->meminfo.context[i];
 		req->iovs[i].offset = 0;
 		INIT_LIST_HEAD(&req->iovs[i].list);
 		memcpy(&req->iovs[i].iov,
@@ -801,8 +828,8 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 			req->tidoffset += datalen;
 		req->sent += datalen;
 		while (datalen) {
-			ret = hfi1_add_pages_to_sdma_packet(req, tx, iovec,
-							    &datalen);
+			ret = add_to_sdma_packet(iovec->type, req, tx, iovec,
+						 &datalen);
 			if (ret)
 				goto free_txreq;
 			iovec = &req->iovs[req->iov_idx];
