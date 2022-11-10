@@ -64,3 +64,10 @@ if [[ $build_hfi_src != $curr_hfi_src ]]; then
 	echo "Build != Running HFI"
 	exit 1
 fi
+
+echo "Starting FM"
+systemctl start opafm
+
+echo "Waiting 10 seconds for FM to get started and links to go ACTIVE"
+sleep 10
+opainfo
