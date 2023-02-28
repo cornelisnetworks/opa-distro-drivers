@@ -15,19 +15,29 @@
 
 srpm=$1
 cdir=$PWD
+bdir="build"
 
 if [[ ! -e $srpm ]]; then
 	echo "srpm file invalid"
 	exit 1
 fi
 
-pdir="$(dirname "$srpm")"
-echo "Press ENTER to extract $srpm to $pdir"
+echo "Press ENTER to copy and extract $srpm to $bdir"
 read nothing
 
+echo "Copying $srpm to build directory"
+if [[ -d $bdir ]]; then
+	echo "$bdir directory already found please remove manually"
+	exit 1
+fi
+
+mkdir $bdir
+cp $srpm $bdir/
+
 echo "Extracting SRPM files..."
-cd $pdir
-rpm2cpio $srpm | cpio -idmv --no-absolute-filenames
+cd $bdir
+fn=$(basename -- "$srpm")
+rpm2cpio $fn | cpio -idmv --no-absolute-filenames
 if [[ $? -ne 0 ]]; then
 	echo "Could not extract srcrpm"
 	exit 1
@@ -51,7 +61,7 @@ str="linux-*.tar"
 name=`echo $str`
 new_name=${name%.tar}
 
-kdir=$pdir/$new_name
+kdir=$bdir/$new_name
 
 # Back to previous directory
 cd $cdir
