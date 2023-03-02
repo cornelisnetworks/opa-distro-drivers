@@ -11,7 +11,7 @@ ifneq ($(KERNELRELEASE),)
 CFLAGS_MODULE += $(shell /bin/grep -q efi_rt_services_supported $(srctree)/include/linux/efi.h && echo '-DHAVE_EFI_RT_SERVICES_SUPPORTED')
 CFLAGS_MODULE += $(shell /bin/grep -q ib_sa_sendonly_fullmem_support $(srctree)/include/rdma/ib_sa.h && echo '-DHAVE_IB_SA_SENDONLY_FULLMEM_SUPPORT')
 CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_DISTRO -I${M}/include
-obj-y := rdmavt/ hfi1/ ib_qib/
+obj-y := rdmavt/ hfi1/
 
 else
 #normal makefile

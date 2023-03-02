@@ -111,6 +111,8 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/verbs_txreq.c
 	drivers/infiniband/hw/hfi1/verbs_txreq.h
 	drivers/infiniband/hw/hfi1/vnic.h
+	drivers/infiniband/hw/hfi1/vnic_main.c
+	drivers/infiniband/hw/hfi1/vnic_sdma.c
 	drivers/infiniband/hw/hfi1/exp_rcv.c
 	drivers/infiniband/hw/hfi1/exp_rcv.h
 	drivers/infiniband/hw/hfi1/iowait.c
