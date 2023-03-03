@@ -115,10 +115,11 @@ done
  rsrcdir=$(pwd)/include/uapi/rdma
  srcdir=$(pwd)/include/rdma/hfi/
  cd %kdir
- sh ./scripts/headers_install.sh $targetdir $srcdir hfi1_user.h hfi1_ioctl.h
+ sh ./scripts/headers_install.sh $srcdir/hfi1_user.h $targetdir/hfi1_user.h
+ sh ./scripts/headers_install.sh $srcdir/hfi1_ioctl.h $targetdir/hfi1_ioctl.h
  targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/
- sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl.h
- sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl_cmds.h)
+ sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
+ sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h)
 
 %files devel
 %defattr(-,root,root,-)
@@ -129,7 +130,8 @@ done
 %{_includedir}/uapi/rdma/rdma_user_ioctl.h
 %{_includedir}/uapi/rdma/rdma_user_ioctl_cmds.h
 
-
 %changelog
+* Tue Mar  7 2023 Dennis Dalessandro <dennis.dalessandro@cornelisnetworks.com>
+- Fix headers_install usage on ffff
 * Mon Jan 23 2023 Greg Kresge <greg.kresge@cornelisnetworks.com>
 - Update internal build scripts for distro-specific repo branches
