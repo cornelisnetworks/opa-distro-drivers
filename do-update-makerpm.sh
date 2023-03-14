@@ -195,7 +195,6 @@ usage:
 Options:
 
 -G         - Enable building a GPU Direct package
--A	   - Force enable building Accelerated IPoIB package
 -S srcdir  - fetch source directly from a specified directory
 
 -w dirname - work directory, defaults to a mktemp directory
@@ -204,7 +203,6 @@ EOL
 }
 
 gpubuild="false"
-aipbuild="false"
 srcdir=""
 workdir=""
 filedir=""
@@ -217,8 +215,6 @@ while getopts ":GAS:hu:w:" opt; do
 	S)	srcdir="$OPTARG"
 		[ ! -e "$srcdir" ] && echo "srcdir $srcdir not found" && exit 1
 		srcdir=$(readlink -f "$srcdir")
-		;;
-	A)	aipbuild="true"
 		;;
 	h)	usage
 		exit 0
@@ -276,22 +272,6 @@ if [ $gpubuild = 'true' ]; then
         "
 fi
 
-if [ $aipbuild = 'true' ]; then
-	((modules_cnt++))
-	modules[$modules_cnt]="ib_ipoib"
-	files_to_copy[$modules_cnt]="
-		drivers/infiniband/ulp/ipoib/ipoib_cm.c
-		drivers/infiniband/ulp/ipoib/ipoib_ethtool.c
-		drivers/infiniband/ulp/ipoib/ipoib_fs.c
-		drivers/infiniband/ulp/ipoib/ipoib.h
-		drivers/infiniband/ulp/ipoib/ipoib_ib.c
-		drivers/infiniband/ulp/ipoib/ipoib_main.c
-		drivers/infiniband/ulp/ipoib/ipoib_multicast.c
-		drivers/infiniband/ulp/ipoib/ipoib_netlink.c
-		drivers/infiniband/ulp/ipoib/ipoib_verbs.c
-		drivers/infiniband/ulp/ipoib/ipoib_vlan.c
-		"
-fi
 # configure the file dir
 filedir=$srcdir/files
 
@@ -323,12 +303,6 @@ if [ $gpubuild = 'true' ]; then
 cp $filedir/Makefile.hfi.gpu $tardir/hfi1/Makefile
 else
 cp $filedir/Makefile.hfi $tardir/hfi1/Makefile
-fi
-
-if [ $aipbuild = 'true' ]; then
-	echo "Creating Makefile ($tardir/ipoib/Makefile)"
-	cp $filedir/Makefile.ipoib $tardir/ib_ipoib/Makefile
-	sed -i "s/hfi1/hfi1\/ ib_ipoib/g"  $tardir/Makefile
 fi
 
 DEFAULT_KERNEL_VERSION=$(uname -r)
