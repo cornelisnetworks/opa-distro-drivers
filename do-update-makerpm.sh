@@ -203,7 +203,6 @@ Options:
 EOL
 }
 
-qibbuild="false"
 gpubuild="false"
 aipbuild="false"
 srcdir=""
@@ -245,10 +244,6 @@ elif [[ $ID == "sles" ]]; then
 	else
 		distro_dir=SLES${VERSION_ID_MAJOR}SP${VERSION_ID_MINOR}
 	fi
-
-	if [[ $VERSION_ID_MAJOR = '15' && $VERSION_ID_MINOR = 4 ]]; then
-		qibbuild=true
-	fi
 fi
 
 
@@ -266,16 +261,6 @@ fi
 
 distro=$ID
 echo "distro = $distro"
-
-if [ $qibbuild = "true" ]
-then
-
-((modules_cnt++))
-modules[$modules_cnt]="ib_qib"
-files_to_copy[$modules_cnt]="
-	drivers/infiniband/hw/qib/qib_stub.c
-"
-fi
 
 if [ $gpubuild = 'true' ]; then
         files_to_copy[1]+="
@@ -340,20 +325,10 @@ else
 cp $filedir/Makefile.hfi $tardir/hfi1/Makefile
 fi
 
-if [ $qibbuild = "true" ]; then
-	echo "Creating Makefile ($tardir/ib_qib/Makefile)"
-	cp $filedir/Makefile.qib $tardir/ib_qib/Makefile
-fi
-
 if [ $aipbuild = 'true' ]; then
 	echo "Creating Makefile ($tardir/ipoib/Makefile)"
 	cp $filedir/Makefile.ipoib $tardir/ib_ipoib/Makefile
 	sed -i "s/hfi1/hfi1\/ ib_ipoib/g"  $tardir/Makefile
-fi
-
-if [ $qibbuild = "false" ]; then
-	echo "Removing qib from  Makefile ($tardir/Makefile)"
-	sed -i "s/ib_qib\///g"  $tardir/Makefile
 fi
 
 DEFAULT_KERNEL_VERSION=$(uname -r)
