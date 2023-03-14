@@ -194,7 +194,6 @@ usage:
 
 Options:
 
--G         - Enable building a GPU Direct package
 -S srcdir  - fetch source directly from a specified directory
 
 -w dirname - work directory, defaults to a mktemp directory
@@ -202,7 +201,6 @@ Options:
 EOL
 }
 
-gpubuild="false"
 srcdir=""
 workdir=""
 filedir=""
@@ -210,8 +208,6 @@ distro=""
 distro_dir=""
 while getopts ":GAS:hu:w:" opt; do
     	case "$opt" in
-	G)	gpubuild="true"
-		;;
 	S)	srcdir="$OPTARG"
 		[ ! -e "$srcdir" ] && echo "srcdir $srcdir not found" && exit 1
 		srcdir=$(readlink -f "$srcdir")
@@ -242,11 +238,6 @@ elif [[ $ID == "sles" ]]; then
 	fi
 fi
 
-
-if [ $gpubuild = 'true' ]; then
-	echo "GPU Direct enabled build"
-fi
-
 # create final version of the variables
 if [ -n "$workdir" ]; then
 	mkdir -p "$workdir" || exit 1
@@ -257,20 +248,6 @@ fi
 
 distro=$ID
 echo "distro = $distro"
-
-if [ $gpubuild = 'true' ]; then
-        files_to_copy[1]+="
-	drivers/infiniband/hw/hfi1/gdr_ops.c
-	drivers/infiniband/hw/hfi1/gdr_ops.h
-	drivers/infiniband/hw/hfi1/trace_gpu.h
-	drivers/infiniband/hw/hfi1/gpu.c
-	drivers/infiniband/hw/hfi1/gpu.h
-	drivers/infiniband/hw/hfi1/user_exp_rcv_gpu.c
-	drivers/infiniband/hw/hfi1/user_exp_rcv_gpu.h
-	drivers/infiniband/hw/hfi1/user_sdma_gpu.c
-	drivers/infiniband/hw/hfi1/user_sdma_gpu.h
-        "
-fi
 
 # configure the file dir
 filedir=$srcdir/files
@@ -289,21 +266,13 @@ echo "Working in $workdir"
 # create the Makefiles
 echo "Creating Makefile ($tardir/Makefile)"
 
-if [ $gpubuild = 'true' ]; then
-cp $filedir/Makefile.top.gpu $tardir/Makefile
-else
 cp $filedir/Makefile.top $tardir/Makefile
-fi
 
 echo "Creating Makefile ($tardir/rdmavt/Makefile)"
 cp $filedir/Makefile.rdmavt $tardir/rdmavt/Makefile
 
 echo "Creating Makefile ($tardir/hfi1/Makefile)"
-if [ $gpubuild = 'true' ]; then
-cp $filedir/Makefile.hfi.gpu $tardir/hfi1/Makefile
-else
 cp $filedir/Makefile.hfi $tardir/hfi1/Makefile
-fi
 
 DEFAULT_KERNEL_VERSION=$(uname -r)
 
@@ -317,9 +286,6 @@ rpmrelease=$(git rev-list "WFR_driver_first..HEAD" | wc -l)
 echo "wfr-linux-devel build"
 # Addition still necessary?
 rpmrelease=$((rpmrelease + 1400))
-if [ $gpubuild = 'true' ]; then
-	rpmrelease+="cuda"
-fi
 echo "rpmrelease = $rpmrelease"
 
 echo "Setting up RPM build area"
