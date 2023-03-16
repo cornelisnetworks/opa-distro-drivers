@@ -281,13 +281,9 @@ if [ "$DEFAULT_KERNEL_VERSION" == "" ]; then
 	exit 1
 fi
 
+rpmrelease=`git rev-list --count HEAD`
 
-rpmrelease=$(git rev-list "WFR_driver_first..HEAD" | wc -l)
-echo "wfr-linux-devel build"
-# Addition still necessary?
-rpmrelease=$((rpmrelease + 1400))
 echo "rpmrelease = $rpmrelease"
-
 echo "Setting up RPM build area"
 mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
