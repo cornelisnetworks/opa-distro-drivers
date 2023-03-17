@@ -20,4 +20,8 @@ clean:
 	$(MAKE) -C $(KDIR) M=$$PWD/drivers/infiniband/sw/rdmavt clean
 	$(MAKE) -C $(KDIR) M=$$PWD/drivers/infiniband/hw/hfi1 clean
 
+dist:
+	./do-update-makerpm.sh -S ${PWD} -w ${PWD}/tmp && cd tmp/rpmbuild  && rpmbuild --rebuild --define "_topdir ${PWD}/tmp" --nodeps SRPMS/*.src.rpm
 
+distclean: clean
+	rm -rf tmp
