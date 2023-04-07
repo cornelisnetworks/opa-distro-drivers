@@ -207,7 +207,7 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 
 static inline struct mm_struct *mm_from_sdma_node(struct sdma_mmu_node *node)
 {
-	return node->rb.handler->mm;
+	return node->rb.handler->mn._rh->mm;
 }
 
 #endif /* _HFI1_USER_SDMA_H */
