@@ -48,12 +48,14 @@ int hfi1_mmu_rb_register(void *ops_arg,
 			 struct mmu_rb_handler **handler)
 {
 	struct mmu_rb_handler *h;
+	void *free_ptr;
 	int ret;
 
-	h = kzalloc(sizeof(*h), GFP_KERNEL);
-	if (!h)
+	free_ptr = kzalloc(sizeof(*h) + cache_line_size() - 1, GFP_KERNEL);
+	if (!free_ptr)
 		return -ENOMEM;
 
+	h = PTR_ALIGN(free_ptr, cache_line_size());
 	h->root = RB_ROOT_CACHED;
 	h->ops = ops;
 	h->ops_arg = ops_arg;
@@ -64,14 +66,15 @@ int hfi1_mmu_rb_register(void *ops_arg,
 	INIT_LIST_HEAD(&h->del_list);
 	INIT_LIST_HEAD(&h->lru_list);
 	h->wq = wq;
+	h->free_ptr = free_ptr;
 
 	ret = mmu_notifier_register(&h->mn, current->mm);
 	if (ret) {
-		kfree(h);
+		kfree(free_ptr);
 		return ret;
 	}
 
-	h->mm = current->mm;
+	h->mn._rh->mm = current->mm;
 	*handler = h;
 	return 0;
 }
@@ -84,10 +87,10 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	struct list_head del_list;
 
 	/* Prevent freeing of mm until we are completely finished. */
-	mmgrab(handler->mm);
+	mmgrab(handler->mn._rh->mm);
 
 	/* Unregister first so we don't get any more notifications. */
-	mmu_notifier_unregister(&handler->mn, handler->mm);
+	mmu_notifier_unregister(&handler->mn, handler->mn._rh->mm);
 
 	/*
 	 * Make sure the wq delete handler is finished running.  It will not
@@ -109,9 +112,9 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	do_remove(handler, &del_list);
 
 	/* Now the mm may be freed. */
-	mmdrop(handler->mm);
+	mmdrop(handler->mn._rh->mm);
 
-	kfree(handler);
+	kfree(handler->free_ptr);
 }
 
 int hfi1_mmu_rb_insert(struct mmu_rb_handler *handler,
@@ -123,7 +126,7 @@ int hfi1_mmu_rb_insert(struct mmu_rb_handler *handler,
 
 	trace_hfi1_mmu_rb_insert(mnode->addr, mnode->len);
 
-	if (current->mm != handler->mm)
+	if (current->mm != handler->mn._rh->mm)
 		return -EPERM;
 
 	spin_lock_irqsave(&handler->lock, flags);
@@ -190,7 +193,7 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg)
 	unsigned long flags;
 	bool stop = false;
 
-	if (current->mm != handler->mm)
+	if (current->mm != handler->mn._rh->mm)
 		return;
 
 	INIT_LIST_HEAD(&del_list);
