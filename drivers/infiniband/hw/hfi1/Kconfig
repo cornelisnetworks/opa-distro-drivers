@@ -28,3 +28,10 @@ config HFI1_NVIDIA
 	help
 	  Build hfi1 NVIDIA GPU memory-pinning code for user_sdma. Requires
 	  NVIDIA proprietary driver header files.
+config HFI1_AMD
+	bool "Build AMD memory-pinning code"
+	depends on INFINIBAND_HFI1
+	default n
+	help
+	  Build hfi1 AMD GPU memory-pinning code for user_sdma. Requires AMD
+	  ROCk out-of-tree driver header files.
