@@ -1383,6 +1383,9 @@ static int __init hfi1_mod_init(void)
 	int ret;
 
 	register_system_pinning_interface();
+#ifdef CONFIG_HFI1_NVIDIA
+	register_nvidia_pinning_interface();
+#endif
 
 	ret = dev_init();
 	if (ret)
@@ -1479,6 +1482,9 @@ static void __exit hfi1_mod_cleanup(void)
 	dev_cleanup();
 
 	deregister_system_pinning_interface();
+#ifdef CONFIG_HFI1_NVIDIA
+	deregister_nvidia_pinning_interface();
+#endif
 }
 
 module_exit(hfi1_mod_cleanup);
