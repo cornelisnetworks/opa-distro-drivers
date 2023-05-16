@@ -51,6 +51,11 @@ void deregister_pinning_interface(unsigned int type);
 void register_system_pinning_interface(void);
 void deregister_system_pinning_interface(void);
 
+#ifdef CONFIG_HFI1_NVIDIA
+void register_nvidia_pinning_interface(void);
+void deregister_nvidia_pinning_interface(void);
+#endif
+
 int init_pinning_interfaces(struct hfi1_user_sdma_pkt_q *pq);
 void free_pinning_interfaces(struct hfi1_user_sdma_pkt_q *pq);
 
@@ -69,5 +74,9 @@ static inline int add_to_sdma_packet(unsigned int type,
 	return pinning_interfaces[type].add_to_sdma_packet(req, tx, iovec,
 							   pkt_data_remaining);
 }
+
+#define PIN_PQ_DBG(pq, fmt, ...)					\
+	hfi1_cdbg(SDMA, "[%u:%u:%u] " fmt, (pq)->dd->unit,		\
+		  (pq)->ctxt, (pq)->subctxt, ##__VA_ARGS__)
 
 #endif /* _HFI1_PINNING_H */
