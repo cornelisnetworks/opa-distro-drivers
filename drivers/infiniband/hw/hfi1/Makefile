@@ -77,3 +77,13 @@ NVIDIA_DRIVER_SOURCE=/usr/src/nvidia-$(NVIDIA_VERSION)
 endif
 CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
 endif
+
+ifdef CONFIG_HFI1_AMD
+ifndef AMDGPU_DRIVER_SOURCE
+AMDGPU_DRIVER_SOURCE := $(shell rpm -ql amdgpu-dkms | grep -E '/usr/src/amdgpu-[^/]+/include/drm/amd_rdma.h$$' | head -n1)
+AMDGPU_DRIVER_SOURCE := $(subst /include/drm/amd_rdma.h,,$(AMDGPU_DRIVER_SOURCE))
+endif
+endif
+hfi1-$(CONFIG_HFI1_AMD) += pin_amd.o
+ccflags-$(CONFIG_HFI1_AMD) += -I$(AMDGPU_DRIVER_SOURCE)/include
+ccflags-$(CONFIG_HFI1_AMD) += -DCONFIG_HFI1_AMD
