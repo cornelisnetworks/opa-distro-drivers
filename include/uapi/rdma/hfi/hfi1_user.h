@@ -237,6 +237,7 @@ struct sdma_req_info {
 	(sizeof(__u64) * 8 / HFI1_MEMINFO_TYPE_ENTRY_BITS)
 
 #define HFI1_MEMINFO_TYPE_SYSTEM 0
+#define HFI1_MEMINFO_TYPE_NVIDIA 3
 
 struct sdma_req_meminfo {
 	/*
