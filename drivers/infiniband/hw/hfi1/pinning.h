@@ -51,6 +51,11 @@ void deregister_pinning_interface(unsigned int type);
 void register_system_pinning_interface(void);
 void deregister_system_pinning_interface(void);
 
+#ifdef CONFIG_HFI1_AMD
+void register_amd_pinning_interface(void);
+void deregister_amd_pinning_interface(void);
+#endif
+
 #ifdef CONFIG_HFI1_NVIDIA
 void register_nvidia_pinning_interface(void);
 void deregister_nvidia_pinning_interface(void);
