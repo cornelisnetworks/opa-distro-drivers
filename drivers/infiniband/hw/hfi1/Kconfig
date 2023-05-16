@@ -21,3 +21,10 @@ config SDMA_VERBOSITY
 	help
 	This is a configuration flag to enable verbose
 	SDMA debug
+config HFI1_NVIDIA
+	bool "Build NVIDIA memory-pinning code"
+	depends on INFINIBAND_HFI1
+	default n
+	help
+	  Build hfi1 NVIDIA GPU memory-pinning code for user_sdma. Requires
+	  NVIDIA proprietary driver header files.
