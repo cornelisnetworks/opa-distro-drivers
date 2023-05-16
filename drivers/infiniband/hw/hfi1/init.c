@@ -1383,6 +1383,9 @@ static int __init hfi1_mod_init(void)
 	int ret;
 
 	register_system_pinning_interface();
+#ifdef CONFIG_HFI1_AMD
+	register_amd_pinning_interface();
+#endif
 #ifdef CONFIG_HFI1_NVIDIA
 	register_nvidia_pinning_interface();
 #endif
@@ -1482,6 +1485,9 @@ static void __exit hfi1_mod_cleanup(void)
 	dev_cleanup();
 
 	deregister_system_pinning_interface();
+#ifdef CONFIG_HFI1_AMD
+	deregister_amd_pinning_interface();
+#endif
 #ifdef CONFIG_HFI1_NVIDIA
 	deregister_nvidia_pinning_interface();
 #endif
