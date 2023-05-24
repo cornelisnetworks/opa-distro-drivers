@@ -44,22 +44,29 @@ if [[ $? -ne 0 ]]; then
 fi
 
 echo "Uncompressing kernel source..."
+name=""
+new_name=""
 unxz linux-*.tar.xz
 if [[ $? -ne 0 ]]; then
-	echo "Could not unxz kernel"
-	exit 1
+	echo "xz failed, trying gunzip"
+	tar xvzf linux.tar.gz
+	if [[ $? -ne 0 ]]; then
+		echo "Could not gunzip kernel"
+		exit 1
+	fi
+	new_name="linux"
+else
+	echo "Untarring kernel source..."
+	tar xf linux-*.tar
+	if [[ $? -ne 0 ]]; then
+		echo "Could not untar kernel"
+		exit 1
+	fi
+	str="linux-*.tar"
+	name=`echo $str`
+	new_name=${name%.tar}
 fi
-
-echo "Untarring kernel source..."
-tar xf linux-*.tar
-if [[ $? -ne 0 ]]; then
-	echo "Could not untar kernel"
-	exit 1
-fi
-
-str="linux-*.tar"
-name=`echo $str`
-new_name=${name%.tar}
+	
 
 kdir=$bdir/$new_name
 
