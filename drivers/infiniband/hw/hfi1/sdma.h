@@ -761,7 +761,10 @@ static inline int sdma_txadd_daddr(
 	struct hfi1_devdata *dd,
 	struct sdma_txreq *tx,
 	dma_addr_t addr,
-	u16 len)
+	u16 len,
+	void *pinning_ctx,
+	void (*ctx_get)(void *),
+	void (*ctx_put)(void *))
 {
 	int rval;
 
@@ -773,7 +776,7 @@ static inline int sdma_txadd_daddr(
 	}
 
 	return _sdma_txadd_daddr(dd, SDMA_MAP_NONE, tx, addr, len,
-				 NULL, NULL, NULL);
+				 pinning_ctx, ctx_get, ctx_put);
 }
 
 /**
