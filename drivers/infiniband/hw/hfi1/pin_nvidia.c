@@ -17,6 +17,8 @@
 
 #include <nvidia/nv-p2p.h>
 
+MODULE_SOFTDEP("pre: nvidia");
+
 /*
  * Estimate of the maximum number of pin caches that will be established in
  * the system for a single GPU.  The cap on pin cache size is set to
