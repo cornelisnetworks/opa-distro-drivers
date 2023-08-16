@@ -181,6 +181,7 @@ struct hfi1_ctxtdata {
 	struct send_context *sc;
 	/* per context recv functions */
 	const rhf_rcv_function_ptr *rhf_rcv_function_map;
+	const rhf_rcv_function_ptr *save_rhf_rcv_function_map;
 	/*
 	 * The interrupt handler for a particular receive context can vary
 	 * throughout it's lifetime. This is not a lock protected data member so
@@ -485,6 +486,26 @@ static inline u8 hfi1_16B_bth_get_pad(struct ib_other_headers *ohdr)
 	return (u8)((be32_to_cpu(ohdr->bth[0]) >> IB_BTH_PAD_SHIFT) &
 		   OPA_16B_BTH_PAD_MASK);
 }
+
+/*
+ *  * Private data for snoop/capture support.
+ */
+struct hfi1_snoop_data {
+	int mode_flag;
+	struct cdev cdev;
+	struct device *class_dev;
+	/* protect snoop data */
+	spinlock_t snoop_lock;
+	struct list_head queue;
+	wait_queue_head_t waitq;
+	void *filter_value;
+	int (*filter_callback)(void *hdr, void *data, void *value);
+	u64 dcc_cfg; /* saved value of DCC Cfg register */
+};
+
+/* snoop mode_flag values */
+#define HFI1_PORT_SNOOP_MODE     1U
+#define HFI1_PORT_CAPTURE_MODE   2U
 
 /*
  * 16B Management
@@ -1253,6 +1274,8 @@ struct hfi1_devdata {
 	char *portcntrnames;
 	size_t portcntrnameslen;
 
+	struct hfi1_snoop_data hfi1_snoop;
+
 	struct err_info_rcvport err_info_rcvport;
 	struct err_info_constraint err_info_rcv_constraint;
 	struct err_info_constraint err_info_xmit_constraint;
@@ -1413,6 +1436,8 @@ static inline unsigned long uctxt_offset(struct hfi1_ctxtdata *uctxt)
 }
 
 int hfi1_init(struct hfi1_devdata *dd, int reinit);
+extern unsigned int snoop_drop_send;
+extern unsigned int snoop_force_capture;
 int hfi1_count_active_units(void);
 
 int hfi1_diag_add(struct hfi1_devdata *dd);
@@ -1897,6 +1922,15 @@ void set_up_vl15(struct hfi1_devdata *dd, u16 vl15buf);
 void reset_link_credits(struct hfi1_devdata *dd);
 void assign_remote_cm_au_table(struct hfi1_devdata *dd, u8 vcu);
 
+void hfi1_snoop_init(struct hfi1_devdata *dd);
+void  snoop_recv_handler(struct hfi1_packet *packet);
+int snoop_send_dma_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
+			   u64 pbc);
+int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
+			   u64 pbc);
+void snoop_inline_pio_send(struct hfi1_devdata *dd, struct pio_buf *pbuf,
+			   u64 pbc, const void *from, size_t count);
+
 int set_buffer_control(struct hfi1_pportdata *ppd, struct buffer_control *bc);
 
 static inline struct hfi1_devdata *dd_from_ppd(struct hfi1_pportdata *ppd)
@@ -2204,6 +2238,9 @@ extern struct mutex hfi1_mutex;
 #define DRIVER_NAME		"hfi1"
 #define HFI1_USER_MINOR_BASE     0
 #define HFI1_TRACE_MINOR         127
+#define HFI1_DIAGPKT_MINOR       128
+#define HFI1_DIAG_MINOR_BASE     129
+#define HFI1_SNOOP_CAPTURE_BASE  200
 #define HFI1_NMINORS             255
 
 #define PCI_VENDOR_ID_INTEL 0x8086
@@ -2224,8 +2261,12 @@ static inline u64 hfi1_pkt_default_send_ctxt_mask(struct hfi1_devdata *dd,
 {
 	u64 base_sc_integrity;
 
-	/* No integrity checks if HFI1_CAP_NO_INTEGRITY is set */
-	if (HFI1_CAP_IS_KSET(NO_INTEGRITY))
+	/*
+	 * No integrity checks if HFI1_CAP_NO_INTEGRITY is set
+	 * or driver is snooping
+	 */
+	if (HFI1_CAP_IS_KSET(NO_INTEGRITY) ||
+	    (dd->hfi1_snoop.mode_flag & HFI1_PORT_SNOOP_MODE))
 		return 0;
 
 	base_sc_integrity =

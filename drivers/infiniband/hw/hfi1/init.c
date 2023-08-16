@@ -1218,6 +1218,7 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 						     nports);
 	if (!dd)
 		return ERR_PTR(-ENOMEM);
+	hfi1_snoop_init(dd);
 	dd->num_pports = nports;
 	dd->pport = (struct hfi1_pportdata *)(dd + 1);
 	dd->pcidev = pdev;
