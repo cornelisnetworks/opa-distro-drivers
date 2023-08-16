@@ -54,6 +54,7 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/debugfs.h
 	drivers/infiniband/hw/hfi1/device.c
 	drivers/infiniband/hw/hfi1/device.h
+	drivers/infiniband/hw/hfi1/diag.c
 	drivers/infiniband/hw/hfi1/driver.c
 	drivers/infiniband/hw/hfi1/efivar.c
 	drivers/infiniband/hw/hfi1/efivar.h
