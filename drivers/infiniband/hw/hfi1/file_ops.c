@@ -1703,6 +1703,7 @@ static int user_add(struct hfi1_devdata *dd)
  */
 int hfi1_device_create(struct hfi1_devdata *dd)
 {
+	hfi1_diag_add(dd);
 	return user_add(dd);
 }
 
