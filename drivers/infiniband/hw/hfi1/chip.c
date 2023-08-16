@@ -6423,6 +6423,17 @@ void set_up_vl15(struct hfi1_devdata *dd, u16 vl15buf)
 
 	write_csr(dd, SEND_CM_CREDIT_VL15, (u64)vl15buf
 		  << SEND_CM_CREDIT_VL15_DEDICATED_LIMIT_VL_SHIFT);
+
+	if (unlikely(dd->hfi1_snoop.mode_flag == HFI1_PORT_SNOOP_MODE)) {
+		write_csr(dd, SEND_CM_CREDIT_VL15, (u64)(vl15buf >> 1)
+		    << SEND_CM_CREDIT_VL15_DEDICATED_LIMIT_VL_SHIFT);
+		write_csr(dd, SEND_CM_CREDIT_VL, (u64)(vl15buf >> 1)
+		    << SEND_CM_CREDIT_VL_DEDICATED_LIMIT_VL_SHIFT);
+	} else {
+		write_csr(dd, SEND_CM_CREDIT_VL15, (u64)vl15buf
+			  << SEND_CM_CREDIT_VL15_DEDICATED_LIMIT_VL_SHIFT);
+	}
+
 }
 
 /*
@@ -10179,6 +10190,9 @@ static void set_lidlmc(struct hfi1_pportdata *ppd)
 	 * 9B packets being sent out for large lids.
 	 */
 	lid = (ppd->lid >= be16_to_cpu(IB_MULTICAST_LID_BASE)) ? 0 : ppd->lid;
+	if (dd->hfi1_snoop.mode_flag)
+		dd_dev_info(dd, "Set lid/lmc while snooping");
+
 	c1 &= ~(DCC_CFG_PORT_CONFIG1_TARGET_DLID_SMASK
 		| DCC_CFG_PORT_CONFIG1_DLID_MASK_SMASK);
 	c1 |= ((lid & DCC_CFG_PORT_CONFIG1_TARGET_DLID_MASK)
