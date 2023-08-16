@@ -13,6 +13,7 @@ hfi1-y := \
 	aspm.o \
 	chip.o \
 	device.o \
+	diag.o \
 	driver.o \
 	efivar.o \
 	eprom.o \
