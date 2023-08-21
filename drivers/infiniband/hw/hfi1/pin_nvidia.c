@@ -4,7 +4,6 @@
  */
 
 #include <linux/types.h>
-#include <linux/hashtable.h>
 #include <linux/slab.h>
 
 #include "hfi.h"
@@ -12,10 +11,9 @@
 #include "device.h"
 #include "pinning.h"
 #include "sdma.h"
+#include "pin_nvidia.h"
 #include "user_sdma.h"
 #include "trace.h"
-
-#include <nvidia/nv-p2p.h>
 
 MODULE_SOFTDEP("pre: nvidia");
 
@@ -55,10 +53,6 @@ static unsigned long nvidia_cache_size = 2 * 1024;
 module_param(nvidia_cache_size, ulong, 0644);
 MODULE_PARM_DESC(nvidia_cache_size, "Per-context Nvidia pin cache size limit (in MB)");
 
-#define NVIDIA_MAX_DEVICES 16
-#define NVIDIA_DEVICE_HASH_OVERSUBSCRIBE 2
-#define NVIDIA_DEVICE_HASH_BITS ilog2(NVIDIA_MAX_DEVICES * NVIDIA_DEVICE_HASH_OVERSUBSCRIBE)
-
 /*
  * The Nvidia documentation (https://docs.nvidia.com/cuda/gpudirect-rdma/index.html)
  * indicates that addresses used in pinning should be rounded to 64k boundaries.
@@ -88,61 +82,6 @@ static struct nvidia_rdma_interface {
 			 struct nvidia_p2p_page_table **page_table,
 			 void (*free_callback)(void *), void *data);
 } rdma_interface = { 0 };
-
-struct nvidia_pq_state {
-	/* on its own cacheline */
-	spinlock_t lock; /* protects num_pintrees and pintree_hash */
-
-	/* new cacheline starts here */
-	struct hfi1_user_sdma_pkt_q *pq ____cacheline_aligned_in_smp;
-	struct pci_dev *hfi_dev;
-	unsigned int num_pintrees;
-	DECLARE_HASHTABLE(pintree_hash, NVIDIA_DEVICE_HASH_BITS);
-};
-
-struct nvidia_pintree {
-	/* on its own cacheline */
-	spinlock_t lock;
-
-	/* new cacheline starts here */
-	u32 device_id ____cacheline_aligned_in_smp;
-	struct hlist_node hash_node;
-	struct rb_root_cached root;
-	struct list_head lru_list;
-	struct nvidia_pq_state *state;
-	size_t size;
-	size_t hits;
-	size_t misses;
-	size_t internal_evictions;
-	size_t external_evictions;
-};
-
-struct nvidia_pintree_node {
-	struct interval_tree_node node;
-	struct list_head lru_node;
-	/* Needed to handle the driver calling back to free a pinned region. */
-	struct nvidia_pintree *pintree;
-	size_t size;
-
-	/*
-	 * These entries can't be combined because the table
-	 * and mapping fields can't be combined. There's little
-	 * value in building a list of these inside a combined node
-	 * as there's little shared, and in the pathological case,
-	 * it turns into one entry in the tree with all the pinnings
-	 * in an attached linked list.
-	 */
-	struct nvidia_p2p_page_table *page_table;
-	struct nvidia_p2p_dma_mapping *mapping;
-
-	atomic_t refcount;
-
-	/*
-	 * For debug only; should only be read in pintree->lock critical
-	 * section
-	 */
-	int inserted;
-};
 
 static void unpin_nvidia_node(struct nvidia_pintree_node *node);
 
@@ -373,6 +312,9 @@ static void remove_nvidia_pages(void *data)
 
 	/* Remove from the tree so that it's not found anymore. */
 	spin_lock(&pintree->lock);
+
+	trace_hfi1_nvidia_node_invalidated(node, 0);
+
 	found_node = interval_tree_iter_first(&pintree->root, node->node.start, node->node.last);
 	found = container_of(found_node, struct nvidia_pintree_node, node);
 	if (found == node) {
@@ -419,6 +361,7 @@ static int insert_nvidia_pinning(struct nvidia_pintree *pintree,
 		pintree->size += node->size;
 		node->inserted = 1;
 	}
+	trace_hfi1_nvidia_node_insert(node, result);
 	spin_unlock(&pintree->lock);
 	return result;
 }
@@ -458,6 +401,8 @@ static bool evict_nvidia_pinnings(struct nvidia_pintree *pintree, size_t goal, b
 	spin_lock(&pintree->lock);
 	list_for_each_entry_safe(cur, tmp, &pintree->lru_list, lru_node) {
 		if (atomic_read(&cur->refcount) == 0) {
+			trace_hfi1_nvidia_node_evict(cur, 0);
+
 			interval_tree_remove(&cur->node, &pintree->root);
 			list_move(&cur->lru_node, &evict_list);
 			(*stat)++;
@@ -490,15 +435,18 @@ static int pin_region(struct nvidia_pintree *pintree,
 retry:
 	result = rdma_interface.get_pages(/* uint64_t p2p_token */ 0, /* va_space_token */ 0,
 					  start, len, &node->page_table, remove_nvidia_pages, node);
+
 	if (result != 0) {
-		dd_dev_err(state->pq->dd, "nvidia get_pages failed with %d", result);
+		dd_dev_err(state->pq->dd, "node %p nvidia get_pages failed with %d",
+			   node, result);
 	} else {
 		result = rdma_interface.dma_map_pages(state->hfi_dev, node->page_table,
 						      &node->mapping);
 		if (result != 0) {
 			int r;
 
-			dd_dev_err(state->pq->dd, "nvidia map_pages failed with %d", result);
+			dd_dev_err(state->pq->dd, "node %p nvidia map_pages failed with %d",
+				   node, result);
 			r = rdma_interface.put_pages(/* uint64_t p2p_token */ 0,
 						     /* va_space_token */ 0,
 						     start, node->page_table);
@@ -510,6 +458,9 @@ retry:
 		if (evict_nvidia_pinnings(pintree, len, false))
 			goto retry;
 	}
+
+	trace_hfi1_nvidia_node_pin(node, start, last, result);
+
 	if (result != 0)
 		return result;
 
