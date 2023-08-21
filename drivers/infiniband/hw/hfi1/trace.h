@@ -22,3 +22,6 @@ __print_symbolic(etype,                         \
 #include "trace_mmu.h"
 #include "trace_iowait.h"
 #include "trace_tid.h"
+#ifdef CONFIG_HFI1_NVIDIA
+#include "trace_nvidia.h"
+#endif
