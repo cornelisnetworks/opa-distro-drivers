@@ -221,8 +221,6 @@ while getopts ":GAS:hu:w:" opt; do
     	esac
 done
 
-rm -f drivers/infiniband/ulp/ipoib
-
 if [[ $ID == "rhel" ]]; then
 	distro_dir=RHEL$VERSION_ID_MAJOR$VERSION_ID_MINOR
 	if [[ $VERSION_ID_MAJOR == "7" && $VERSION_ID_MINOR -ge 8 ]]; then
@@ -252,6 +250,8 @@ echo "distro = $distro"
 # configure the file dir
 filedir=$srcdir/files
 
+rpmrelease=`git rev-list --count HEAD`
+
 # after cd, where are we *really*
 cd -P "$workdir"; workdir=$(pwd)
 tardir=$workdir/stage
@@ -280,8 +280,6 @@ if [ "$DEFAULT_KERNEL_VERSION" == "" ]; then
 	echo "Unable to generate the kernel version"
 	exit 1
 fi
-
-rpmrelease=`git rev-list --count HEAD`
 
 echo "rpmrelease = $rpmrelease"
 echo "Setting up RPM build area"
