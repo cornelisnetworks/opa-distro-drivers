@@ -6,38 +6,34 @@ kernel.org drivers.
 All changes to build and other ancillary files should probably be checked into
 the master branch. This branch will then get checked out to start each distro.
 
-To create a new distro branch, start with master. Run the extract_distro_base.sh
-script. The reason to start with master is so that you can add any build
-updates/fixes to master branch. Then split off the actual distro code.
+To create a new distro branch: 
 
-Here is an example after running the extract_distro_base.sh script:
+1. start with checking out  master as something reflecting the distro.
+	git checkout -b rhel8.7 origin/master
 
-awfm-02 $ git status
-On branch master
-Your branch is up to date with 'origin/master'.
+2. Run the extract_distro_base.sh script.
+	The reason to start with master is so that you can add any build
+	updates/fixes to master branch. Then split off the actual distro
+	code.
 
-Changes not staged for commit:
-  (use "git add <file>..." to update what will be committed)
-  (use "git restore <file>..." to discard changes in working directory)
-        modified:   README.md
-        modified:   extract_distro_base.sh
+3. Make it build.
+	Add any necessary changes to be able to build the equivalent of
+	the distro driver.
 
-Untracked files:
-  (use "git add <file>..." to include in what will be committed)
-        build/
-        drivers/
-        include/
+	Make sure to cherry pick these changes back to the master branch!
 
-This shows I have modified 2 files and added build, drivers, include directories.
-I would first want to commit the changes to README.md and extract_distro_base.sh.
+4. Clean out temp build files
+	We do not want .o files check in!
 
-git add README.md
-git add extract_distro_base.sh
-git commit
+5. Add the include and drivers directories
+	git add drivers/*
+	git add include/*
+	git commit
 
-Then create a new branch.
+6. We now have an equivalent distro driver that builds. Time for "value add":
+	* patches charry picked from upstream that are needed but not in distro
+	* late breaking fixes
+	* Non-upstremable stuff. Get from previos distro branch:
+		* snoop/capture: "hfi1: Snoop/Capture"
+		* Nvidia GPU: "TBD"
 
-git checkout -b new_branch
-git add drivers/*
-git add include/*
-git commit
