@@ -13,62 +13,74 @@
 # Users of qib are advised to run the Truescale package or upstream kernel.org
 # kernel.
 
-srpm=$1
+distro=$1
+srpm=""
+gitr=""
+
 cdir=$PWD
 bdir="build"
 
-if [[ ! -e $srpm ]]; then
-	echo "srpm file invalid"
-	exit 1
-fi
 
-echo "Press ENTER to copy and extract $srpm to $bdir"
-read nothing
-
-echo "Copying $srpm to build directory"
-if [[ -d $bdir ]]; then
-	echo "$bdir directory already found please remove manually"
-	exit 1
-fi
-
-mkdir $bdir
-cp $srpm $bdir/
-
-echo "Extracting SRPM files..."
-cd $bdir
-fn=$(basename -- "$srpm")
-rpm2cpio $fn | cpio -idmv --no-absolute-filenames
-if [[ $? -ne 0 ]]; then
-	echo "Could not extract srcrpm"
-	exit 1
-fi
-
-echo "Uncompressing kernel source..."
-name=""
-new_name=""
-unxz linux-*.tar.xz
-if [[ $? -ne 0 ]]; then
-	echo "xz failed, trying gunzip"
-	tar xvzf linux.tar.gz
-	if [[ $? -ne 0 ]]; then
-		echo "Could not gunzip kernel"
+if [[ $distro == "RHEL" ]]; then
+	srpm=$2
+	if [[ ! -e $srpm ]]; then
+		echo "srpm file invalid"
 		exit 1
 	fi
-	new_name="linux"
-else
-	echo "Untarring kernel source..."
-	tar xf linux-*.tar
-	if [[ $? -ne 0 ]]; then
-		echo "Could not untar kernel"
+	echo "Press ENTER to copy and extract $srpm to $bdir"
+	read nothing
+
+	echo "Copying $srpm to build directory"
+	if [[ -d $bdir ]]; then
+		echo "$bdir directory already found please remove manually"
 		exit 1
 	fi
-	str="linux-*.tar"
-	name=`echo $str`
-	new_name=${name%.tar}
-fi
+
+	mkdir $bdir
+	cp $srpm $bdir/
+
+	echo "Extracting SRPM files..."
+	cd $bdir
+	fn=$(basename -- "$srpm")
+	rpm2cpio $fn | cpio -idmv --no-absolute-filenames
+	if [[ $? -ne 0 ]]; then
+		echo "Could not extract srcrpm"
+		exit 1
+	fi
+
+	echo "Uncompressing kernel source..."
+	name=""
+	new_name=""
+	unxz linux-*.tar.xz
+	if [[ $? -ne 0 ]]; then
+		echo "xz failed, trying gunzip"
+		tar xvzf linux.tar.gz
+		if [[ $? -ne 0 ]]; then
+			echo "Could not gunzip kernel"
+			exit 1
+		fi
+		new_name="linux"
+	else
+		echo "Untarring kernel source..."
+		tar xf linux-*.tar
+		if [[ $? -ne 0 ]]; then
+			echo "Could not untar kernel"
+			exit 1
+		fi
+		str="linux-*.tar"
+		name=`echo $str`
+		new_name=${name%.tar}
+	fi
 	
+	kdir=$bdir/$new_name
 
-kdir=$bdir/$new_name
+elif [[ $distro == "SLES" ]]; then
+	gitr=$2
+	cd $gitr
+	echo "going to copy:"
+	git describe
+	kdir=$gitr
+fi
 
 # Back to previous directory
 cd $cdir
