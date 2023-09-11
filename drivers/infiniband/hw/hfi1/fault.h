@@ -15,7 +15,7 @@
 #include "hfi.h"
 
 struct hfi1_ibdev;
-
+#undef CONFIG_FAULT_INJECTION
 #if defined(CONFIG_FAULT_INJECTION) && defined(CONFIG_FAULT_INJECTION_DEBUG_FS)
 struct fault {
 	struct fault_attr attr;
