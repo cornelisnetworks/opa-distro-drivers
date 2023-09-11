@@ -16,6 +16,9 @@ To create a new distro branch:
 	updates/fixes to master branch. Then split off the actual distro
 	code.
 
+	2a: SLES needs a patch to disable CONFIG_FAULT_INJECTION get it from a
+	previous SLES branch. It will be obvious which to cherry pick.
+
 3. Make it build.
 	Add any necessary changes to be able to build the equivalent of
 	the distro driver.
