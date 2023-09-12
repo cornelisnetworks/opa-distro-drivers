@@ -20,6 +20,21 @@ To create a new distro branch:
 	previous SLES branch. It will be obvious which to cherry pick.
 
 3. Make it build.
+
+	-----------
+	SLES PreReq
+	-----------
+	The SLES kernel install does not have the unifdef binary compiled like
+	it doe son RHEL. The utility is available for install but the
+	headers_install tool wants a local directory version. Thus you MUST as
+	root build unifdef. This is not going to be done by the script because
+	having a script required to be run as root and make changes is just a
+	bad idea.
+	As root:
+		cd /lib/modules/`uname -r`/source/scripts
+		gcc -o unifdef unifdef.c
+
+	
 	Add any necessary changes to be able to build the equivalent of
 	the distro driver.
 
