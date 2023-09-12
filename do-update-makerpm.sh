@@ -274,6 +274,10 @@ cp $filedir/Makefile.rdmavt $tardir/rdmavt/Makefile
 echo "Creating Makefile ($tardir/hfi1/Makefile)"
 cp $filedir/Makefile.hfi $tardir/hfi1/Makefile
 
+echo "Creating Symlink for spec files"
+rm -f $filedir/ifs-kernel-updates.spec
+ln -s $filedir/ifs-kernel-updates.spec.$distro $filedir/ifs-kernel-updates.spec
+
 DEFAULT_KERNEL_VERSION=$(uname -r)
 
 if [ "$DEFAULT_KERNEL_VERSION" == "" ]; then
@@ -360,6 +364,6 @@ cd rpmbuild
 rpmbuild -bs --define "_topdir $(pwd)" SPECS/${rpmname}.spec
 ret=$?
 
-rm -f drivers/infiniband/ulp/ipoib
+rm -f $filedir/ifs-kernel-updates.spec
 
 exit $ret
