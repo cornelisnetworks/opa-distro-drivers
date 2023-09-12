@@ -45,11 +45,14 @@ if [[ $test_arg == "test" ]]; then
 	#/tmp/tmpbuild/rpmbuild/RPMS/x86_64/kmod-ifs-kernel-updates-5.14.0_162.6.1.el9_1.x86_64-47.x86_64.rpm
 
 	source /etc/os-release
+	extra_dir=""
 	if [[ $ID == "rhel" ]]; then
 		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/kmod-ifs-kernel-updates*.rpm`
+		extra_dir="extra"
 		echo "Using RHEL RPM: $rpmname"
 	else #assume sles
 		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/ifs-kernel-updates-kmp-default*.rpm`
+		extra_dir="updates"
 		echo "Using SLES RPM: $rpmname"
 	fi
 
@@ -64,10 +67,10 @@ if [[ $test_arg == "test" ]]; then
 	cat /sys/module/rdmavt/srcversion
 	
 	echo "HFI from build:"
-	modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
+	modinfo lib/modules/`uname -r`/$extra_dir/ifs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
 	cat hfi1.srcversion
 	echo "RDMAVT from build:"
-	modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/rdmavt.ko | grep srcversion | awk '{print $2}' > rdmavt.srcversion
+	modinfo lib/modules/`uname -r`/$extra_dir/ifs-kernel-updates/rdmavt.ko | grep srcversion | awk '{print $2}' > rdmavt.srcversion
 	cat rdmavt.srcversion
 
 	echo "Removing drivers"
@@ -89,8 +92,8 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	echo "Time to load..."
-	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/rdmavt.ko 
-	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko 	
+	sudo insmod lib/modules/`uname -r`/$extra_dir/ifs-kernel-updates/rdmavt.ko 
+	sudo insmod lib/modules/`uname -r`/$extra_dir/ifs-kernel-updates/hfi1.ko 	
 
 	echo "Checking Srcversions:"
 	echo "HFI (current):"
@@ -118,7 +121,8 @@ if [[ $test_arg == "test" ]]; then
 
 	echo "Waiting 10 seconds for links to come up"
 	sleep 10
-	opainfo
+	#Look at dmesg output opainfo is not always installed by distros
+	sudo dmesg | tail -n 20
 
 	# Clean up
 	rm -rf lib
