@@ -10,17 +10,32 @@ ifneq ($(KERNELRELEASE),)
 
 NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi
 
+ifdef CONFIG_HFI1_NVIDIA
+ifndef NVIDIA_DRIVER_SOURCE
+NVIDIA_VERSION=$(shell rpm -q nvidia-driver | cut -d '-' -f 3)
+NVIDIA_DRIVER_SOURCE=/usr/src/nvidia-$(NVIDIA_VERSION)
+endif
+NOSTDINC_FLAGS += -I$(NVIDIA_DRIVER_SOURCE) -DCONFIG_HFI1_NVIDIA
+endif
+
 obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
 
-hfi1-y := affinity.o aspm.o  chip.o device.o driver.o efivar.o eprom.o \
-	file_ops.o firmware.o init.o intr.o mad.o mmu_rb.o pcie.o pio.o \
-	pio_copy.o platform.o qp.o qsfp.o rc.o ruc.o sdma.o sysfs.o trace.o \
+hfi1-y := affinity.o aspm.o  chip.o device.o driver.o diag.o efivar.o eprom.o \
+	file_ops.o firmware.o init.o intr.o mad.o mmu_rb.o pcie.o pio.o pin_system.o \
+	pinning.o pio_copy.o platform.o qp.o qsfp.o rc.o ruc.o sdma.o sysfs.o trace.o \
 	uc.o ud.o user_exp_rcv.o exp_rcv.o user_pages.o user_sdma.o verbs.o \
 	verbs_txreq.o vnic_main.o vnic_sdma.o tid_rdma.o opfn.o iowait.o \
 	ipoib_main.o ipoib_tx.o msix.o ipoib_rx.o netdev_rx.o
 hfi1-$(CONFIG_DEBUG_FS) += debugfs.o
 
 CFLAGS_trace.o = -I$(src)
+
+ifdef CONFIG_HFI1_NVIDIA
+hfi1-y += pin_nvidia.o
+CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
+CFLAGS_pin_nvidia.o += -DCONFIG_HFI1_NVIDIA
+endif
+
 ifdef MVERSION
 CFLAGS_driver.o = -DHFI1_DRIVER_VERSION_BASE=\"$(MVERSION)\"
 endif

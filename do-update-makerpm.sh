@@ -74,6 +74,11 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/mmu_rb.h
 	drivers/infiniband/hw/hfi1/opa_compat.h
 	drivers/infiniband/hw/hfi1/pcie.c
+	drivers/infiniband/hw/hfi1/pin_system.c
+	drivers/infiniband/hw/hfi1/pin_nvidia.c
+	drivers/infiniband/hw/hfi1/pin_nvidia.h
+	drivers/infiniband/hw/hfi1/pinning.c
+	drivers/infiniband/hw/hfi1/pinning.h
 	drivers/infiniband/hw/hfi1/pio.c
 	drivers/infiniband/hw/hfi1/pio_copy.c
 	drivers/infiniband/hw/hfi1/pio.h
@@ -99,6 +104,7 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/trace_rx.h
 	drivers/infiniband/hw/hfi1/trace_tx.h
 	drivers/infiniband/hw/hfi1/trace_mmu.h
+	drivers/infiniband/hw/hfi1/trace_nvidia.h
 	drivers/infiniband/hw/hfi1/uc.c
 	drivers/infiniband/hw/hfi1/ud.c
 	drivers/infiniband/hw/hfi1/user_exp_rcv.c
@@ -206,7 +212,8 @@ workdir=""
 filedir=""
 distro=""
 distro_dir=""
-while getopts ":GAS:hu:w:" opt; do
+gpu="n"
+while getopts "S:hw:G" opt; do
     	case "$opt" in
 	S)	srcdir="$OPTARG"
 		[ ! -e "$srcdir" ] && echo "srcdir $srcdir not found" && exit 1
@@ -217,7 +224,9 @@ while getopts ":GAS:hu:w:" opt; do
 		;;
 	w)	workdir="$OPTARG"
 		;;
-
+	G)	gpu="yes"
+		echo "User passed -G flag will do a GPU build"
+		;;
     	esac
 done
 
@@ -355,6 +364,12 @@ if [[ -n "$MVERSION" ]]; then
 	sed -i "s/mversion MVERSION/mversion \"${MVERSION}\"/" $workdir/rpmbuild/SPECS/$rpmname.spec
 else
 	sed -i "/mversion MVERSION/d" $workdir/rpmbuild/SPECS/$rpmname.spec
+fi
+
+if [[ $gpu == "yes" ]]; then
+	sed -i "s/CONFIG_HFI_NVIDIA/CONFIG_HFI1_NVIDIA=y/g" $workdir/rpmbuild/SPECS/$rpmname.spec
+else
+	sed -i "s/CONFIG_HFI_NVIDIA//g" $workdir/rpmbuild/SPECS/$rpmname.spec
 fi
 
 # moment of truth, run rpmbuild

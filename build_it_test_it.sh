@@ -3,29 +3,10 @@
 # This is meant to be run from a host running the matching branch that is
 # checked out.
 
-# Usage <script> [nobuild] [amd] [nvidia] [test|notest]
+#Takes 2 args that can be either: [nogpu|gpu|nobuild] [test|notest]
 
-build_arg=
-test_arg=
-use_nvidia=
-use_amd=
-build_arg=
-test_arg=
-
-while [[ $# -gt 0 ]] ; do
-	case $1 in
-	nobuild) build_arg=$1 ;;
-	nvidia) use_nvidia=y ;;
-	amd) use_amd=y ;;
-	test|notest) test_arg=$1 ;;
-	*)
-		echo "Unrecognized argument \"$1\"" >&2
-		echo "Usage: $0 [nobuild] [nvidia] [amd] [test|notest]" >&2
-		exit 2
-		;;
-	esac
-	shift
-done
+build_arg=$1
+test_arg=$2
 
 sdir=$PWD
 tmpdir="/tmp/tmpbuild"
@@ -33,18 +14,15 @@ tmpdir="/tmp/tmpbuild"
 export MVERSION="dev-build"
 
 if [[ $build_arg != "nobuild" ]]; then
-	rm -rf $tmpdir
+	rm -rf $tmpdir  && \
 	gpuarg=""
-
-	if [[ $use_nvidia = y ]] ; then
+	if [[ $build_arg == "gpu" ]]; then
 		gpuarg="-G"
+	else
+		gpuarg=""
 	fi
 
-	if [[ $use_amd = y ]] ; then
-		gpuarg="$gpuarg -A"
-	fi
-
-	echo "GPU build arguments are \"$gpuarg\""
+	echo "Going to pass build arg as $gpuarg"
 
 	./do-update-makerpm.sh -S ${PWD} -w $tmpdir $gpuarg
 	if [[ $? -ne 0 ]]; then
@@ -100,24 +78,13 @@ if [[ $test_arg == "test" ]]; then
 	modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
 	cat hfi1.srcversion
 
-	if [[ $use_nvidia = y ]]; then
+	if [[ $build_arg == "gpu" ]]; then
 		echo "Checking GPU support:"
 		modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep -i nvidia
 		if [[ $? -eq 0 ]]; then
-			echo "GPU build detected"
+			echo "GPU biuld detected"
 		else
 			echo "Did not find GPU enabled driver"
-			exit 1
-		fi
-	fi
-
-	if [[ $use_amd = y ]] ; then
-		echo "Checking AMD GPU support:"
-		modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep -E '\<(amd_|amdgpu)'
-		if [[ $? -eq 0 ]] ; then
-			echo "AMD features detected"
-		else
-			echo "Did not find AMD features"
 			exit 1
 		fi
 	fi
