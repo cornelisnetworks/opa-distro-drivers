@@ -10,7 +10,16 @@ ifneq ($(KERNELRELEASE),)
 
 NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi
 
+ifdef CONFIG_HFI1_NVIDIA
+ifndef NVIDIA_DRIVER_SOURCE
+NVIDIA_VERSION=$(shell ls /usr/src/kernel-modules | grep nvidia | tail -n 1)
+NVIDIA_DRIVER_SOURCE=/usr/src/kernel-modules/$(NVIDIA_VERSION)
+endif
+NOSTDINC_FLAGS += -I$(NVIDIA_DRIVER_SOURCE) -DCONFIG_HFI1_NVIDIA
+endif
+
 obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
+
 
 hfi1-y := affinity.o aspm.o  chip.o device.o driver.o diag.o efivar.o eprom.o \
 	file_ops.o firmware.o init.o intr.o mad.o mmu_rb.o pcie.o pio.o pin_system.o \
@@ -21,17 +30,15 @@ hfi1-y := affinity.o aspm.o  chip.o device.o driver.o diag.o efivar.o eprom.o \
 hfi1-$(CONFIG_DEBUG_FS) += debugfs.o
 
 CFLAGS_trace.o = -I$(src)
-ifdef MVERSION
-CFLAGS_driver.o = -DHFI1_DRIVER_VERSION_BASE=\"$(MVERSION)\"
-endif
 
 ifdef CONFIG_HFI1_NVIDIA
 hfi1-y += pin_nvidia.o
-ifndef NVIDIA_DRIVER_SOURCE
-NVIDIA_VERSION=$(shell rpm -q nvidia-driver | cut -d '-' -f 3)
-NVIDIA_DRIVER_SOURCE=/usr/src/nvidia-$(NVIDIA_VERSION)
-endif
 CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
+CFLAGS_pin_nvidia.o += -DCONFIG_HFI1_NVIDIA
+endif
+
+ifdef MVERSION
+CFLAGS_driver.o = -DHFI1_DRIVER_VERSION_BASE=\"$(MVERSION)\"
 endif
 
 else

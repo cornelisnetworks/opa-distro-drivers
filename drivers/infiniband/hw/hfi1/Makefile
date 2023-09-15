@@ -70,10 +70,10 @@ CFLAGS_driver.o = -DHFI_DRIVER_VERSION_BASE=\"$(MVERSION)\"
 endif
 
 ifdef CONFIG_HFI1_NVIDIA
-hfi1-y += pin_nvidia.o
 ifndef NVIDIA_DRIVER_SOURCE
 NVIDIA_VERSION=$(shell rpm -q nvidia-driver | cut -d '-' -f 3)
 NVIDIA_DRIVER_SOURCE=/usr/src/nvidia-$(NVIDIA_VERSION)
 endif
-CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
+hfi1-$(CONFIG_HFI1_NVIDIA) += pin_nvidia.o
+ccflags-$(CONFIG_HFI1_NVIDIA) += -I$(NVIDIA_DRIVER_SOURCE)
 endif
