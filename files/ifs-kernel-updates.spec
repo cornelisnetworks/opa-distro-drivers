@@ -79,6 +79,7 @@ fi
 echo "Kernel version is %kver"
 echo "Kernel source directory is \"%kbuild\""
 # Build
+
 for flavor in %flavors_to_build; do
 	for mod in %modlist; do
 		rm -rf $mod
@@ -86,9 +87,9 @@ for flavor in %flavors_to_build; do
 		done
 	echo rpm kernel_source %{kernel_source $flavor}
 	if [ -z "%mversion" ]; then
-		make -j 8 CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} M=$PWD
+		make -j 10 CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} CONFIG_HFI_NVIDIA M=$PWD
 	else
-		make -j 8 MVERSION=\"%mversion\" CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} M=$PWD
+		make -j 10  MVERSION=\"%mversion\" CONFIG_HFI_NVIDIA CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} M=$PWD
 	fi
 	for mod in %modlist; do
 		rm -rf "$mod"_$flavor
