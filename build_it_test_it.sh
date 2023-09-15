@@ -3,7 +3,7 @@
 # This is meant to be run from a host running the matching branch that is
 # checked out.
 
-#Takes 2 args that can be either: [build|nobuild] [test|notest]
+#Takes 2 args that can be either: [nogpu|gpu|nobuild] [test|notest]
 
 build_arg=$1
 test_arg=$2
@@ -11,9 +11,18 @@ test_arg=$2
 sdir=$PWD
 tmpdir="/tmp/tmpbuild"
 
-if [[ $build_arg == "build" ]]; then
+if [[ $build_arg != "nobuild" ]]; then
 	rm -rf $tmpdir  && \
-	./do-update-makerpm.sh -S ${PWD} -w $tmpdir
+	gpuarg=""
+	if [[ $build_arg == "gpu" ]]; then
+		gpuarg="-G"
+	else
+		gpuarg=""
+	fi
+
+	echo "Going to pass build arg as $gpuarg"
+
+	./do-update-makerpm.sh -S ${PWD} -w $tmpdir $gpuarg
 	if [[ $? -ne 0 ]]; then
 		echo "do-update-make-rpm failed!"
 		exit 1
@@ -39,7 +48,7 @@ if [[ $test_arg == "test" ]]; then
 	# SLES Names RPMS as follows:
 	#ifs-kernel-updates-devel-5.14.21_150500.53_default-29.x86_64.rpm
 	#ifs-kernel-updates-kmp-default-5.14.21_150500.53_default_k5.14.21_150500.53-29.x86_64.rpm
-	
+
 	#RHEL Names RPMS as follows:
 	#/tmp/tmpbuild/rpmbuild/RPMS/x86_64/ifs-kernel-updates-devel-5.14.0_162.6.1.el9_1.x86_64-47.x86_64.rpm
 	#/tmp/tmpbuild/rpmbuild/RPMS/x86_64/kmod-ifs-kernel-updates-5.14.0_162.6.1.el9_1.x86_64-47.x86_64.rpm
@@ -62,10 +71,22 @@ if [[ $test_arg == "test" ]]; then
 	cat /sys/module/hfi1/srcversion
 	echo "RDMAVT (current):"
 	cat /sys/module/rdmavt/srcversion
-	
+
 	echo "HFI from build:"
 	modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
 	cat hfi1.srcversion
+
+	if [[ $build_arg == "gpu" ]]; then
+		echo "Checking GPU support:"
+		modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep -i nvidia
+		if [[ $? -eq 0 ]]; then
+			echo "GPU biuld detected"
+		else
+			echo "Did not find GPU enabled driver"
+			exit 1
+		fi
+	fi
+
 	echo "RDMAVT from build:"
 	modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/rdmavt.ko | grep srcversion | awk '{print $2}' > rdmavt.srcversion
 	cat rdmavt.srcversion
@@ -89,8 +110,8 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	echo "Time to load..."
-	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/rdmavt.ko 
-	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko 	
+	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/rdmavt.ko
+	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko
 
 	echo "Checking Srcversions:"
 	echo "HFI (current):"
@@ -118,12 +139,14 @@ if [[ $test_arg == "test" ]]; then
 
 	echo "Waiting 10 seconds for links to come up"
 	sleep 10
-	opainfo
+
+	# opainfo would be good to call here but its not always installed
+	# isntead just cat the end of the dmesg
+	dmesg -d | tail -n 15
 
 	# Clean up
 	rm -rf lib
 	rm -rf etc
-
 
 	exit 0
 elif [[ $test_arg == "notest" ]]; then
