@@ -175,9 +175,8 @@ if [[ $test_arg == "test" ]]; then
 	echo "Waiting 10 seconds for links to come up"
 	sleep 10
 
-	# opainfo would be good to call here but its not always installed
-	# isntead just cat the end of the dmesg
-	dmesg -d | tail -n 15
+	#Look at dmesg output opainfo is not always installed by distros
+	sudo dmesg -d | tail -n 20
 
 	# Clean up
 	rm -rf lib
