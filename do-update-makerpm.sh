@@ -75,6 +75,7 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/mmu_rb.h
 	drivers/infiniband/hw/hfi1/opa_compat.h
 	drivers/infiniband/hw/hfi1/pcie.c
+	drivers/infiniband/hw/hfi1/pin_amd.c
 	drivers/infiniband/hw/hfi1/pin_system.c
 	drivers/infiniband/hw/hfi1/pin_nvidia.c
 	drivers/infiniband/hw/hfi1/pin_nvidia.h
@@ -196,7 +197,7 @@ function usage
 	cat <<EOL
 usage:
 	${0##*/} -h
-	${0##*/} [-G] [-w dirname]
+	${0##*/} [-G] [-A] [-w dirname]
 	${0##*/} -S srcdir [-w dirname]
 
 Options:
@@ -213,9 +214,10 @@ workdir=""
 filedir=""
 distro=""
 distro_dir=""
+build_amd=
 build_nvidia=
 
-while getopts "S:hw:G" opt; do
+while getopts "S:hw:GA" opt; do
     	case "$opt" in
 	S)	srcdir="$OPTARG"
 		[ ! -e "$srcdir" ] && echo "srcdir $srcdir not found" && exit 1
@@ -229,6 +231,10 @@ while getopts "S:hw:G" opt; do
 	G)
 		build_nvidia=y
 		echo "Will build with NVIDIA GPU support"
+		;;
+	A)
+		build_amd=y
+		echo "Will build with AMD GPU support"
 		;;
     	esac
 done
@@ -369,6 +375,12 @@ if [[ $build_nvidia = y ]]; then
 	sed -i "s/CONFIG_HFI_NVIDIA/CONFIG_HFI1_NVIDIA=y/g" $workdir/rpmbuild/SPECS/$rpmname.spec
 else
 	sed -i "s/CONFIG_HFI_NVIDIA//g" $workdir/rpmbuild/SPECS/$rpmname.spec
+fi
+
+if [[ $build_amd = y ]] ; then
+	sed -i "s/CONFIG_HFI_AMD/CONFIG_HFI1_AMD=y/g" $workdir/rpmbuild/SPECS/$rpmname.spec
+else
+	sed -i "s/CONFIG_HFI_AMD//g" $workdir/rpmbuild/SPECS/$rpmname.spec
 fi
 
 # moment of truth, run rpmbuild
