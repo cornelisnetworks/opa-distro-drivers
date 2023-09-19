@@ -213,7 +213,8 @@ workdir=""
 filedir=""
 distro=""
 distro_dir=""
-gpu="n"
+build_nvidia=
+
 while getopts "S:hw:G" opt; do
     	case "$opt" in
 	S)	srcdir="$OPTARG"
@@ -225,8 +226,9 @@ while getopts "S:hw:G" opt; do
 		;;
 	w)	workdir="$OPTARG"
 		;;
-	G)	gpu="yes"
-		echo "User passed -G flag will do a GPU build"
+	G)
+		build_nvidia=y
+		echo "Will build with NVIDIA GPU support"
 		;;
     	esac
 done
@@ -366,7 +368,7 @@ else
 	sed -i "/mversion MVERSION/d" $workdir/rpmbuild/SPECS/$rpmname.spec
 fi
 
-if [[ $gpu == "yes" ]]; then
+if [[ $build_nvidia = y ]]; then
 	sed -i "s/CONFIG_HFI_NVIDIA/CONFIG_HFI1_NVIDIA=y/g" $workdir/rpmbuild/SPECS/$rpmname.spec
 else
 	sed -i "s/CONFIG_HFI_NVIDIA//g" $workdir/rpmbuild/SPECS/$rpmname.spec
