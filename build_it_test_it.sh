@@ -3,10 +3,27 @@
 # This is meant to be run from a host running the matching branch that is
 # checked out.
 
-#Takes 2 args that can be either: [nogpu|gpu|nobuild] [test|notest]
+# Usage <script> [nobuild] [nvidia] [test|notest]
 
-build_arg=$1
-test_arg=$2
+build_arg=
+test_arg=
+use_nvidia=
+build_arg=
+test_arg=
+
+while [[ $# -gt 0 ]] ; do
+	case $1 in
+	nobuild) build_arg=$1 ;;
+	nvidia) use_nvidia=y ;;
+	test|notest) test_arg=$1 ;;
+	*)
+		echo "Unrecognized argument \"$1\"" >&2
+		echo "Usage: $0 [nobuild] [nvidia] [test|notest]" >&2
+		exit 2
+		;;
+	esac
+	shift
+done
 
 sdir=$PWD
 tmpdir="/tmp/tmpbuild"
@@ -14,15 +31,14 @@ tmpdir="/tmp/tmpbuild"
 export MVERSION="dev-build"
 
 if [[ $build_arg != "nobuild" ]]; then
-	rm -rf $tmpdir  && \
+	rm -rf $tmpdir
 	gpuarg=""
-	if [[ $build_arg == "gpu" ]]; then
+
+	if [[ $use_nvidia = y ]] ; then
 		gpuarg="-G"
-	else
-		gpuarg=""
 	fi
 
-	echo "Going to pass build arg as $gpuarg"
+	echo "GPU build arguments are \"$gpuarg\""
 
 	./do-update-makerpm.sh -S ${PWD} -w $tmpdir $gpuarg
 	if [[ $? -ne 0 ]]; then
@@ -81,7 +97,7 @@ if [[ $test_arg == "test" ]]; then
 	modinfo lib/modules/`uname -r`/$extra_dir/ifs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
 	cat hfi1.srcversion
 
-	if [[ $build_arg == "gpu" ]]; then
+	if [[ $use_nvidia = y ]]; then
 		echo "Checking GPU support:"
 		modinfo lib/modules/`uname -r`/$extra_dir/ifs-kernel-updates/hfi1.ko | grep -i nvidia
 		if [[ $? -eq 0 ]]; then
