@@ -3,11 +3,12 @@
 # This is meant to be run from a host running the matching branch that is
 # checked out.
 
-# Usage <script> [nobuild] [nvidia] [test|notest]
+# Usage <script> [nobuild] [amd] [nvidia] [test|notest]
 
 build_arg=
 test_arg=
 use_nvidia=
+use_amd=
 build_arg=
 test_arg=
 
@@ -15,10 +16,11 @@ while [[ $# -gt 0 ]] ; do
 	case $1 in
 	nobuild) build_arg=$1 ;;
 	nvidia) use_nvidia=y ;;
+	amd) use_amd=y ;;
 	test|notest) test_arg=$1 ;;
 	*)
 		echo "Unrecognized argument \"$1\"" >&2
-		echo "Usage: $0 [nobuild] [nvidia] [test|notest]" >&2
+		echo "Usage: $0 [nobuild] [nvidia] [amd] [test|notest]" >&2
 		exit 2
 		;;
 	esac
@@ -36,6 +38,10 @@ if [[ $build_arg != "nobuild" ]]; then
 
 	if [[ $use_nvidia = y ]] ; then
 		gpuarg="-G"
+	fi
+
+	if [[ $use_amd = y ]] ; then
+		gpuarg="$gpuarg -A"
 	fi
 
 	echo "GPU build arguments are \"$gpuarg\""
@@ -104,6 +110,17 @@ if [[ $test_arg == "test" ]]; then
 			echo "GPU build detected"
 		else
 			echo "Did not find GPU enabled driver"
+			exit 1
+		fi
+	fi
+
+	if [[ $use_amd = y ]] ; then
+		echo "Checking AMD GPU support:"
+		modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep -E '\<(amd_|amdgpu)'
+		if [[ $? -eq 0 ]] ; then
+			echo "AMD features detected"
+		else
+			echo "Did not find AMD features"
 			exit 1
 		fi
 	fi
