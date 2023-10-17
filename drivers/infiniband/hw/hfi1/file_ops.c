@@ -1716,6 +1716,7 @@ int hfi1_device_create(struct hfi1_devdata *dd)
  */
 void hfi1_device_remove(struct hfi1_devdata *dd)
 {
+	hfi1_diag_remove(dd);
 	user_remove(dd);
 }
 
