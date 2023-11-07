@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright(c) 2020 Cornelis Networks, Inc.
+ * Copyright(c) 2020-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015-2020 Intel Corporation.
  */
 
@@ -213,6 +213,7 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 		break;
 
 	case HFI1_IOCTL_TID_UPDATE:
+	case HFI1_IOCTL_TID_UPDATE_V3:
 		ret = user_exp_rcv_setup(fd, arg, _IOC_SIZE(cmd));
 		break;
 
@@ -1323,6 +1324,15 @@ static int get_base_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	return 0;
 }
 
+/*
+ * Require that hfi1_tid_info and hfi1_tid_info_v3 shared fields are the same.
+ */
+static_assert(offsetof(struct hfi1_tid_info, vaddr) == offsetof(struct hfi1_tid_info_v3, vaddr));
+static_assert(offsetof(struct hfi1_tid_info, tidlist) == offsetof(struct hfi1_tid_info_v3, tidlist));
+static_assert(offsetof(struct hfi1_tid_info, tidcnt) == offsetof(struct hfi1_tid_info_v3, tidcnt));
+static_assert(offsetof(struct hfi1_tid_info, length) == offsetof(struct hfi1_tid_info_v3, length));
+static_assert(offsetofend(struct hfi1_tid_info, length) == offsetofend(struct hfi1_tid_info_v3, length));
+
 /**
  * user_exp_rcv_setup - Set up the given tid rcv list
  * @fd: file data of the current driver instance
@@ -1337,13 +1347,18 @@ static int user_exp_rcv_setup(struct hfi1_filedata *fd, unsigned long arg,
 {
 	int ret;
 	unsigned long addr;
-	struct hfi1_tid_info tinfo;
+	/* Zero out new fields for backwards compatibility with hfi1_tid_info */
+	struct hfi1_tid_info_v3 tinfo = {0};
 
-	if (sizeof(tinfo) != len)
-		return -EINVAL;
-
-	if (copy_from_user(&tinfo, (void __user *)arg, (sizeof(tinfo))))
+	if (copy_struct_from_user(&tinfo, sizeof(tinfo), (void __user *)arg, len))
 		return -EFAULT;
+
+	/* Reserved .flags bits must be 0 */
+	if (tinfo.flags & HFI1_TID_UPDATE_V3_FLAGS_RESERVED_MASK)
+		return -EINVAL;
+	/* Reserved for now */
+	if (tinfo.context)
+		return -EINVAL;
 
 	ret = hfi1_user_exp_rcv_setup(fd, &tinfo);
 	if (!ret) {
@@ -1358,11 +1373,11 @@ static int user_exp_rcv_setup(struct hfi1_filedata *fd, unsigned long arg,
 
 		addr = arg + offsetof(struct hfi1_tid_info, length);
 		if (!ret && copy_to_user((void __user *)addr, &tinfo.length,
-				 sizeof(tinfo.length)))
+					 sizeof(tinfo.length)))
 			ret = -EFAULT;
 
 		if (ret)
-			hfi1_user_exp_rcv_invalid(fd, &tinfo);
+			hfi1_user_exp_rcv_invalid(fd, (struct hfi1_tid_info *)&tinfo);
 	}
 
 	return ret;
