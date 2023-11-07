@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause) */
 /*
+ * Copyright(c) 2024 Cornelis Networks, Inc.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -53,6 +54,10 @@
 #define _LINUX__HFI1_IOCTL_H
 #include <linux/types.h>
 
+#ifndef BIT
+#define BIT(nr) (((__u64)1) << (nr))
+#endif
+
 /*
  * This structure is passed to the driver to tell it where
  * user code buffers are, sizes, etc.   The offsets and sizes of the
@@ -105,6 +110,32 @@ struct hfi1_tid_info {
 	__u32 tidcnt;
 	/* length of transfer buffer programmed by this request */
 	__u32 length;
+};
+
+/* HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_BITS should be the same as HFI1_MEMINFO_TYPE_ENTRY_BITS */
+#define HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_BITS 4
+#define HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_MASK (BIT(HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_BITS) - 1)
+#define HFI1_TID_UPDATE_V3_FLAGS_RESERVED_MASK (~(__u64)(HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_MASK))
+
+struct hfi1_tid_info_v3 {
+	/* virtual address of first page in transfer */
+	__aligned_u64 vaddr;
+	/* pointer to tid array. this array is big enough */
+	__aligned_u64 tidlist;
+	/* number of tids programmed by this request */
+	__u32 tidcnt;
+	/* length of transfer buffer programmed by this request */
+	__u32 length;
+
+	/*
+	 * bits 0-3 memory_type
+	 *   memory_type=0 will always mean system memory
+	 *   See HFI1_MEMINFO_TYPE* defines
+	 * bits 4-63 reserved; must be 0
+	 */
+	__aligned_u64 flags;
+	/* Reserved; must be 0 */
+	__aligned_u64 context;
 };
 
 /*
