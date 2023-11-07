@@ -83,5 +83,6 @@
 #define HFI1_IOCTL_GET_VERS		_IOR(RDMA_IOCTL_MAGIC,  0xEE, int)
 /* Retrieve pin cache statistics */
 #define HFI1_IOCTL_PIN_STATS		_IOWR(RDMA_IOCTL_MAGIC, 0xEF, struct hfi1_pin_stats)
+#define HFI1_IOCTL_TID_UPDATE_V3	_IOWR(RDMA_IOCTL_MAGIC, 0xF0, struct hfi1_tid_info_v3)
 
 #endif /* RDMA_USER_IOCTL_H */
