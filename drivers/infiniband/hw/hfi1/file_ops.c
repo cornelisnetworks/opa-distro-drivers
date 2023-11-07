@@ -49,6 +49,10 @@ static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 static int get_base_info(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 static int user_exp_rcv_setup(struct hfi1_filedata *fd, unsigned long arg,
 			      u32 len);
+#ifdef NVIDIA_GPU_DIRECT
+static int user_exp_rcv_setup_v2(struct hfi1_filedata *fd, unsigned long arg,
+				 u32 len);
+#endif
 static int user_exp_rcv_clear(struct hfi1_filedata *fd, unsigned long arg,
 			      u32 len);
 static int user_exp_rcv_invalid(struct hfi1_filedata *fd, unsigned long arg,
@@ -216,7 +220,11 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 	case HFI1_IOCTL_TID_UPDATE_V3:
 		ret = user_exp_rcv_setup(fd, arg, _IOC_SIZE(cmd));
 		break;
-
+#ifdef NVIDIA_GPU_DIRECT
+	case HFI1_IOCTL_TID_UPDATE_V2:
+		ret = user_exp_rcv_setup_v2(fd, arg, _IOC_SIZE(cmd));
+		break;
+#endif
 	case HFI1_IOCTL_TID_FREE:
 		ret = user_exp_rcv_clear(fd, arg, _IOC_SIZE(cmd));
 		break;
@@ -1337,54 +1345,104 @@ static_assert(offsetof(struct hfi1_tid_info, length) == offsetof(struct hfi1_tid
 static_assert(offsetofend(struct hfi1_tid_info, length) == offsetofend(struct hfi1_tid_info_v3, length));
 
 /**
- * user_exp_rcv_setup - Set up the given tid rcv list
+ * _user_exp_rcv_setup - Set up the given tid rcv list
  * @fd: file data of the current driver instance
+ * @tinfo: already copied from userspace
  * @arg: ioctl argumnent for user space information
  * @len: length of data structure associated with ioctl command
+ * @allow_unaligned: when true, try to handle non-page-size multiple
+ *   (vaddr,length) in tidinfo from userspace.
  *
  * Wrapper to validate ioctl information before doing _rcv_setup.
  *
  */
-static int user_exp_rcv_setup(struct hfi1_filedata *fd, unsigned long arg,
-			      u32 len)
+static int _user_exp_rcv_setup(struct hfi1_filedata *fd, struct hfi1_tid_info_v3 *tinfo,
+			       unsigned long arg, u32 len, bool allow_unaligned)
 {
 	int ret;
 	unsigned long addr;
-	/* Zero out new fields for backwards compatibility with hfi1_tid_info */
-	struct hfi1_tid_info_v3 tinfo = {0};
-
-	if (copy_struct_from_user(&tinfo, sizeof(tinfo), (void __user *)arg, len))
-		return -EFAULT;
 
 	/* Reserved .flags bits must be 0 */
-	if (tinfo.flags & HFI1_TID_UPDATE_V3_FLAGS_RESERVED_MASK)
+	if (tinfo->flags & HFI1_TID_UPDATE_V3_FLAGS_RESERVED_MASK)
 		return -EINVAL;
 	/* Reserved for now */
-	if (tinfo.context)
+	if (tinfo->context)
 		return -EINVAL;
 
-	ret = hfi1_user_exp_rcv_setup(fd, &tinfo);
+	ret = hfi1_user_exp_rcv_setup(fd, tinfo, allow_unaligned);
 	if (!ret) {
 		/*
 		 * Copy the number of tidlist entries we used
 		 * and the length of the buffer we registered.
 		 */
 		addr = arg + offsetof(struct hfi1_tid_info, tidcnt);
-		if (copy_to_user((void __user *)addr, &tinfo.tidcnt,
-				 sizeof(tinfo.tidcnt)))
+		if (copy_to_user((void __user *)addr, &tinfo->tidcnt,
+				 sizeof(tinfo->tidcnt)))
 			ret = -EFAULT;
 
 		addr = arg + offsetof(struct hfi1_tid_info, length);
-		if (!ret && copy_to_user((void __user *)addr, &tinfo.length,
-					 sizeof(tinfo.length)))
+		if (!ret && copy_to_user((void __user *)addr, &tinfo->length,
+					 sizeof(tinfo->length)))
 			ret = -EFAULT;
 
 		if (ret)
-			hfi1_user_exp_rcv_invalid(fd, (struct hfi1_tid_info *)&tinfo);
+			hfi1_user_exp_rcv_invalid(fd, (struct hfi1_tid_info *)tinfo);
 	}
 
 	return ret;
 }
+
+/**
+ * Handles HFI1_IOCTL_TID_UPDATE and HFI1_IOCTL_TID_UPDATE_V3
+ */
+static int user_exp_rcv_setup(struct hfi1_filedata *fd, unsigned long arg,
+			      u32 len)
+{
+	struct hfi1_tid_info_v3 tinfo;
+
+	if (copy_struct_from_user(&tinfo, sizeof(tinfo), (void __user *)arg, len))
+		return -EFAULT;
+
+	return _user_exp_rcv_setup(fd, &tinfo, arg, len, false);
+}
+
+#ifdef NVIDIA_GPU_DIRECT
+
+/* Require that hfi1_tid_info_v2 is subset of hfi1_tid_info_v3 */
+static_assert(sizeof(struct hfi1_tid_info_v2) <= sizeof(struct hfi1_tid_info_v3));
+static_assert(offsetof(struct hfi1_tid_info_v2, flags) == offsetof(struct hfi1_tid_info_v3, flags));
+static_assert(offsetofend(struct hfi1_tid_info_v2, flags) <= offsetofend(struct hfi1_tid_info_v3, flags));
+
+/**
+ * Wrapper around _user_exp_rcv_setup() for HFI1_IOCTL_TID_UPDATE_V2.
+ */
+static int user_exp_rcv_setup_v2(struct hfi1_filedata *fd, unsigned long arg,
+				 u32 len)
+{
+	struct hfi1_tid_info_v3 tinfo;
+	struct hfi1_tid_info_v2 *tinfov2 = (struct hfi1_tid_info_v2 *)&tinfo;
+	int ret;
+
+	/*
+	 * offsetofend(struct hfi1_tid_info_v2,flags) <= offsetofend(struct hfi1_tid_info_v3,flags).
+	 * So copy_struct_from_user() is guaranteed to zero-fill everything
+	 * after struct hfi1_tid_info_v3.flags.
+	 */
+	ret = copy_struct_from_user(&tinfo, sizeof(tinfo), (void __user *)arg, len);
+	if (ret)
+		return ret;
+
+	/* Reserved .flags bits must be 0 */
+	if (tinfov2->flags & HFI1_TID_UPDATE_V2_FLAGS_RESERVED_MASK)
+		return -EINVAL;
+
+	/* Convert v2 .flags to v3 (.flags,.context) */
+	if ((tinfov2->flags & HFI1_TID_UPDATE_V2_FLAGS_GPU_MASK) == HFI1_BUF_GPU_MEM)
+		tinfo.flags = HFI1_MEMINFO_TYPE_NVIDIA;
+
+	return _user_exp_rcv_setup(fd, &tinfo, arg, len, true);
+}
+#endif
 
 /**
  * user_exp_rcv_clear - Clear the given tid rcv list
