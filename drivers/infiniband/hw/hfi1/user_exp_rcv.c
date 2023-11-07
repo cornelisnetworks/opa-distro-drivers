@@ -155,7 +155,7 @@ static struct tid_node_ops *get_nodeops(u16 type)
  * @return 0 on success, non-zero on failure.
  */
 static int create_user_buf(struct hfi1_filedata *fd, u16 memtype, struct hfi1_tid_info_v3 *tinfo,
-			   struct tid_user_buf **ubuf)
+			   bool allow_unaligned, struct tid_user_buf **ubuf)
 {
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct tid_user_buf_ops *ops;
@@ -169,7 +169,7 @@ static int create_user_buf(struct hfi1_filedata *fd, u16 memtype, struct hfi1_ti
 		return -EINVAL;
 
 	ret = ops->init(uctxt->expected_count, fd->use_mn, tinfo->vaddr,
-			tinfo->length, ubuf);
+			tinfo->length, allow_unaligned, ubuf);
 	if (ret)
 		return ret;
 
@@ -226,7 +226,8 @@ static int create_user_buf(struct hfi1_filedata *fd, u16 memtype, struct hfi1_ti
  *          used, move it to tid_full_list.
  */
 int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
-			    struct hfi1_tid_info_v3 *tinfo)
+			    struct hfi1_tid_info_v3 *tinfo,
+			    bool allow_unaligned)
 {
 	int ret = 0, need_group = 0, pinned;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
@@ -242,7 +243,7 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	u16 memtype = (tinfo->flags & HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_MASK);
 
 	trace_hfi1_exp_tid_update(uctxt->ctxt, fd->subctxt, tinfo);
-	ret = create_user_buf(fd, memtype, tinfo, &tidbuf);
+	ret = create_user_buf(fd, memtype, tinfo, allow_unaligned, &tidbuf);
 	if (ret)
 		return ret;
 

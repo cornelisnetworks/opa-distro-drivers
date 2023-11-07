@@ -230,8 +230,12 @@ static bool sys_cover_invalidate(struct mmu_interval_notifier *mni,
 
 static struct tid_user_buf_ops sys_bufops;
 
+/*
+ * System memory never honors @allow_unaligned.
+ */
 static int sys_user_buf_init(u16 expected_count, bool notify,
 			     unsigned long vaddr, unsigned long length,
+			     bool allow_unaligned,
 			     struct tid_user_buf **tbuf)
 {
 	struct system_tid_user_buf *sbuf;
