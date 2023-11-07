@@ -102,6 +102,7 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/trace.h
 	drivers/infiniband/hw/hfi1/trace_ctxts.h
 	drivers/infiniband/hw/hfi1/trace_dbg.h
+	drivers/infiniband/hw/hfi1/trace_gpu.h
 	drivers/infiniband/hw/hfi1/trace_ibhdrs.h
 	drivers/infiniband/hw/hfi1/trace_misc.h
 	drivers/infiniband/hw/hfi1/trace_rc.h
