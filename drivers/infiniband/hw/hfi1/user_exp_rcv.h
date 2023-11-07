@@ -114,6 +114,9 @@ struct tid_user_buf_ops {
 	 *   must return an error.
 	 * @vaddr
 	 * @length
+	 * @allow_unaligned when true, implementation may, but is not required
+	 *   to, handle unaligned @vaddr. When false, implementation must return
+	 *   -EINVAL for unaligned @vaddr.
 	 * @tbuf [out] allocated tid_user_buf
 	 *
 	 * @return 0 on success, non-zero on error.
@@ -129,6 +132,7 @@ struct tid_user_buf_ops {
 		    bool notify,
 		    unsigned long vaddr,
 		    unsigned long length,
+		    bool allow_unaligned,
 		    struct tid_user_buf **tbuf);
 
 	/*
@@ -329,7 +333,8 @@ int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
 			   struct hfi1_ctxtdata *uctxt);
 void hfi1_user_exp_rcv_free(struct hfi1_filedata *fd);
 int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
-			    struct hfi1_tid_info_v3 *tinfo);
+			    struct hfi1_tid_info_v3 *tinfo,
+			    bool allow_unaligned);
 int hfi1_user_exp_rcv_clear(struct hfi1_filedata *fd,
 			    struct hfi1_tid_info *tinfo);
 int hfi1_user_exp_rcv_invalid(struct hfi1_filedata *fd,

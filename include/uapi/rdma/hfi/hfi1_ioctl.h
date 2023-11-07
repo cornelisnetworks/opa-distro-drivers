@@ -138,6 +138,44 @@ struct hfi1_tid_info_v3 {
 	__aligned_u64 context;
 };
 
+#ifdef NVIDIA_GPU_DIRECT
+
+#define HFI1_TID_UPDATE_V2_FLAGS_GPU_BITS 1
+#define HFI1_TID_UPDATE_V2_FLAGS_GPU_MASK (BIT(HFI1_TID_UPDATE_V2_FLAGS_GPU_BITS) - 1)
+#define HFI1_TID_UPDATE_V2_FLAGS_RESERVED_MASK (~(__u16)HFI1_TID_UPDATE_V2_FLAGS_GPU_MASK)
+/*
+ * TID info struct for HFI1_IOCTL_TID_UPDATE_V2.
+ *
+ * For backwards compatibility with PSM2-CUDA.
+ *
+ * New userspace code should use HFI1_IOCTL_TID_UPDATE_V3 for device memory
+ * TID-programming.
+ */
+
+/*
+ * struct hfi1_tid_info_v2 is a copy of struct hfi1_tid_info plus a flags field
+ * added at the end of the structure. A new structure is defined instead of
+ * adding the flags field to struct hfi1_tid_info to prevent changing the IOCTL
+ * command number and maintain backwards compatibility with older PSM versions.
+ */
+struct hfi1_tid_info_v2 {
+	/* virtual address of first page in transfer */
+	__aligned_u64 vaddr;
+	/* pointer to tid array. this array is big enough */
+	__aligned_u64 tidlist;
+	/* number of tids programmed by this request */
+	__u32 tidcnt;
+	/* length of transfer buffer programmed by this request */
+	__u32 length;
+	/*
+	 * bit 0 - BUF_GPU_MEM_BIT - legacy NVIDIA support for PSM2; should not
+	 *         have HFI1_BUF_MEMINFO
+	 * bit 1-15 - reserved
+	 */
+	__u16 flags;
+};
+#endif
+
 /*
  * This structure is returned by the driver immediately after
  * open to get implementation-specific info, and info specific to this
