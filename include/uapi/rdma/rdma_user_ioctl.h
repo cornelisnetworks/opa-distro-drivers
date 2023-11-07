@@ -85,4 +85,8 @@
 #define HFI1_IOCTL_PIN_STATS		_IOWR(RDMA_IOCTL_MAGIC, 0xEF, struct hfi1_pin_stats)
 #define HFI1_IOCTL_TID_UPDATE_V3	_IOWR(RDMA_IOCTL_MAGIC, 0xF0, struct hfi1_tid_info_v3)
 
+#ifdef NVIDIA_GPU_DIRECT
+#define HFI1_IOCTL_TID_UPDATE_V2	_IOWR(RDMA_IOCTL_MAGIC, 0xFE, struct hfi1_tid_info_v2)
+#endif
+
 #endif /* RDMA_USER_IOCTL_H */

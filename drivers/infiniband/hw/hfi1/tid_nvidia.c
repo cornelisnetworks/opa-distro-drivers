@@ -56,6 +56,7 @@
 #include "device.h"
 #include "user_exp_rcv.h"
 #include "pinning.h"
+#include "trace_gpu.h"
 
 #define NV_GPU_PAGE_SHIFT 16
 #define NV_GPU_PAGE_SIZE BIT(NV_GPU_PAGE_SHIFT)
@@ -89,6 +90,9 @@ struct nvidia_tid_user_buf {
 	struct list_head nodes;
 	/* Protects .nodes and .invalidated */
 	spinlock_t nodes_lock;
+
+	unsigned long orig_vaddr;
+	unsigned long orig_length;
 };
 
 /*
@@ -251,23 +255,38 @@ static int nvidia_user_buf_init(u16 expected_count,
 				bool notify,
 				unsigned long vaddr,
 				unsigned long length,
+				bool allow_unaligned,
 				struct tid_user_buf **tbuf)
 {
 	struct nvidia_tid_user_buf *nvbuf;
+	unsigned long unaligned_vaddr = vaddr;
 	int ret;
 
-	/* nv-p2p.h nvidia_p2p_get_pages() says vaddr, length must be 64KiB aligned, multiple */
-	if (vaddr % NV_GPU_PAGE_SIZE)
-		return -EINVAL;
-	if (length % NV_GPU_PAGE_SIZE)
-		return -EINVAL;
+	/* Allow non-page-size multiple (vaddr,length) for older userspace. */
+	if (!allow_unaligned) {
+		if (vaddr % NV_GPU_PAGE_SIZE)
+			return -EINVAL;
+		if (length % NV_GPU_PAGE_SIZE)
+			return -EINVAL;
+	}
 
 	nvbuf = kzalloc(sizeof(*nvbuf), GFP_KERNEL);
 	if (!nvbuf)
 		return -ENOMEM;
 	kref_init(&nvbuf->ref);
 	*tbuf = &nvbuf->common;
-	/* Cannot check vaddr alignment here; store for now. */
+
+	/*
+	 * In case vaddr is not aligned to a page boundary,
+	 * round vaddr off to a page boundary and increase
+	 * length to cover the difference.
+	 *
+	 * Store original vaddr, length on nvbuf for tracing.
+	 */
+	nvbuf->orig_vaddr = vaddr;
+	nvbuf->orig_length = length;
+	vaddr = (vaddr & NV_GPU_PAGE_MASK);
+	length += (unaligned_vaddr - vaddr);
 	nvbuf->common.vaddr = vaddr;
 	nvbuf->common.length = length;
 	nvbuf->common.use_mn = notify;
@@ -371,6 +390,8 @@ static int nvidia_pin_pages(struct hfi1_filedata *fd,
 	ret = rdma_interface.get_pages(0, 0, nvbuf->common.vaddr,
 				       nvbuf->common.length, &nvbuf->pages,
 				       nvidia_invalidate_cb, nvbuf);
+	if (ret)
+		trace_recv_pin_gpu_pages_fail(ret, nvbuf->common.vaddr, nvbuf->common.length);
 	/* Don't WARN on these cases */
 	if (ret == -EINVAL || ret == -ENOMEM)
 		return ret;
@@ -380,6 +401,9 @@ static int nvidia_pin_pages(struct hfi1_filedata *fd,
 		ret = -EIO;
 		goto fail_put_pages;
 	}
+
+	trace_pin_rcv_pages_gpu(nvbuf->orig_vaddr, nvbuf->common.vaddr, nvbuf->orig_length,
+				nvbuf->common.length, nvbuf->pages->entries, tbuf);
 
 	if (nvbuf->pages->entries > fd->uctxt->expected_count) {
 		ret = -EINVAL;
@@ -402,6 +426,7 @@ fail_unmap:
 fail_put_pages:
 	WARN_ON(rdma_interface.put_pages(0, 0, nvbuf->common.vaddr, nvbuf->pages));
 	nvbuf->pages = NULL;
+	trace_recv_pin_gpu_pages_fail(ret, nvbuf->common.vaddr, nvbuf->common.length);
 	return ret;
 }
 
