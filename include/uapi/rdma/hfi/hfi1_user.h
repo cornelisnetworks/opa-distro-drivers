@@ -139,6 +139,12 @@
 #define HFI1_EVENT_SL2VL_CHANGE      (1UL << _HFI1_EVENT_SL2VL_CHANGE_BIT)
 #define HFI1_EVENT_TID_MMU_NOTIFY    (1UL << _HFI1_EVENT_TID_MMU_NOTIFY_BIT)
 
+#ifdef NVIDIA_GPU_DIRECT
+/* hfi1_tid_info_v2 .flags bits */
+#define HFI1_BUF_GPU_MEM_BIT 0
+#define HFI1_BUF_GPU_MEM     (1UL << HFI1_BUF_GPU_MEM_BIT)
+#endif
+
 /*
  * These are the status bits readable (in ASCII form, 64bit value)
  * from the "status" sysfs file.  For binary compatibility, values
