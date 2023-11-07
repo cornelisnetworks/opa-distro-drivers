@@ -244,7 +244,7 @@ static int pin_rcv_pages(struct hfi1_filedata *fd, struct tid_user_buf *tidbuf)
  *          used, move it to tid_full_list.
  */
 int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
-			    struct hfi1_tid_info *tinfo)
+			    struct hfi1_tid_info_v3 *tinfo)
 {
 	int ret = 0, need_group = 0, pinned;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
@@ -459,7 +459,7 @@ unlock:
 fail_unprogram:
 	/* unprogram, unmap, and unpin all allocated TIDs */
 	tinfo->tidlist = (unsigned long)tidlist;
-	hfi1_user_exp_rcv_clear(fd, tinfo);
+	hfi1_user_exp_rcv_clear(fd, (struct hfi1_tid_info *)tinfo);
 	tinfo->tidlist = 0;
 	pinned = 0;		/* nothing left to unpin */
 	pageset_count = 0;	/* nothing left reserved */
