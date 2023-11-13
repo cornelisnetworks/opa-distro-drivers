@@ -543,7 +543,7 @@ TRACE_EVENT(hfi1_sdma_user_header,
 );
 
 #define SDMA_UREQ_FMT \
-	"[%s:%u:%u] ver/op=0x%x, iovcnt=%u, npkts=%u, frag=%u, idx=%u"
+	"[%s:%u:%u] ver/op=0x%x, iovcnt=%u, meminfo=%u, npkts=%u, frag=%u, idx=%u"
 TRACE_EVENT(hfi1_sdma_user_reqinfo,
 	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u8 subctxt, u16 *i),
 	    TP_ARGS(dd, ctxt, subctxt, i),
@@ -553,6 +553,7 @@ TRACE_EVENT(hfi1_sdma_user_reqinfo,
 		    __field(u8, subctxt)
 		    __field(u8, ver_opcode)
 		    __field(u8, iovcnt)
+		    __field(u8, meminfo)
 		    __field(u16, npkts)
 		    __field(u16, fragsize)
 		    __field(u16, comp_idx)
@@ -562,7 +563,8 @@ TRACE_EVENT(hfi1_sdma_user_reqinfo,
 		    __entry->ctxt = ctxt;
 		    __entry->subctxt = subctxt;
 		    __entry->ver_opcode = i[0] & 0xff;
-		    __entry->iovcnt = (i[0] >> 8) & 0xff;
+		    __entry->iovcnt = (i[0] >> 8) & 0x7f;
+		    __entry->meminfo = (i[0] >> 15) & 0x1;
 		    __entry->npkts = i[1];
 		    __entry->fragsize = i[2];
 		    __entry->comp_idx = i[3];
@@ -573,6 +575,7 @@ TRACE_EVENT(hfi1_sdma_user_reqinfo,
 		      __entry->subctxt,
 		      __entry->ver_opcode,
 		      __entry->iovcnt,
+		      __entry->meminfo,
 		      __entry->npkts,
 		      __entry->fragsize,
 		      __entry->comp_idx
