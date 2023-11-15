@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
+ * Copyright(c) 2024 Cornelis Networks, Inc.
  * Copyright(c) 2015 - 2020 Intel Corporation.
  */
 
@@ -318,6 +319,12 @@
 #define MAX_EXPECTED_BUFFER    (2048 * 1024)
 #define HFI1_MIN_HDRQ_EGRBUF_CNT 32
 #define HFI1_MAX_HDRQ_EGRBUF_CNT 16352
+
+/*
+ * Expected buffer entry (TID) addressing supported by the hardware.
+ */
+#define EXPECTED_ADDR_SHIFT 12
+#define EXPECTED_ADDR_SIZE BIT(EXPECTED_ADDR_SHIFT)
 
 /*
  * Receive expected base and count and eager base and count increment -

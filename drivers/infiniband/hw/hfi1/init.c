@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2020 Intel Corporation.
- * Copyright(c) 2021 Cornelis Networks.
+ * Copyright(c) 2021-2024 Cornelis Networks.
  */
 
 #include <linux/pci.h>
@@ -1382,6 +1382,7 @@ static int __init hfi1_mod_init(void)
 	int ret;
 
 	register_system_pinning_interface();
+	register_system_tid_ops();
 #ifdef CONFIG_HFI1_AMD
 	register_amd_pinning_interface();
 #endif
@@ -1483,6 +1484,7 @@ static void __exit hfi1_mod_cleanup(void)
 	dispose_firmware();	/* asymmetric with obtain_firmware() */
 	dev_cleanup();
 
+	deregister_system_tid_ops();
 	deregister_system_pinning_interface();
 #ifdef CONFIG_HFI1_AMD
 	deregister_amd_pinning_interface();
