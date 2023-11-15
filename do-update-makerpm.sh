@@ -96,6 +96,7 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/sdma.h
 	drivers/infiniband/hw/hfi1/sdma_txreq.h
 	drivers/infiniband/hw/hfi1/sysfs.c
+	drivers/infiniband/hw/hfi1/tid_system.c
 	drivers/infiniband/hw/hfi1/trace.c
 	drivers/infiniband/hw/hfi1/trace.h
 	drivers/infiniband/hw/hfi1/trace_ctxts.h
