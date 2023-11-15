@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause */
 /*
- * Copyright(c) 2020-2023 Cornelis Networks, Inc.
+ * Copyright(c) 2020-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015-2020 Intel Corporation.
  */
 
@@ -1414,6 +1414,11 @@ struct hfi1_filedata {
 	u16 subctxt;
 	/* for cpu affinity; -1 if none */
 	int rec_cpu_num;
+	/*
+	 * For TID memory implementations that must enforce RLIMIT_MEMLOCK.
+	 *
+	 * tid_n_pinned should only be used by TID memory implementations.
+	 */
 	u32 tid_n_pinned;
 	bool use_mn;
 	struct tid_rb_node **entry_to_rb;
