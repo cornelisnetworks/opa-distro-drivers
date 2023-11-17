@@ -684,7 +684,7 @@ static int set_rcvarray_entry(struct hfi1_filedata *fd,
 	trace_hfi1_exp_tid_reg(uctxt->ctxt, fd->subctxt, rcventry,
 			       node_npages(node),
 			       node->vaddr, node->phys,
-			       node->dma_addr);
+			       node->dma_addr, node->type);
 	return 0;
 
 out_unmap:
@@ -738,7 +738,7 @@ static void __clear_tid_node(struct hfi1_filedata *fd, struct tid_rb_node *node)
 	trace_hfi1_exp_tid_unreg(uctxt->ctxt, fd->subctxt, node->rcventry,
 				 node_npages(node),
 				 node->vaddr, node->phys,
-				 node->dma_addr);
+				 node->dma_addr, node->type);
 
 	/* Make sure device has seen the write before pages are unpinned */
 	hfi1_put_tid(dd, node->rcventry, PT_INVALID_FLUSH, 0, 0);
@@ -810,7 +810,7 @@ void hfi1_user_exp_rcv_invalidate(struct tid_rb_node *node)
 				 node->vaddr,
 				 node->rcventry,
 				 node_npages(node),
-				 node->dma_addr);
+				 node->dma_addr, node->type);
 
 	/* clear the hardware rcvarray entry */
 	__clear_tid_node(fdata, node);
