@@ -318,6 +318,11 @@ void deregister_tid_ops(u16 type);
 int register_system_tid_ops(void);
 void deregister_system_tid_ops(void);
 
+#ifdef CONFIG_HFI1_NVIDIA
+int register_nvidia_tid_ops(void);
+void deregister_nvidia_tid_ops(void);
+#endif
+
 void hfi1_user_exp_rcv_invalidate(struct tid_rb_node *node);
 
 int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
