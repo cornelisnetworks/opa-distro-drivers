@@ -79,6 +79,9 @@ endif
 CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
 endif
 
+hfi1-$(CONFIG_HFI1_NVIDIA) += pin_nvidia.o tid_nvidia.o
+ccflags-$(CONFIG_HFI1_NVIDIA) += -I$(NVIDIA_DRIVER_SOURCE)
+
 ifdef CONFIG_HFI1_AMD
 ifndef AMDGPU_DRIVER_SOURCE
 AMDGPU_DRIVER_SOURCE := $(shell rpm -ql amdgpu-dkms | grep -E '/usr/src/amdgpu-[^/]+/include/drm/amd_rdma.h$$' | head -n1)

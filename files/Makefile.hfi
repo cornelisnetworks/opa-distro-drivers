@@ -33,7 +33,7 @@ hfi1-$(CONFIG_DEBUG_FS) += debugfs.o
 CFLAGS_trace.o = -I$(src)
 
 ifdef CONFIG_HFI1_NVIDIA
-hfi1-y += pin_nvidia.o
+hfi1-y += pin_nvidia.o tid_nvidia.o
 CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
 CFLAGS_pin_nvidia.o += -DCONFIG_HFI1_NVIDIA
 endif
