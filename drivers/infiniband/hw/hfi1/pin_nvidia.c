@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
 /*
- * Copyright(c) 2022 - Cornelis Networks, Inc.
+ * Copyright(c) 2022-2024 Cornelis Networks, Inc.
  */
 
 #include <linux/types.h>
@@ -437,8 +437,8 @@ retry:
 					  start, len, &node->page_table, remove_nvidia_pages, node);
 
 	if (result != 0) {
-		dd_dev_err(state->pq->dd, "node %p nvidia get_pages failed with %d",
-			   node, result);
+		dd_dev_err(state->pq->dd, "node %p nvidia get_pages start %llx len %zu failed with %d",
+			   node, start, len, result);
 	} else {
 		result = rdma_interface.dma_map_pages(state->hfi_dev, node->page_table,
 						      &node->mapping);
