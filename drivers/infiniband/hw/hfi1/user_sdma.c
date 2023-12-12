@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
 /*
- * Copyright(c) 2020 - 2023 Cornelis Networks, Inc.
+ * Copyright(c) 2020-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015 - 2018 Intel Corporation.
  */
 
@@ -267,6 +267,32 @@ static u8 dlid_to_selector(u16 dlid)
 	return mapping[hash];
 }
 
+#ifdef NVIDIA_GPU_DIRECT
+/*
+ * For PSM2-CUDA backwards compat.
+ *
+ * Fill in m as if all data iovs are for CUDA buffers.
+ */
+static void fill_in_cuda_meminfo(struct sdma_req_meminfo *m, u16 data_iovs)
+{
+	u16 i;
+
+	m->types = 0;
+	for (i = 0; i < data_iovs; i++) {
+		HFI1_MEMINFO_TYPE_ENTRY_SET(m->types, i, HFI1_MEMINFO_TYPE_NVIDIA);
+		/*
+		 * The device ID that hfi1/pin_nvidia will use as a key into
+		 * its hash table of nvidia_pintrees.
+		 * Give it a fake, non-zero context so if program mixes old
+		 * sdma_req_info + .flags and new sdma_req_info +
+		 * sdma_req_meminfo that it is unlikely that the fake context
+		 * will match any real context from an sdma_req_meminfo
+		 */
+		m->context[i] = 0xDEADBEEF;
+	}
+}
+#endif
+
 /**
  * hfi1_user_sdma_process_request() - Process and start a user sdma request
  * @fd: valid file descriptor
@@ -295,20 +321,35 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	u16 dlid;
 	u32 selector;
 
-	if (iovec[idx].iov_len < sizeof(info) + sizeof(req->hdr)) {
+	/*
+	 * For PSM2-CUDA backwards compatibility.
+	 * Start by assuming u16 .flags not present.
+	 * Add sizeof(u16) back once determined that .flags is present.
+	 */
+	int infosz = sizeof(struct sdma_req_info);
+#ifdef NVIDIA_GPU_DIRECT
+	infosz -= sizeof(u16);
+#endif
+
+	if (iovec[idx].iov_len < infosz + sizeof(req->hdr)) {
 		hfi1_cdbg(
 		   SDMA,
 		   "[%u:%u:%u] First vector not big enough for header %lu/%lu",
 		   dd->unit, uctxt->ctxt, fd->subctxt,
-		   iovec[idx].iov_len, sizeof(info) + sizeof(req->hdr));
+		   iovec[idx].iov_len, infosz + sizeof(req->hdr));
 		return -EINVAL;
 	}
-	ret = copy_from_user(&info, iovec[idx].iov_base, sizeof(info));
+	ret = copy_from_user(&info, iovec[idx].iov_base, infosz);
 	if (ret) {
 		hfi1_cdbg(SDMA, "[%u:%u:%u] Failed to copy info QW (%d)",
 			  dd->unit, uctxt->ctxt, fd->subctxt, ret);
 		return -EFAULT;
 	}
+
+#ifdef NVIDIA_GPU_DIRECT
+	/* Assume .flags not present after sdma_req_info */
+	info.flags = 0;
+#endif
 
 	trace_hfi1_sdma_user_reqinfo(dd, uctxt->ctxt, fd->subctxt,
 				     (u16 *)&info);
@@ -390,18 +431,53 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	if (req_has_meminfo(info.ctrl)) {
 		/* Copy the meminfo from the user buffer */
 		ret = copy_from_user(&req->meminfo,
-				     iovec[idx].iov_base + sizeof(info),
+				     iovec[idx].iov_base + infosz,
 				     sizeof(req->meminfo));
 		if (ret) {
 			SDMA_DBG(req, "Failed to copy meminfo (%d)", ret);
 			ret = -EFAULT;
 			goto free_req;
 		}
-		header_offset = sizeof(info) + sizeof(req->meminfo);
+		header_offset = infosz + sizeof(req->meminfo);
 	} else {
 		req->meminfo.types = 0;
-		header_offset = sizeof(info);
+		header_offset = infosz;
 	}
+
+#ifdef NVIDIA_GPU_DIRECT
+	/*
+	 * Map PSM2-CUDA request info.flags to req->meminfo.* values.
+	 *
+	 * .flags present only when req_version(info.ctrl) == 2
+	 */
+	if (req_version(info.ctrl) == 2) {
+		/* .flags and sdma_req_meminfo are mutually exclusive */
+		if (req_has_meminfo(info.ctrl)) {
+			ret = -EINVAL;
+			goto free_req;
+		}
+
+		/* cannot have more data iovs than there are meminfo entries */
+		if (req->data_iovs > HFI1_MAX_MEMINFO_ENTRIES) {
+			ret = -EINVAL;
+			goto free_req;
+		}
+		ret = copy_from_user(&info.flags,
+				     iovec[idx].iov_base + infosz,
+				     sizeof(info.flags));
+		if (ret) {
+			SDMA_DBG(req, "Failed to copy flags (%d)", ret);
+			ret = -EFAULT;
+			goto free_req;
+		}
+
+		if (info.flags & HFI1_BUF_GPU_MEM)
+			fill_in_cuda_meminfo(&req->meminfo, req->data_iovs);
+
+		infosz += sizeof(info.flags);
+		header_offset = infosz;
+	}
+#endif
 
 	/* Copy the header from the user buffer */
 	ret = copy_from_user(&req->hdr, iovec[idx].iov_base + header_offset,

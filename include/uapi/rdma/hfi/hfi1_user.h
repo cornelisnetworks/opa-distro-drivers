@@ -214,7 +214,9 @@ enum sdma_req_opcode {
 
 struct sdma_req_info {
 	/*
-	 * bits 0-3 - version (currently unused)
+	 * bits 0-3 - version (currently used only for GPU direct)
+	 *               1 - user space is NOT using flags field
+	 *               2 - user space is using flags field
 	 * bits 4-7 - opcode (enum sdma_req_opcode)
 	 * bits 8-14 - io vector count
 	 * bit  15 - meminfo present
@@ -238,6 +240,12 @@ struct sdma_req_info {
 	 * in charge of managing its own ring.
 	 */
 	__u16 comp_idx;
+#ifdef NVIDIA_GPU_DIRECT
+	/*
+	 * Buffer flags for this request. See HFI1_BUF_*
+	 */
+	__u16 flags;
+#endif
 } __attribute__((__packed__));
 
 #define HFI1_MEMINFO_TYPE_ENTRY_BITS 4
