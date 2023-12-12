@@ -258,4 +258,92 @@ struct hfi1_pin_stats {
 	__u64 external_evictions; /* system-driven evictions */
 };
 
+#ifdef NVIDIA_GPU_DIRECT
+
+/*
+ * Use this for the version field in all the GDR related ioctl parameter
+ * structures.  We are starting with version 1.
+ */
+#define HFI1_GDR_VERSION 0x1UL
+
+/**
+ * struct hfi1_sdma_gpu_cache_evict_params - arguments for sdma cache evict
+ * @evict_params_in: Values passed into the ioctl
+ * @version: The version number for this ioctl.
+ * @pages_to_evict: The number of GPU pages we want evicted from this cache.
+ * @evict_params_out: Values returned from the ioctl
+ * @pages_evicted: The number of GPU pages that were actually evicted.
+ * @pages_in_cache: The number of GPU pages resident in this cache.
+ */
+struct hfi1_sdma_gpu_cache_evict_params {
+	union {
+		struct {
+			__u32 version;
+			__u32 pages_to_evict;
+		} evict_params_in;
+		struct {
+			__u32 pages_evicted;
+			__u32 pages_in_cache;
+		} evict_params_out;
+	};
+};
+
+/**
+ * struct hfi1_gdr_query_parms - argument for gdr driver ioctl command
+ * @query_parms_in: Union member containing values passed into the ioctl()
+ * @version: A way to pass in a version number for this interface.
+ * @gpu_buf_addr: The starting address of a gpu buffer to be operated upon
+ * @gpu_buf_size: The size of a gpu buffer to be operated upon
+ * @query_params_out: Union member containig values pass back from ioctl()
+ * @host_buf_addr: the host address of a pinned and mmaped gpu buffer.
+ *
+ * This structure is associated with the gdr_ops driver's ioctl commands;
+ *
+ *	HFI1_IOCTL_GDR_GPU_PIN_MMAP
+ *	HFI1_IOCTL_GDR_GPU_MUNMAP_UNPIN
+ *
+ * It is used to pass in GPU buffer descriptors into the hfi_ops
+ * driver.
+ *
+ * The driver will reject any gpu buffer address or gpu buffer size that
+ * is NOT rounded to GPU buffer boundaries.  GPU buffer addresses must
+ * start on a NV_GPU_PAGE_SIZE boundary, and a multiple of NV_GPU_PAGE_SIZE
+ * in length.
+ *
+ */
+struct hfi1_gdr_query_params {
+	union {
+		struct {
+			__u32 version;
+			__u32 gpu_buf_size;
+			__u64 gpu_buf_addr;
+		} query_params_in;
+		struct {
+			__u64 host_buf_addr;
+		} query_params_out;
+	};
+};
+
+/**
+ * struct hfi1_gdr_cache_evict_params - arguments for GDR cache evict ioctl
+ * @version: The version number for this ioctl.
+ * @evict_params_in: Values passed into the ioctl
+ * @pages_to_evict: The number of GPU pages we want evicted from this cache.
+ * @evict_params_out: Values returned from the ioctl
+ * @pages_evicted: The number of GPU pages that were actually evicted.
+ * @pages_in_cache: The number of GPU pages resident in this cache.
+ */
+struct hfi1_gdr_cache_evict_params {
+	union {
+		struct {
+			__u32 version;
+			__u32 pages_to_evict;
+		} evict_params_in;
+		struct {
+			__u32 pages_evicted;
+			__u32 pages_in_cache;
+		} evict_params_out;
+	};
+};
+#endif
 #endif /* _LINIUX__HFI1_IOCTL_H */

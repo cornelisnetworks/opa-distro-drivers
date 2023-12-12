@@ -1365,6 +1365,7 @@ static int _user_exp_rcv_setup(struct hfi1_filedata *fd, struct hfi1_tid_info_v3
 	/* Reserved .flags bits must be 0 */
 	if (tinfo->flags & HFI1_TID_UPDATE_V3_FLAGS_RESERVED_MASK)
 		return -EINVAL;
+
 	/* Reserved for now */
 	if (tinfo->context)
 		return -EINVAL;
@@ -1436,9 +1437,15 @@ static int user_exp_rcv_setup_v2(struct hfi1_filedata *fd, unsigned long arg,
 	if (tinfov2->flags & HFI1_TID_UPDATE_V2_FLAGS_RESERVED_MASK)
 		return -EINVAL;
 
-	/* Convert v2 .flags to v3 (.flags,.context) */
+	/*
+	 * If no _v2 flags were set, zero-out the v3 .flags so that any garbage
+	 * between the end of hfi1_tid_info_v2.flags and hfi1_tid_info_v3.flags
+	 * is cleared.
+	 */
 	if ((tinfov2->flags & HFI1_TID_UPDATE_V2_FLAGS_GPU_MASK) == HFI1_BUF_GPU_MEM)
 		tinfo.flags = HFI1_MEMINFO_TYPE_NVIDIA;
+	else
+		tinfo.flags = 0;
 
 	return _user_exp_rcv_setup(fd, &tinfo, arg, len, true);
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright(c) 2020 Cornelis Networks, Inc.
+ * Copyright(c) 2020-2024 Cornelis Networks, Inc.
  * Copyright(c) 2016 - 2017 Intel Corporation.
  */
 
@@ -39,10 +39,11 @@ static unsigned long mmu_node_last(struct mmu_rb_node *node)
 	return PAGE_ALIGN(node->addr + node->len) - 1;
 }
 
-int hfi1_mmu_rb_register(void *ops_arg,
-			 struct mmu_rb_ops *ops,
-			 struct workqueue_struct *wq,
-			 struct mmu_rb_handler **handler)
+static int _hfi1_mmu_rb_register(void *ops_arg,
+				 struct mmu_rb_ops *ops,
+				 struct workqueue_struct *wq,
+				 struct mmu_rb_handler **handler,
+				 const struct mmu_notifier_ops *mnops)
 {
 	struct mmu_rb_handler *h;
 	void *free_ptr;
@@ -58,7 +59,7 @@ int hfi1_mmu_rb_register(void *ops_arg,
 	h->ops_arg = ops_arg;
 	INIT_HLIST_NODE(&h->mn.hlist);
 	spin_lock_init(&h->lock);
-	h->mn.ops = &mn_opts;
+	h->mn.ops = mnops;
 	INIT_WORK(&h->del_work, handle_remove);
 	INIT_LIST_HEAD(&h->del_list);
 	INIT_LIST_HEAD(&h->lru_list);
@@ -73,6 +74,14 @@ int hfi1_mmu_rb_register(void *ops_arg,
 
 	*handler = h;
 	return 0;
+}
+
+int hfi1_mmu_rb_register(void *ops_arg,
+			 struct mmu_rb_ops *ops,
+			 struct workqueue_struct *wq,
+			 struct mmu_rb_handler **handler)
+{
+	return _hfi1_mmu_rb_register(ops_arg, ops, wq, handler, &mn_opts);
 }
 
 void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
@@ -332,3 +341,147 @@ static void handle_remove(struct work_struct *work)
 		handler->ops->remove(handler->ops_arg, node);
 	}
 }
+
+#ifdef NVIDIA_GPU_DIRECT
+/*
+ * GDRCopy uses mmu_rb_handler only for its RB tree.
+ *
+ * If GDRCopy uses the same .invalidate_range_start as host memory, then
+ * userspace can remove virtual address ranges from the RB tree outside of
+ * GDRCopy's control or awareness.
+ *
+ * GDRCopy mmu_rb_handler destruction code assumes that virtual address ranges
+ * cannot be removed independently of the GPU pinning entires (struct gdr_mr).
+ *
+ * To work around all of this, define a GDRCopy-specific no-op
+ * .invalidate_range_start handler.
+ */
+static int mmu_notifier_range_start_gdr(struct mmu_notifier *mn,
+		const struct mmu_notifier_range *range)
+{
+	return 0;
+}
+
+static const struct mmu_notifier_ops mn_opts_gdr = {
+	.invalidate_range_start = mmu_notifier_range_start_gdr
+};
+
+/*
+ * It is up to the caller to ensure that this function does not race with the
+ * mmu invalidate notifier which may be calling the users remove callback on
+ * 'node'.
+ */
+void hfi1_mmu_rb_remove(struct mmu_rb_handler *handler,
+			struct mmu_rb_node *node)
+{
+	unsigned long flags;
+
+	/* Validity of handler and node pointers has been checked by caller. */
+	trace_hfi1_mmu_rb_remove(node);
+	spin_lock_irqsave(&handler->lock, flags);
+	__mmu_int_rb_remove(node, &handler->root);
+	list_del(&node->list); /* remove from LRU list */
+	spin_unlock_irqrestore(&handler->lock, flags);
+
+	handler->ops->remove(handler->ops_arg, node);
+}
+
+/**
+ * hfi1_mmu_rb_first_cached() - Return the first node in a red/black tree.
+ * @handler: - A pointer to the root/control structure of a red/black tree.
+ *
+ * This function layers on top of the Linux interval red/black tree
+ * implementation.
+ *
+ * If the tree is NOT empty, then return a pointer to the first node in
+ * that tree.  Otherwise return NULL.
+ *
+ * Return: A pointer to the first node in the tree, or NULL if tree is empty.
+ */
+struct mmu_rb_node *hfi1_mmu_rb_first_cached(struct mmu_rb_handler *handler)
+{
+	struct mmu_rb_node *rbnode = NULL;
+	struct rb_node *node;
+	unsigned long flags;
+
+	spin_lock_irqsave(&handler->lock, flags);
+#ifdef NO_RB_ROOT_CACHE
+	node = rb_first(&handler->root);
+#else
+	node = rb_first_cached(&handler->root);
+#endif
+	if (node)
+		rbnode = rb_entry(node, struct mmu_rb_node, node);
+	spin_unlock_irqrestore(&handler->lock, flags);
+
+	return rbnode;
+}
+
+/**
+ * hfi1_mmu_rb_search_addr() - Search tree for entry with matching start addr
+ * @handler: - A pointer to the root/control structure of a red/black tree.
+ * @addr: - The starting buffer address to search for in the tree.
+ * @len: - The length of the buffer to search for in the tree.
+ *
+ * This function layers on top of the Linux interval red/black tree
+ * implementation.
+ *
+ * It searches r/b tree indicated by the handler argument, trying to find a
+ * node that matches the "addr" starting point. If a node is found, then
+ * return a pointer to that node.
+ *
+ * Return: A pointer to a tree node, if one is found.  Otherwise return NULL.
+ */
+struct mmu_rb_node *hfi1_mmu_rb_search_addr(struct mmu_rb_handler *handler,
+					    unsigned long addr,
+					    unsigned long len)
+{
+	struct mmu_rb_node *ret_node = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&handler->lock, flags);
+	ret_node = __mmu_rb_search(handler, addr, len);
+	spin_unlock_irqrestore(&handler->lock, flags);
+
+	return ret_node;
+}
+
+/*
+ * This API may be used to invalidate cached page pinned buffers that are in the
+ * virutal address range start to (end - 1) when the mapping becomes invalid.
+ *
+ * This API is intended to be invoked from functions that do not refer to
+ * struct mmu_rb_handler or struct mmu_notifier but have a pointer to the
+ * root of the RB tree that stores the page cache.
+ * For example, this API can be used in case of buffers pinned to GPU memory
+ * pages. When the mapping becomes invalid, a callback function registered
+ * with the NVIDIA driver will be invoked. This callback does not get a
+ * reference to struct mmu_notifier.
+ */
+void hfi1_gpu_cache_invalidate(struct mmu_rb_handler *handler,
+			       unsigned long start, unsigned long end)
+{
+	struct mmu_notifier_range r = {
+#ifdef NO_MMU_NOTIFIER_MM
+		.mm = handler->mm,
+#else
+		.mm = handler->mn.mm,
+#endif
+		.start = start,
+		.end = end,
+	};
+
+	(void)mmu_notifier_range_start(&handler->mn, &r);
+}
+
+/*
+ * Register no-op mmmu_notifier_ops.
+ */
+int hfi1_mmu_rb_register_gpu(void *ops_arg,
+			     struct mmu_rb_ops *ops,
+			     struct workqueue_struct *wq,
+			     struct mmu_rb_handler **handler)
+{
+	return _hfi1_mmu_rb_register(ops_arg, ops, wq, handler, &mn_opts_gdr);
+}
+#endif /* NVIDIA_GPU_DIRECT */
