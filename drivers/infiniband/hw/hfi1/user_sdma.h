@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause */
 /*
- * Copyright(c) 2023 - Cornelis Networks, Inc.
+ * Copyright(c) 2023-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015 - 2018 Intel Corporation.
  */
 #ifndef _HFI1_USER_SDMA_H
@@ -31,7 +31,7 @@ static_assert(MAX_VECTORS_PER_REQ <= HFI1_MAX_MEMINFO_ENTRIES);
 #define req_opcode(x) \
 	(((x) >> HFI1_SDMA_REQ_OPCODE_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
 #define req_version(x) \
-	(((x) >> HFI1_SDMA_REQ_VERSION_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
+	(((x) >> HFI1_SDMA_REQ_VERSION_SHIFT) & HFI1_SDMA_REQ_VERSION_MASK)
 #define req_iovcnt(x) \
 	(((x) >> HFI1_SDMA_REQ_IOVCNT_SHIFT) & HFI1_SDMA_REQ_IOVCNT_MASK)
 #define req_has_meminfo(x) \
