@@ -1141,6 +1141,9 @@ static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	memset(&cinfo, 0, sizeof(cinfo));
 	cinfo.runtime_flags = (((uctxt->flags >> HFI1_CAP_MISC_SHIFT) &
 				HFI1_CAP_MISC_MASK) << HFI1_CAP_USER_SHIFT) |
+#ifdef NVIDIA_GPU_DIRECT
+			HFI1_CAP_GPUDIRECT_OT |
+#endif
 			HFI1_CAP_UGET_MASK(uctxt->flags, MASK) |
 			HFI1_CAP_KGET_MASK(uctxt->flags, K2U);
 	/* adjust flag if this fd is not able to cache */
