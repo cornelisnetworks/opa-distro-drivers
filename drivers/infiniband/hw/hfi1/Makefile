@@ -77,7 +77,7 @@ NVIDIA_DRIVER_SOURCE=/usr/src/nvidia-$(NVIDIA_VERSION)
 endif
 endif
 
-hfi1-$(CONFIG_HFI1_NVIDIA) += pin_nvidia.o tid_nvidia.o
+hfi1-$(CONFIG_HFI1_NVIDIA) += pin_nvidia.o tid_nvidia.o gdr_ops.o
 ccflags-$(CONFIG_HFI1_NVIDIA) += -I$(NVIDIA_DRIVER_SOURCE) -DNVIDIA_GPU_DIRECT
 
 ifdef CONFIG_HFI1_AMD

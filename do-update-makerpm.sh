@@ -62,6 +62,8 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/eprom.h
 	drivers/infiniband/hw/hfi1/file_ops.c
 	drivers/infiniband/hw/hfi1/firmware.c
+	drivers/infiniband/hw/hfi1/gdr_ops.c
+	drivers/infiniband/hw/hfi1/gdr_ops.h
 	drivers/infiniband/hw/hfi1/hfi.h
 	drivers/infiniband/hw/hfi1/ipoib.h
 	drivers/infiniband/hw/hfi1/ipoib_main.c

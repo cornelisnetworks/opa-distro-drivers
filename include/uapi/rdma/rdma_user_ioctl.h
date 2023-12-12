@@ -86,7 +86,35 @@
 #define HFI1_IOCTL_TID_UPDATE_V3	_IOWR(RDMA_IOCTL_MAGIC, 0xF0, struct hfi1_tid_info_v3)
 
 #ifdef NVIDIA_GPU_DIRECT
+#define HFI1_IOCTL_SDMA_CACHE_EVICT     _IOWR(RDMA_IOCTL_MAGIC, 0xFD, struct hfi1_sdma_gpu_cache_evict_params)
+
 #define HFI1_IOCTL_TID_UPDATE_V2	_IOWR(RDMA_IOCTL_MAGIC, 0xFE, struct hfi1_tid_info_v2)
-#endif
+
+/*
+ * gdr_ops driver ioctl related declarations
+ *	HFI1_IOCTL_GDR_GPU_PIN_MMAP
+ *		return the host address of a gpu buffer that has been pinned
+ *		and mmaped.
+ *
+ *	HFI1_IOCTL_GDR_GPU_MUNMAP_UNPIN
+ *		unpin a gpu buffer and unmap it from the user address space.
+ *
+ *	HFI1_IOCTL_GDR_GPU_CACHE_EVICT
+ *		Try to evict a number of pages from the GDR cache.
+ *		Return the number of pages evicted, and the
+ *		number of pages in that cache.
+ */
+#define GDR_IOCTL_MAGIC 0xDA /* See Documentation/ioctl/ioctl-number.txt */
+
+#define HFI1_IOCTL_GDR_GPU_PIN_MMAP \
+	_IOWR(GDR_IOCTL_MAGIC, 1, struct hfi1_gdr_query_params)
+
+#define HFI1_IOCTL_GDR_GPU_MUNMAP_UNPIN \
+	_IOWR(GDR_IOCTL_MAGIC, 2, struct hfi1_gdr_query_params)
+
+#define HFI1_IOCTL_GDR_GPU_CACHE_EVICT \
+	_IOWR(GDR_IOCTL_MAGIC, 3, struct hfi1_gdr_cache_evict_params)
+
+#endif /* NVIDIA_GPU_DIRECT */
 
 #endif /* RDMA_USER_IOCTL_H */
