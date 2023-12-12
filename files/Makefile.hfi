@@ -38,6 +38,7 @@ hfi1-y += pin_nvidia.o tid_nvidia.o
 CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
 CFLAGS_pin_nvidia.o += -DCONFIG_HFI1_NVIDIA
 endif
+ccflags-$(CONFIG_HFI1_NVIDIA) += -DNVIDIA_GPU_DIRECT
 
 ifdef CONFIG_HFI1_AMD
 ifndef AMDGPU_DRIVER_SOURCE

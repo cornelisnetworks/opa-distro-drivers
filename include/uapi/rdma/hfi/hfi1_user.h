@@ -111,6 +111,15 @@
 #define HFI1_CAP_EARLY_CREDIT_RETURN (1UL << 18) /* early credit return */
 #define HFI1_CAP_AIP              (1UL << 19) /* Enable accelerated IP */
 
+#ifdef NVIDIA_GPU_DIRECT
+/* Cap bit is present for backwards compatibility with PSM2-CUDA */
+/*
+ * Bit-63 is being used instead of the LSB that is available since
+ * HFI1_CAP_GPUDIRECT_OT will only be used in an out of tree driver.
+ */
+#define HFI1_CAP_GPUDIRECT_OT     (1UL << 63) /* GPU Direct RDMA support */
+#endif
+
 #define HFI1_RCVHDR_ENTSIZE_2    (1UL << 0)
 #define HFI1_RCVHDR_ENTSIZE_16   (1UL << 1)
 #define HFI1_RCVDHR_ENTSIZE_32   (1UL << 2)
