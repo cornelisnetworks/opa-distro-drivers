@@ -31,6 +31,10 @@
 #include "netdev.h"
 #include "pinning.h"
 
+#ifdef NVIDIA_GPU_DIRECT
+#include "gdr_ops.h"
+#endif
+
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
 
@@ -1395,6 +1399,10 @@ static int __init hfi1_mod_init(void)
 	if (ret)
 		goto bail;
 
+#ifdef NVIDIA_GPU_DIRECT
+	hfi1_gdr_device_create();
+#endif
+
 	ret = node_affinity_init();
 	if (ret)
 		goto bail;
@@ -1464,6 +1472,9 @@ static int __init hfi1_mod_init(void)
 
 bail_dev:
 	hfi1_dbg_exit();
+#ifdef NVIDIA_GPU_DIRECT
+	hfi1_gdr_device_remove();
+#endif
 	dev_cleanup();
 bail:
 	return ret;
@@ -1476,6 +1487,9 @@ module_init(hfi1_mod_init);
  */
 static void __exit hfi1_mod_cleanup(void)
 {
+#ifdef NVIDIA_GPU_DIRECT
+	hfi1_gdr_device_remove();
+#endif
 	pci_unregister_driver(&hfi1_pci_driver);
 	opfn_exit();
 	node_affinity_destroy_all();
