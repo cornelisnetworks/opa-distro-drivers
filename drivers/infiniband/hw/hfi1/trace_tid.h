@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause) */
 /*
+ * Copyright(c) 2024 Cornelis Networks, Inc.
  * Copyright(c) 2018 Intel Corporation.
  *
  */
@@ -129,6 +130,45 @@ DEFINE_EVENT(/* exp_tid_reg */
 	TP_PROTO(unsigned int ctxt, u16 subctxt, u32 rarr, u32 npages,
 		 unsigned long va, unsigned long pa, dma_addr_t dma),
 	TP_ARGS(ctxt, subctxt, rarr, npages, va, pa, dma)
+);
+
+TRACE_EVENT(
+	hfi1_exp_tid_update,
+	TP_PROTO(unsigned int ctxt, u16 subctxt, struct hfi1_tid_info_v3 *tinfo),
+	TP_ARGS(ctxt, subctxt, tinfo),
+	TP_STRUCT__entry(
+		__field(u64, vaddr)
+		__field(u64, tidlist)
+		__field(u64, flags)
+		__field(u64, context)
+		__field(u32, tidcnt)
+		__field(u32, length)
+		__field(unsigned int, ctxt)
+		__field(u16, subctxt)
+		__field(u16, type)
+	),
+	TP_fast_assign(
+		__entry->ctxt = ctxt;
+		__entry->subctxt = subctxt;
+		__entry->vaddr = tinfo->vaddr;
+		__entry->tidlist = tinfo->tidlist;
+		__entry->tidcnt = tinfo->tidcnt;
+		__entry->length = tinfo->length;
+		__entry->flags = tinfo->flags;
+		__entry->context = tinfo->context;
+		__entry->type = (tinfo->flags & HFI1_MEMINFO_TYPE_ENTRY_MASK);
+	),
+	TP_printk("[%u:%u] vaddr 0x%llx tidlist 0x%llx tidcnt %u length %u flags.memtype 0x%x flags.reserved 0x%llx context 0x%llx",
+		  __entry->ctxt,
+		  __entry->subctxt,
+		  __entry->vaddr,
+		  __entry->tidlist,
+		  __entry->tidcnt,
+		  __entry->length,
+		  __entry->type,
+		  __entry->flags & (~(u64)HFI1_MEMINFO_TYPE_ENTRY_MASK),
+		  __entry->context
+	)
 );
 
 TRACE_EVENT(/* put_tid */

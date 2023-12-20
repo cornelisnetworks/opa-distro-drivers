@@ -241,6 +241,7 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	struct tid_user_buf *tidbuf;
 	u16 memtype = (tinfo->flags & HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_MASK);
 
+	trace_hfi1_exp_tid_update(uctxt->ctxt, fd->subctxt, tinfo);
 	ret = create_user_buf(fd, memtype, tinfo, &tidbuf);
 	if (ret)
 		return ret;
