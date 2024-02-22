@@ -4,7 +4,7 @@
 
 Name:           RPMNAME
 Group:		System Environment/Kernel
-Summary:        Extra kernel modules for IFS
+Summary:        Extra kernel modules for OmniPath
 Version:        %(echo %{kver}|sed -e 's/-/_/g')
 Release:        RPMRELEASE
 License:        GPLv2
@@ -48,7 +48,7 @@ fi
 %define kmod_moddir %kernel_module_package_moddir
 
 %description
-Updated kernel modules for OPA IFS
+Updated kernel modules for OPA
 
 %package devel
 Summary: Development headers for Cornelis HFI1 driver interface
@@ -111,16 +111,15 @@ for flavor in %flavors_to_build ; do
 		install -m 644 -t $RPM_BUILD_ROOT/lib/modules/%kver$flv/%kmod_moddir/%{name} "$mod"_$flavor/"$mod".ko
 	done
 done
-(targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi/
+(targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma
  mkdir -p $targetdir
- rsrcdir=$(pwd)/include/uapi/rdma
- srcdir=$(pwd)/include/rdma/hfi/
  cd %kdir
- sh ./scripts/headers_install.sh $srcdir/hfi1_user.h $targetdir/hfi1_user.h
- sh ./scripts/headers_install.sh $srcdir/hfi1_ioctl.h $targetdir/hfi1_ioctl.h
- targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/
- sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
- sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h)
+ sh ./scripts/headers_install.sh include/uapi/rdma/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
+ sh ./scripts/headers_install.sh include/uapi/rdma/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h
+ targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi
+ mkdir -p $targetdir
+ sh ./scripts/headers_install.sh include/uapi/rdma/hfi/hfi1_user.h $targetdir/hfi1_user.h
+ sh ./scripts/headers_install.sh include/uapi/rdma/hfi/hfi1_ioctl.h $targetdir/hfi1_ioctl.h)
 
 %files devel
 %defattr(-,root,root,-)
@@ -132,7 +131,9 @@ done
 %{_includedir}/uapi/rdma/rdma_user_ioctl_cmds.h
 
 %changelog
+* Thu Mar 13 2025 Dennis Dalessandro <dennis.dalessandro@cornelisnetworkscom>
+- Overhaul spec file to work for RHEL 9.5 and new OPXS package
 * Tue Mar  7 2023 Dennis Dalessandro <dennis.dalessandro@cornelisnetworks.com>
-- Fix headers_install usage on ffff
+- Fix headers_install usage 
 * Mon Jan 23 2023 Greg Kresge <greg.kresge@cornelisnetworks.com>
 - Update internal build scripts for distro-specific repo branches
