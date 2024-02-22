@@ -3,170 +3,8 @@
 DEFAULT_KERNEL_VERSION=""
 kerneldir="./"
 
-modules_cnt=0
-
-# Add each module separately
-modules[$modules_cnt]="rdmavt"
-files_to_copy[$modules_cnt]="
-	drivers/infiniband/sw/rdmavt/ah.c
-	drivers/infiniband/sw/rdmavt/ah.h
-	drivers/infiniband/sw/rdmavt/cq.c
-	drivers/infiniband/sw/rdmavt/cq.h
-	drivers/infiniband/sw/rdmavt/mad.c
-	drivers/infiniband/sw/rdmavt/mad.h
-	drivers/infiniband/sw/rdmavt/mcast.c
-	drivers/infiniband/sw/rdmavt/mcast.h
-	drivers/infiniband/sw/rdmavt/mmap.c
-	drivers/infiniband/sw/rdmavt/mmap.h
-	drivers/infiniband/sw/rdmavt/mr.c
-	drivers/infiniband/sw/rdmavt/mr.h
-	drivers/infiniband/sw/rdmavt/pd.c
-	drivers/infiniband/sw/rdmavt/pd.h
-	drivers/infiniband/sw/rdmavt/qp.c
-	drivers/infiniband/sw/rdmavt/qp.h
-	drivers/infiniband/sw/rdmavt/srq.c
-	drivers/infiniband/sw/rdmavt/srq.h
-	drivers/infiniband/sw/rdmavt/trace.c
-	drivers/infiniband/sw/rdmavt/trace.h
-	drivers/infiniband/sw/rdmavt/trace_rvt.h
-	drivers/infiniband/sw/rdmavt/trace_qp.h
-	drivers/infiniband/sw/rdmavt/trace_tx.h
-	drivers/infiniband/sw/rdmavt/trace_mr.h
-	drivers/infiniband/sw/rdmavt/trace_rc.h
-	drivers/infiniband/sw/rdmavt/trace_cq.h
-	drivers/infiniband/sw/rdmavt/vt.c
-	drivers/infiniband/sw/rdmavt/vt.h
-	drivers/infiniband/sw/rdmavt/rc.c
-"
-
-((modules_cnt++))
-modules[$modules_cnt]="hfi1"
-files_to_copy[$modules_cnt]="
-	drivers/infiniband/hw/hfi1/affinity.c
-	drivers/infiniband/hw/hfi1/affinity.h
-	drivers/infiniband/hw/hfi1/aspm.c
-	drivers/infiniband/hw/hfi1/aspm.h
-	drivers/infiniband/hw/hfi1/chip.c
-	drivers/infiniband/hw/hfi1/chip.h
-	drivers/infiniband/hw/hfi1/chip_registers.h
-	drivers/infiniband/hw/hfi1/common.h
-	drivers/infiniband/hw/hfi1/debugfs.c
-	drivers/infiniband/hw/hfi1/debugfs.h
-	drivers/infiniband/hw/hfi1/device.c
-	drivers/infiniband/hw/hfi1/device.h
-	drivers/infiniband/hw/hfi1/driver.c
-	drivers/infiniband/hw/hfi1/efivar.c
-	drivers/infiniband/hw/hfi1/efivar.h
-	drivers/infiniband/hw/hfi1/eprom.c
-	drivers/infiniband/hw/hfi1/eprom.h
-	drivers/infiniband/hw/hfi1/file_ops.c
-	drivers/infiniband/hw/hfi1/firmware.c
-	drivers/infiniband/hw/hfi1/hfi.h
-	drivers/infiniband/hw/hfi1/ipoib.h
-	drivers/infiniband/hw/hfi1/ipoib_main.c
-	drivers/infiniband/hw/hfi1/ipoib_tx.c
-	drivers/infiniband/hw/hfi1/init.c
-	drivers/infiniband/hw/hfi1/intr.c
-	drivers/infiniband/hw/hfi1/iowait.h
-	drivers/infiniband/hw/hfi1/mad.c
-	drivers/infiniband/hw/hfi1/mad.h
-	drivers/infiniband/hw/hfi1/mmu_rb.c
-	drivers/infiniband/hw/hfi1/mmu_rb.h
-	drivers/infiniband/hw/hfi1/opa_compat.h
-	drivers/infiniband/hw/hfi1/pcie.c
-	drivers/infiniband/hw/hfi1/pin_amd.c
-	drivers/infiniband/hw/hfi1/pin_system.c
-	drivers/infiniband/hw/hfi1/pin_nvidia.c
-	drivers/infiniband/hw/hfi1/pin_nvidia.h
-	drivers/infiniband/hw/hfi1/pinning.c
-	drivers/infiniband/hw/hfi1/pinning.h
-	drivers/infiniband/hw/hfi1/pio.c
-	drivers/infiniband/hw/hfi1/pio_copy.c
-	drivers/infiniband/hw/hfi1/pio.h
-	drivers/infiniband/hw/hfi1/platform.c
-	drivers/infiniband/hw/hfi1/platform.h
-	drivers/infiniband/hw/hfi1/qp.c
-	drivers/infiniband/hw/hfi1/qp.h
-	drivers/infiniband/hw/hfi1/qsfp.c
-	drivers/infiniband/hw/hfi1/qsfp.h
-	drivers/infiniband/hw/hfi1/rc.c
-	drivers/infiniband/hw/hfi1/ruc.c
-	drivers/infiniband/hw/hfi1/sdma.c
-	drivers/infiniband/hw/hfi1/sdma.h
-	drivers/infiniband/hw/hfi1/sdma_txreq.h
-	drivers/infiniband/hw/hfi1/sysfs.c
-	drivers/infiniband/hw/hfi1/trace.c
-	drivers/infiniband/hw/hfi1/trace.h
-	drivers/infiniband/hw/hfi1/trace_ctxts.h
-	drivers/infiniband/hw/hfi1/trace_dbg.h
-	drivers/infiniband/hw/hfi1/trace_ibhdrs.h
-	drivers/infiniband/hw/hfi1/trace_misc.h
-	drivers/infiniband/hw/hfi1/trace_rc.h
-	drivers/infiniband/hw/hfi1/trace_rx.h
-	drivers/infiniband/hw/hfi1/trace_tx.h
-	drivers/infiniband/hw/hfi1/trace_mmu.h
-	drivers/infiniband/hw/hfi1/trace_nvidia.h
-	drivers/infiniband/hw/hfi1/uc.c
-	drivers/infiniband/hw/hfi1/ud.c
-	drivers/infiniband/hw/hfi1/user_exp_rcv.c
-	drivers/infiniband/hw/hfi1/user_exp_rcv.h
-	drivers/infiniband/hw/hfi1/user_pages.c
-	drivers/infiniband/hw/hfi1/user_sdma.c
-	drivers/infiniband/hw/hfi1/user_sdma.h
-	drivers/infiniband/hw/hfi1/verbs.c
-	drivers/infiniband/hw/hfi1/verbs.h
-	drivers/infiniband/hw/hfi1/verbs_txreq.c
-	drivers/infiniband/hw/hfi1/verbs_txreq.h
-	drivers/infiniband/hw/hfi1/vnic.h
-	drivers/infiniband/hw/hfi1/vnic_main.c
-	drivers/infiniband/hw/hfi1/vnic_sdma.c
-	drivers/infiniband/hw/hfi1/exp_rcv.c
-	drivers/infiniband/hw/hfi1/exp_rcv.h
-	drivers/infiniband/hw/hfi1/iowait.c
-	drivers/infiniband/hw/hfi1/opfn.c
-	drivers/infiniband/hw/hfi1/opfn.h
-	drivers/infiniband/hw/hfi1/rc.h
-	drivers/infiniband/hw/hfi1/tid_rdma.c
-	drivers/infiniband/hw/hfi1/tid_rdma.h
-	drivers/infiniband/hw/hfi1/trace_iowait.h
-	drivers/infiniband/hw/hfi1/trace_tid.h
-	drivers/infiniband/hw/hfi1/fault.c
-	drivers/infiniband/hw/hfi1/fault.h
-	drivers/infiniband/hw/hfi1/msix.c
-	drivers/infiniband/hw/hfi1/msix.h
-	drivers/infiniband/hw/hfi1/netdev_rx.c
-	drivers/infiniband/hw/hfi1/ipoib_rx.c
-	drivers/infiniband/hw/hfi1/netdev.h
-"
-
-include_dirs[0]="include/rdma"
-include_dirs[1]="include/rdma/hfi"
-include_dirs[2]="include/uapi/rdma"
-include_files_to_copy[0]="
-	include/rdma/rdmavt_qp.h
-	include/rdma/rdmavt_mr.h
-	include/rdma/rdmavt_cq.h
-	include/rdma/rdma_vt.h
-	include/rdma/ib_hdrs.h
-    include/rdma/ib_sysfs.h
-	include/rdma/opa_vnic.h
-	include/rdma/opa_addr.h
-	include/rdma/tid_rdma_defs.h
-	include/uapi/rdma/rvt-abi.h
-"
-include_files_to_copy[1]="
-	include/uapi/rdma/hfi/hfi1_user.h
-	include/uapi/rdma/hfi/hfi1_ioctl.h
-"
-include_files_to_copy[2]="
-	include/uapi/rdma/rdma_user_ioctl.h
-	include/uapi/rdma/rdma_user_ioctl_cmds.h
-"
-
-include_dirs_cnt=${#include_dirs[@]}
-
 # ridiculously long to encourage good names later
-rpmname="ifs-kernel-updates"
+rpmname="opxs-kernel-updates"
 
 set -e
 
@@ -276,10 +114,10 @@ fi
 cd -P "$workdir"; workdir=$(pwd)
 tardir=$workdir/stage
 rm -rf $tardir
-for (( i = 0 ; i <= modules_cnt ; i++ ))
-do
-	mkdir -p $tardir/${modules[$i]}
-done
+mkdir -p $tardir/hfi1
+mkdir -p $tardir/rdmavt
+mkdir -p $tardir/include/rdma
+mkdir -p $tardir/include/uapi/rdma/hfi
 
 echo "Working in $workdir"
 
@@ -295,8 +133,8 @@ echo "Creating Makefile ($tardir/hfi1/Makefile)"
 cp $filedir/Makefile.hfi $tardir/hfi1/Makefile
 
 echo "Creating Symlink for spec files"
-rm -f $filedir/ifs-kernel-updates.spec
-ln -s $filedir/ifs-kernel-updates.spec.$distro $filedir/ifs-kernel-updates.spec
+rm -f $filedir/opxs-kernel-updates.spec
+ln -s $filedir/opxs-kernel-updates.spec.$distro $filedir/opxs-kernel-updates.spec
 
 DEFAULT_KERNEL_VERSION=$(uname -r)
 
@@ -329,35 +167,40 @@ src_path=$workdir/rpmbuild/SOURCES/
 # prepare files list and depmod config for every module built
 echo "%defattr(644,root,root,755)" > $src_path/$rpmname.files
 
-modlist=""
-for (( i = 0 ; i <= modules_cnt ; i++ ))
-do
-        echo "override ${modules[$i]} $kernel_rpmver-* weak-updates/${modules[$i]}" >> $src_path/$rpmname.conf
-        echo "/lib/modules/%2-%1/$kmod_subdir/$rpmname/${modules[$i]}.ko" >> $src_path/$rpmname.files
-	modlist+=" ${modules[$i]}"
-done
+modlist="rdmavt hfi1"
+echo "override rdmavt $kernel_rpmver-* weak-updates/rdmavt" >> $src_path/$rpmname.conf
+echo "/lib/modules/%2-%1/$kmod_subdir/$rpmname/rdmavt.ko" >> $src_path/$rpmname.files
+echo "override hfi1 $kernel_rpmver-* weak-updates/hfi1" >> $src_path/$rpmname.conf
+echo "/lib/modules/%2-%1/$kmod_subdir/$rpmname/hfi1.ko" >> $src_path/$rpmname.files
+
 echo "/etc/depmod.d/$rpmname.conf" >> $src_path/$rpmname.files
 
 # build the tarball
 echo "Copy the working files from $srcdir/$kerneldir"
 echo "Copy the working files to $tardir"
+
 pushd $srcdir/$kerneldir
-for (( i = 0 ; i <= modules_cnt ; i++ ))
-do
-	cp ${files_to_copy[$i]} $tardir/${modules[$i]}/
-done
-echo "Copying header files"
-for (( i = 0 ; i < include_dirs_cnt ; i++ ))
-do
-        mkdir -p $tardir/${include_dirs[$i]}
-        cp ${include_files_to_copy[$i]} $tardir/${include_dirs[$i]}/
-done
+
+echo "Copying Files to tardir..."
+cp drivers/infiniband/hw/hfi1/*.c $tardir/hfi1/
+cp drivers/infiniband/hw/hfi1/*.h $tardir/hfi1/
+cp drivers/infiniband/sw/rdmavt/*.c $tardir/rdmavt/
+cp drivers/infiniband/sw/rdmavt/*.h $tardir/rdmavt/
+cp -r include $tardir/
+#cp  nclude/rdma/rdma_vt.h $tardir/include/rdma/
+#cp include/rdma/rdmavt_*.h $tardir/include/rdma/
+#cp include/uapi/rdma/rvt-abi.h $tardir/include/uapi/rdma/
+#cp include/uapi/rdma/hfi/*.h $tardir/include/uapi/rdma/hfi/
+
 cp $srcdir/$kerneldir/LICENSE $tardir/.
 popd
 echo "Building tar file"
 (cd $tardir; tar cfz - --transform="s,^,${rpmname}-${rpmversion}/," *) > \
 	rpmbuild/SOURCES/$rpmname-$rpmversion.tgz
 cd $workdir
+
+
+echo "Tarball: $rpmbuild/SOURCES/$rpmname-$rpmversion.tgz"
 
 # create the spec file
 echo "Creating spec file"
@@ -396,6 +239,6 @@ cd rpmbuild
 rpmbuild -bs --define "_topdir $(pwd)" SPECS/${rpmname}.spec
 ret=$?
 
-rm -f $filedir/ifs-kernel-updates.spec
+rm -f $filedir/opxs-kernel-updates.spec
 
 exit $ret

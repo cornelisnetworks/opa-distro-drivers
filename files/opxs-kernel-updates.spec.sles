@@ -1,5 +1,5 @@
 %{!?kver: %global kver %(uname -r)}
-%define kdir /lib/modules/%{kver}/build
+%define kdir /lib/modules/%{kver}/source
 %define kernel_version %{kver}
 
 Name:           RPMNAME
@@ -39,10 +39,6 @@ else
 fi
 )
 
-%if 0%{?rhel} > 7
-%undefine _find_debuginfo_dwz_opts
-%endif
-
 %define modlist MODLIST
 %define mversion MVERSION
 %define kmod_moddir %kernel_module_package_moddir
@@ -63,6 +59,7 @@ for flavor in %flavors_to_build; do
 	for mod in %modlist; do
 		rm -rf "$mod"_$flavor
 		cp -r $mod  "$mod"_$flavor
+		echo "override $mod %{kernelrpm_ver}-* weak-updates/$mod" >> %{SOURCE2}
 	done
 done
 
@@ -79,18 +76,17 @@ fi
 echo "Kernel version is %kver"
 echo "Kernel source directory is \"%kbuild\""
 # Build
-
 for flavor in %flavors_to_build; do
 	for mod in %modlist; do
 		rm -rf $mod
 		cp -r "$mod"_$flavor $mod
 		done
 	echo rpm kernel_source %{kernel_source $flavor}
-	if [ -z "%mversion" ]; then
-		make -j 10 CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} CONFIG_HFI_NVIDIA CONFIG_HFI_AMD M=$PWD
-	else
-		make -j 10  MVERSION=\"%mversion\" CONFIG_HFI_NVIDIA CONFIG_HFI_AMD CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} M=$PWD
-	fi
+        if [ -z "%mversion" ]; then
+                make -j 8 CONFIG_INFINIBAND_RDMAVT=m CONFIG_INFINIBAND_HFI1=m KDIR=%{kernel_source $flavor} M=$PWD
+        else
+                make -j 8 MVERSION=\"%mversion\" CONFIG_INFINIBAND_RDMAVT=m CONFIG_INFINIBAND_HFI1=m KDIR=%{kernel_source $flavor} M=$PWD
+        fi
 	for mod in %modlist; do
 		rm -rf "$mod"_$flavor
 		mv -f $mod "$mod"_$flavor
@@ -101,7 +97,6 @@ done
 %install
 install -m 644 -D %{SOURCE2} $RPM_BUILD_ROOT/etc/depmod.d/%{name}.conf
 for flavor in %flavors_to_build ; do
-	flv=$( [[ $flavor = default ]] || echo ".$flavor" )
 	mkdir -p $RPM_BUILD_ROOT/lib/modules/%kver$flv/%kmod_moddir/%{name}
 	for mod in %modlist; do
 		if [[ -x "$KERNEL_SIGNING_SCRIPT" ]]; then
@@ -111,16 +106,17 @@ for flavor in %flavors_to_build ; do
 		install -m 644 -t $RPM_BUILD_ROOT/lib/modules/%kver$flv/%kmod_moddir/%{name} "$mod"_$flavor/"$mod".ko
 	done
 done
-(targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi/
+
+(targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma
  mkdir -p $targetdir
- rsrcdir=$(pwd)/include/uapi/rdma
- srcdir=$(pwd)/include/rdma/hfi/
+ srcdir=$PWD
  cd %kdir
- sh ./scripts/headers_install.sh $srcdir/hfi1_user.h $targetdir/hfi1_user.h
- sh ./scripts/headers_install.sh $srcdir/hfi1_ioctl.h $targetdir/hfi1_ioctl.h
- targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/
- sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
- sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h)
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h
+ targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi
+ mkdir -p $targetdir
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_user.h $targetdir/hfi1_user.h
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_ioctl.h $targetdir/hfi1_ioctl.h)
 
 %files devel
 %defattr(-,root,root,-)
