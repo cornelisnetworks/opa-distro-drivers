@@ -12,7 +12,11 @@ NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi
 
 ifdef CONFIG_HFI1_NVIDIA
 ifndef NVIDIA_DRIVER_SOURCE
+ifneq ($(findstring U2404, $(DISTROFLAG)),)
+NVIDIA_VERSION=$(shell dpkg -l | grep nvidia-open | awk '{ print $$3 }' | cut -d - -f 1)
+else
 NVIDIA_VERSION=$(shell rpm -q nvidia-driver | cut -d '-' -f 3)
+endif
 NVIDIA_DRIVER_SOURCE=/usr/src/nvidia-$(NVIDIA_VERSION)
 endif
 NOSTDINC_FLAGS += -I$(NVIDIA_DRIVER_SOURCE) -DCONFIG_HFI1_NVIDIA
@@ -20,9 +24,9 @@ endif
 
 obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
 
-hfi1-y := affinity.o aspm.o  chip.o device.o driver.o diag.o efivar.o eprom.o \
-	file_ops.o firmware.o init.o intr.o mad.o mmu_rb.o pcie.o pio.o pin_system.o \
-	pinning.o pio_copy.o platform.o qp.o qsfp.o rc.o ruc.o sdma.o sysfs.o trace.o \
+hfi1-y := affinity.o aspm.o  chip.o device.o driver.o efivar.o eprom.o \
+	file_ops.o firmware.o init.o intr.o mad.o mmu_rb.o pcie.o pio.o pin_system.o\
+	pio_copy.o platform.o qp.o qsfp.o rc.o ruc.o sdma.o sysfs.o trace.o \
 	uc.o ud.o user_exp_rcv.o exp_rcv.o user_pages.o user_sdma.o verbs.o \
 	verbs_txreq.o vnic_main.o vnic_sdma.o tid_rdma.o opfn.o iowait.o \
 	ipoib_main.o ipoib_tx.o msix.o ipoib_rx.o netdev_rx.o
@@ -31,20 +35,30 @@ hfi1-$(CONFIG_DEBUG_FS) += debugfs.o
 CFLAGS_trace.o = -I$(src)
 
 ifdef CONFIG_HFI1_NVIDIA
-hfi1-y += pin_nvidia.o
+hfi1-y += pin_nvidia.o tid_nvidia.o gdr_ops.o
 CFLAGS_pin_nvidia.o += -I$(NVIDIA_DRIVER_SOURCE)
 CFLAGS_pin_nvidia.o += -DCONFIG_HFI1_NVIDIA
 endif
+ccflags-$(CONFIG_HFI1_NVIDIA) += -DNVIDIA_GPU_DIRECT
 
 ifdef CONFIG_HFI1_AMD
 ifndef AMDGPU_DRIVER_SOURCE
+ifneq ($(findstring U2404, $(DISTROFLAG)),)
+# Argh. AMD version in dpkg is <Major>.<Minor>.<Subminor>.<Something?>-<Build?>.<Ubuntu Major>.<Ubuntu Minor>
+# But the actual directory is /usr/src/amdgpu-<Major>.<Minor>.<Subminor>-<Build?>.<Ubuntu Major>.<Ubuntu Minor>
+# so we need this hacky command line to skip one field in the middle
+AMDGPU_VERSION := $(shell dpkg -l amdgpu-dkms | grep amdgpu-dkms -m 1 | cut -d : -f 2 | cut -f 1 -d ' ' | sed -e s/\.[0-9]*-/-/g)
+AMDGPU_DRIVER_SOURCE=/usr/src/amdgpu-$(AMDGPU_VERSION)
+else
 AMDGPU_DRIVER_SOURCE := $(shell rpm -ql amdgpu-dkms | grep -E '/usr/src/amdgpu-[^/]+/include/drm/amd_rdma.h$$' | head -n1)
 AMDGPU_DRIVER_SOURCE := $(subst /include/drm/amd_rdma.h,,$(AMDGPU_DRIVER_SOURCE))
 endif
 endif
-hfi1-$(CONFIG_HFI1_AMD) += pin_amd.o
+endif
+hfi1-$(CONFIG_HFI1_AMD) += pin_amd.o tid_amd.o
 ccflags-$(CONFIG_HFI1_AMD) += -I$(AMDGPU_DRIVER_SOURCE)/include
 ccflags-$(CONFIG_HFI1_AMD) += -DCONFIG_HFI1_AMD
+ccflags-$(CONFIG_HFI1_AMD_SOFTDEP) += -DCONFIG_HFI1_AMD_SOFTDEP
 
 ifdef MVERSION
 CFLAGS_driver.o = -DHFI1_DRIVER_VERSION_BASE=\"$(MVERSION)\"

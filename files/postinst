@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# Debian postinst file, will run when .deb is installed.
+echo "Saving kernel headers"
+cd /usr/src/linux-headers-`uname -r`/include/rdma
+mv rdma_vt.h rdma_vt.h.sav
+mv opa_port_info.h opa_port_info.h.sav
+cp /usr/src/opxs-kernel-updates/include/rdma/* .
+cd ../uapi/rdma
+mv rdma_user_ioctl.h rdma_user_ioctl.h.sav
+mv rdma_user_ioctl_cmds.h rdma_user_ioctl_cmds.h.sav
+mv hfi hfi.sav
+cp -r /usr/src/opxs-kernel-updates/include/uapi/rdma/* .
+

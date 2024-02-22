@@ -27,6 +27,11 @@ while [[ $# -gt 0 ]] ; do
 	shift
 done
 
+if [[ -z $test_arg ]]; then
+	echo "Invalid test option; you must specify test or notest"
+	exit 2
+fi
+
 sdir=$PWD
 tmpdir="/tmp/tmpbuild"
 
@@ -46,17 +51,13 @@ if [[ $build_arg != "nobuild" ]]; then
 
 	echo "GPU build arguments are \"$gpuarg\""
 
-	./do-update-makerpm.sh -S ${PWD} -w $tmpdir $gpuarg
+	./do-update-makedeb.sh -S ${PWD} -w $tmpdir $gpuarg
 	if [[ $? -ne 0 ]]; then
-		echo "do-update-make-rpm failed!"
+		echo "do-update-makedeb failed!"
 		exit 1
 	fi
 
-	cd $tmpdir/rpmbuild && rpmbuild --rebuild --define "_topdir $(pwd)" --nodeps SRPMS/*.src.rpm
-	if [[ $? -ne 0 ]]; then
-		echo Build failed!
-		exit 1
-	fi
+	echo "Just did do-update-makedev"
 
 	cd $sdir
 elif [[ $build_arg == "nobuild" ]]; then
@@ -68,28 +69,19 @@ fi
 
 if [[ $test_arg == "test" ]]; then
 	echo "Running Test"
-
-	# SLES Names RPMS as follows:
-	#ifs-kernel-updates-devel-5.14.21_150500.53_default-29.x86_64.rpm
-	#ifs-kernel-updates-kmp-default-5.14.21_150500.53_default_k5.14.21_150500.53-29.x86_64.rpm
-
-	#RHEL Names RPMS as follows:
-	#/tmp/tmpbuild/rpmbuild/RPMS/x86_64/ifs-kernel-updates-devel-5.14.0_162.6.1.el9_1.x86_64-47.x86_64.rpm
-	#/tmp/tmpbuild/rpmbuild/RPMS/x86_64/kmod-ifs-kernel-updates-5.14.0_162.6.1.el9_1.x86_64-47.x86_64.rpm
+	cd $tmpdir
 
 	source /etc/os-release
-	if [[ $ID == "rhel" ]]; then
-		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/kmod-ifs-kernel-updates*.rpm`
-		echo "Using RHEL RPM: $rpmname"
-	else #assume sles
-		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/ifs-kernel-updates-kmp-default*.rpm`
-		echo "Using SLES RPM: $rpmname"
-	fi
+	debname=` ls -t -1 *.deb | head -n 1`
+	echo "Using Ubuntu DEB: $debname"
 
-	cd $tmpdir/rpmbuild/RPMS/x86_64
-	echo "RPM Contents:"
-	rpm -qpl *.rpm
-	rpm2cpio $rpmname | cpio -idmv --no-absolute-filenames
+	echo "DEB Contents:"
+	dpkg -c $debname
+	echo "Unpacking DEB"
+
+	ar vx $debname
+	tar xvf data.tar.zst
+
 	echo "Checking Srcversions:"
 	echo "HFI (current):"
 	cat /sys/module/hfi1/srcversion
@@ -97,12 +89,12 @@ if [[ $test_arg == "test" ]]; then
 	cat /sys/module/rdmavt/srcversion
 
 	echo "HFI from build:"
-	modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
+	modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
 	cat hfi1.srcversion
 
 	if [[ $use_nvidia = y ]]; then
 		echo "Checking GPU support:"
-		modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep -i nvidia
+		modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko | grep -i nvidia
 		if [[ $? -eq 0 ]]; then
 			echo "GPU biuld detected"
 		else
@@ -113,7 +105,7 @@ if [[ $test_arg == "test" ]]; then
 
 	if [[ $use_amd = y ]] ; then
 		echo "Checking AMD GPU support:"
-		modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko | grep -E '\<(amd_|amdgpu)'
+		modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko | grep -E '\<(amd_|amdgpu)'
 		if [[ $? -eq 0 ]] ; then
 			echo "AMD features detected"
 		else
@@ -123,11 +115,11 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	echo "RDMAVT from build:"
-	modinfo lib/modules/`uname -r`/extra/ifs-kernel-updates/rdmavt.ko | grep srcversion | awk '{print $2}' > rdmavt.srcversion
+	modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/rdmavt.ko | grep srcversion | awk '{print $2}' > rdmavt.srcversion
 	cat rdmavt.srcversion
 
 	echo "Removing drivers"
-	sudo systemctl stop opafm
+	sudo systemctl stop opa-fm
 	sudo rmmod hfi1
 	sudo rmmod rdmavt
 
@@ -145,8 +137,8 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	echo "Time to load..."
-	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/rdmavt.ko
-	sudo insmod lib/modules/`uname -r`/extra/ifs-kernel-updates/hfi1.ko
+	sudo insmod lib/modules/`uname -r`/extra/opxs-kernel-updates/rdmavt.ko
+	sudo insmod lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko
 
 	echo "Checking Srcversions:"
 	echo "HFI (current):"
@@ -156,7 +148,7 @@ if [[ $test_arg == "test" ]]; then
 	rvt_curr_version=`cat /sys/module/rdmavt/srcversion`
 	echo $rvt_curr_version
 
-	sudo systemctl start opafm
+	sudo systemctl start opa-fm
 
 	echo "Comparing verions..."
 	hfi_build_vers=`cat hfi1.srcversion`
@@ -165,11 +157,15 @@ if [[ $test_arg == "test" ]]; then
 	if [[ $hfi_build_vers != $hfi_curr_version ]]; then
 		echo "Mismatch between HFI versions!"
 		exit 1
+	else
+		echo "HFI versions match"
 	fi
 
 	if [[ $rvt_build_vers != $rvt_curr_version ]]; then
 		echo "Mismatch between RVT versions!"
 		exit 1
+	else
+		echo "RDMAVT versions match"
 	fi
 
 	echo "Waiting 10 seconds for links to come up"
@@ -177,12 +173,9 @@ if [[ $test_arg == "test" ]]; then
 
 	# opainfo would be good to call here but its not always installed
 	# isntead just cat the end of the dmesg
-	dmesg -d | tail -n 15
+	sudo dmesg -d | tail -n 15
 
-	# Clean up
-	rm -rf lib
-	rm -rf etc
-
+	rm -rf lib etc usr debian-binary *.zst *.srcversion
 	exit 0
 elif [[ $test_arg == "notest" ]]; then
 	echo "Skipping Test"

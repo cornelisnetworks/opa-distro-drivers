@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# Debian prerm file, will run when .deb is uninstalled.
+echo "Restoring kernel headers"
+cd /usr/src/linux-headers-`uname -r`/include/rdma
+if [ -e rdma_vt.h.sav ]; then
+	rm rdma_vt.h
+	mv rdma_vt.h.sav rdma_vt.h
+fi
+if [ -e opa_port_info.h.sav ] ; then
+	rm opa_port_info.h
+	mv opa_port_info.h.sav opa_port_info.h
+fi
+cd ../uapi/rdma
+if [ -e rdma_user_ioctl.h.sav ] ; then
+	rm rdma_user_ioctl.h
+	mv rdma_user_ioctl.h.sav rdma_user_ioctl.h
+fi
+if [ -e rdma_user_ioctl_cmds.h.sav ] ; then
+	rm rdma_user_ioctl_cmds.h
+	mv rdma_user_ioctl_cmds.h.sav rdma_user_ioctl_cmds.h
+fi
+if [ -d hfi.sav ] ; then
+	rm -rf hfi
+	mv hfi.sav hfi
+fi
