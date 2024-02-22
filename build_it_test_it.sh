@@ -30,6 +30,8 @@ done
 sdir=$PWD
 tmpdir="/tmp/tmpbuild"
 
+export MVERSION="dev-build"
+
 if [[ $build_arg != "nobuild" ]]; then
 	rm -rf $tmpdir
 	gpuarg=""
