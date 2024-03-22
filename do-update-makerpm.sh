@@ -260,6 +260,9 @@ echo "distro = $distro"
 filedir=$srcdir/files
 
 rpmrelease=`git rev-list --count HEAD`
+if [[ $gpu == "yes" ]]; then
+	rpmrelease+="cuda"
+fi
 
 # after cd, where are we *really*
 cd -P "$workdir"; workdir=$(pwd)
