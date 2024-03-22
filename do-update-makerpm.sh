@@ -274,6 +274,9 @@ echo "distro = $distro"
 filedir=$srcdir/files
 
 rpmrelease=`git rev-list --count HEAD`
+if [[ $build_nvidia = y ]]; then
+	rpmrelease+="cuda"
+fi
 
 # after cd, where are we *really*
 cd -P "$workdir"; workdir=$(pwd)
