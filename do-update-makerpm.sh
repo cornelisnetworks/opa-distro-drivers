@@ -274,7 +274,7 @@ echo "distro = $distro"
 filedir=$srcdir/files
 
 rpmrelease=`git rev-list --count HEAD`
-if [[ $gpu == "yes" ]]; then
+if [[ $build_nvidia = y ]]; then
 	rpmrelease+="cuda"
 fi
 
