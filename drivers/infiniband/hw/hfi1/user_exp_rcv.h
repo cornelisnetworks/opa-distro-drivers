@@ -390,6 +390,10 @@ void deregister_system_tid_ops(void);
 int register_nvidia_tid_ops(void);
 void deregister_nvidia_tid_ops(void);
 #endif
+#ifdef CONFIG_HFI1_AMD
+int register_amd_tid_ops(void);
+void deregister_amd_tid_ops(void);
+#endif
 
 void hfi1_user_exp_rcv_invalidate(struct tid_rb_node *node);
 
