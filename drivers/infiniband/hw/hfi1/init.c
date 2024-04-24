@@ -30,6 +30,7 @@
 #include "exp_rcv.h"
 #include "netdev.h"
 #include "pinning.h"
+#include "user_exp_rcv.h"
 
 #ifdef NVIDIA_GPU_DIRECT
 #include "gdr_ops.h"
@@ -1390,6 +1391,7 @@ static int __init hfi1_mod_init(void)
 	register_system_tid_ops();
 #ifdef CONFIG_HFI1_AMD
 	register_amd_pinning_interface();
+	register_amd_tid_ops();
 #endif
 #ifdef CONFIG_HFI1_NVIDIA
 	register_nvidia_pinning_interface();
@@ -1503,6 +1505,7 @@ static void __exit hfi1_mod_cleanup(void)
 	deregister_system_tid_ops();
 	deregister_system_pinning_interface();
 #ifdef CONFIG_HFI1_AMD
+	deregister_amd_tid_ops();
 	deregister_amd_pinning_interface();
 #endif
 #ifdef CONFIG_HFI1_NVIDIA
