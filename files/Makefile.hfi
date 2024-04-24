@@ -46,7 +46,7 @@ AMDGPU_DRIVER_SOURCE := $(shell rpm -ql amdgpu-dkms | grep -E '/usr/src/amdgpu-[
 AMDGPU_DRIVER_SOURCE := $(subst /include/drm/amd_rdma.h,,$(AMDGPU_DRIVER_SOURCE))
 endif
 endif
-hfi1-$(CONFIG_HFI1_AMD) += pin_amd.o
+hfi1-$(CONFIG_HFI1_AMD) += pin_amd.o tid_amd.o
 ccflags-$(CONFIG_HFI1_AMD) += -I$(AMDGPU_DRIVER_SOURCE)/include
 ccflags-$(CONFIG_HFI1_AMD) += -DCONFIG_HFI1_AMD
 

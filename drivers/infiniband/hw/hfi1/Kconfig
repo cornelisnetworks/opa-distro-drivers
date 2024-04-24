@@ -31,6 +31,7 @@ config HFI1_NVIDIA
 config HFI1_AMD
 	bool "Build AMD memory-pinning code"
 	depends on INFINIBAND_HFI1
+	select NEED_SG_DMA_LENGTH
 	default n
 	help
 	  Build hfi1 AMD GPU memory-pinning code for user_sdma. Requires AMD
