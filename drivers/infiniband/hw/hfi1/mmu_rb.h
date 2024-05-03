@@ -39,13 +39,15 @@ struct mmu_rb_ops {
 
 struct mmu_rb_handler {
 	/*
-	 * struct mmu_notifier is 56 bytes, and spinlock_t is 4 bytes, so
-	 * they fit together in one cache line.  mn is relatively rarely
-	 * accessed, so co-locating the spinlock with it achieves much of
-	 * the cacheline contention reduction of giving the spinlock its own
-	 * cacheline without the overhead of doing so.
+	 * struct mmu_notifier is 40 bytes, struct mm_struct* is 8 bytes, and
+	 * spinlock_t is 4 bytes, so they fit together in one cache line.
+	 *
+	 * mn is relatively rarely accessed, so co-locating the spinlock with
+	 * it achieves much of the cacheline contention reduction of giving the
+	 * spinlock its own cacheline without the overhead of doing so.
 	 */
 	struct mmu_notifier mn;
+	struct mm_struct *mm;
 	spinlock_t lock;        /* protect the RB tree */
 
 	/* Begin on a new cachline boundary here */
