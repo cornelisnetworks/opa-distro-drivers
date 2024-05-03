@@ -83,7 +83,7 @@ static void unpin_vector_pages(struct mm_struct *mm, struct page **pages,
 
 static inline struct mm_struct *mm_from_sdma_node(struct sdma_mmu_node *node)
 {
-	return node->rb.handler->mn._rh->mm;
+	return node->rb.handler->mm;
 }
 
 static void free_system_node(struct sdma_mmu_node *node)
