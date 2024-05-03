@@ -73,7 +73,7 @@ static int _hfi1_mmu_rb_register(void *ops_arg,
 		return ret;
 	}
 
-	h->mn._rh->mm = current->mm;
+	h->mm = current->mm;
 	*handler = h;
 	return 0;
 }
@@ -94,10 +94,10 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	struct list_head del_list;
 
 	/* Prevent freeing of mm until we are completely finished. */
-	mmgrab(handler->mn._rh->mm);
+	mmgrab(handler->mm);
 
 	/* Unregister first so we don't get any more notifications. */
-	mmu_notifier_unregister(&handler->mn, handler->mn._rh->mm);
+	mmu_notifier_unregister(&handler->mn, handler->mm);
 
 	/*
 	 * Make sure the wq delete handler is finished running.  It will not
@@ -123,7 +123,7 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	}
 
 	/* Now the mm may be freed. */
-	mmdrop(handler->mn._rh->mm);
+	mmdrop(handler->mm);
 
 	kfree(handler->free_ptr);
 }
@@ -137,7 +137,7 @@ int hfi1_mmu_rb_insert(struct mmu_rb_handler *handler,
 
 	trace_hfi1_mmu_rb_insert(mnode);
 
-	if (current->mm != handler->mn._rh->mm)
+	if (current->mm != handler->mm)
 		return -EPERM;
 
 	spin_lock_irqsave(&handler->lock, flags);
@@ -241,7 +241,7 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg)
 	unsigned long flags;
 	bool stop = false;
 
-	if (current->mm != handler->mn._rh->mm)
+	if (current->mm != handler->mm)
 		return;
 
 	INIT_LIST_HEAD(&del_list);
@@ -464,11 +464,7 @@ void hfi1_gpu_cache_invalidate(struct mmu_rb_handler *handler,
 			       unsigned long start, unsigned long end)
 {
 	struct mmu_notifier_range r = {
-#ifdef NO_MMU_NOTIFIER_MM
 		.mm = handler->mm,
-#else
-		.mm = handler->mn._rh->mm,
-#endif
 		.start = start,
 		.end = end,
 	};
