@@ -10,6 +10,48 @@
 #include "hfi.h"
 #include "exp_rcv.h"
 
+struct hfi1_page_iter_ops;
+
+/**
+ * Base type for iterating over sets of pinned-page ranges (pagesets).
+ *
+ * Depending on implementation, pages may also already be DMA-mapped.
+ */
+struct hfi1_page_iter {
+	struct hfi1_page_iter_ops *ops;
+};
+
+struct hfi1_page_iter_ops {
+	/**
+	 * Advance iterator to next pageset.
+	 *
+	 * Implementation must construct TID-compatible pagesets. TID-compatible means:
+	 * - starting address is 4KiB-aligned.
+	 * - size in range of [4KiB,2MiB].
+	 * - size is a power-of-two.
+	 *
+	 * @return > 0 on successful advancement, 0 when iterator is at last
+	 * element, < 0 on error. It is an error to call .next() after it
+	 * returns 0.
+	 */
+	int (*next)(struct hfi1_page_iter *iter);
+
+	void (*free)(struct hfi1_page_iter *iter);
+};
+
+struct tid_user_buf;
+
+/*
+ * hfi1_page_iter implementation for tid_system and tid_nvidia.
+ *
+ * Built around struct tid_user_buf->{psets,n_psets}.
+ */
+struct page_array_iter {
+	struct hfi1_page_iter common;
+	struct tid_user_buf *tbuf;
+	unsigned int setidx;
+};
+
 /*
  * structs tid_pageset, tid_user_buf, tid_rb_node, tid_user_buf_ops,
  * tid_node_ops - Generic memory-pinning and DMA-mapping datastructures and
@@ -222,12 +264,26 @@ struct tid_user_buf_ops {
 	 * tid_user_buf_ops.init() implementation.
 	 */
 	void (*unnotify)(struct tid_user_buf *tbuf);
+
+	/**
+	 * Optional. Get pageset iterator. Pages in pageset must be pinned and
+	 * physically-contiguous. Whether pages are also DMA-mapped at the time
+	 * this method is called is implementation-dependent.
+	 *
+	 * Implementation must return iterator only if there is at least one
+	 * pageset to iterate over. I.e. it is an error if implementation
+	 * cannot return an iterator over at least one pageset.
+	 *
+	 * Returned iterator must be freed with @hfi1_page_iter->ops->free().
+	 *
+	 * @return pointer on success, ERR_PTR() on error.
+	 */
+	struct hfi1_page_iter *(*iter_begin)(struct tid_user_buf *tbuf);
 };
 
 struct tid_node_ops {
 	/**
-	 * Create tid_rb_node for pinned-page range. Page range given by
-	 * (@pageidx,@npages). Pinned pages are in @tbuf.
+	 * Create tid_rb_node for pageset given by @iter.
 	 *
 	 * .init() implementation must initialize the following
 	 *   - fdata
@@ -244,8 +300,11 @@ struct tid_node_ops {
 	 *   - freed
 	 *   - type: one of the HFI1_MEMINFO_TYPE* defines
 	 *
-	 * Implementation must DMA-map the page-range given by
-	 * (@pageidx,@npages) from @tbuf if it is not DMA-mapped already.
+	 * Pages in pageset given by @iter must be TID-ready: pinned, physically contiguous,
+	 * 4KiB <= size <= 2MiB, starting address is power-of-two.
+	 *
+	 * Implementation must DMA-map the pages given by @iter if they are not DMA-mapped
+	 * already.
 	 *
 	 * If @fd->use_mn is true and memory implementation does not support
 	 * invalidation callbacks, .init() must return an error.
@@ -254,8 +313,7 @@ struct tid_node_ops {
 	 * @tbuf Contains larger memory pinning to create TID entry from
 	 * @rcventry
 	 * @grp
-	 * @pageidx
-	 * @npages
+	 * @iter
 	 *
 	 * @return allocated node on success, ERR_PTR() on error.
 	 */
@@ -263,8 +321,7 @@ struct tid_node_ops {
 				    struct tid_user_buf *tbuf,
 				    u32 rcventry,
 				    struct tid_group *grp,
-				    u16 pageidx,
-				    unsigned int npages);
+				    struct hfi1_page_iter *iter);
 
 	/**
 	 * Free @node.

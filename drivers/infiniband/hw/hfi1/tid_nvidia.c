@@ -158,14 +158,24 @@ static unsigned int nvidia_pgt_shift(const struct nvidia_p2p_page_table *pages)
 static struct tid_node_ops nvidia_nodeops;
 
 static struct tid_rb_node *nvidia_node_init(struct hfi1_filedata *fd, struct tid_user_buf *tbuf,
-					    u32 rcventry, struct tid_group *grp, u16 pageidx,
-					    unsigned int npages)
+					    u32 rcventry, struct tid_group *grp,
+					    struct hfi1_page_iter *piter)
 {
 	struct nvidia_tid_user_buf *nvbuf =
 		container_of(tbuf, struct nvidia_tid_user_buf, common);
+	struct page_array_iter *iter =
+		container_of(piter, struct page_array_iter, common);
 	struct nvidia_tid_node *nvnode;
+	unsigned int npages;
 	unsigned int ps;
+	u16 pageidx;
 	u32 pgsz;
+
+	if (iter->setidx >= tbuf->n_psets)
+		return ERR_PTR(-EINVAL);
+
+	npages = tbuf->psets[iter->setidx].count;
+	pageidx = tbuf->psets[iter->setidx].idx;
 
 	/* As long as fd is passed in separately, sanity-check */
 	if (nvbuf->fd != fd)
@@ -206,7 +216,6 @@ static struct tid_rb_node *nvidia_node_init(struct hfi1_filedata *fd, struct tid
 	nvnode->common.vaddr = tbuf->vaddr + (pageidx * pgsz);
 	nvnode->common.use_mn = nvbuf->common.use_mn;
 	nvnode->common.type = HFI1_MEMINFO_TYPE_NVIDIA;
-
 	list_add_tail(&nvnode->list, &nvbuf->nodes);
 	spin_unlock(&nvbuf->nodes_lock);
 

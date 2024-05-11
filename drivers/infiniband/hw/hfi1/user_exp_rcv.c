@@ -19,6 +19,7 @@ static int program_rcvarray(struct hfi1_filedata *fd,
 			    struct tid_user_buf *tbuf,
 			    struct tid_group *grp, u16 count,
 			    u32 *tidlist, unsigned int *tididx,
+			    struct hfi1_page_iter *iter,
 			    unsigned int *pmapped);
 static int unprogram_rcvarray(struct hfi1_filedata *fd, u32 tidinfo);
 static void __clear_tid_node(struct hfi1_filedata *fd,
@@ -191,6 +192,57 @@ static int create_user_buf(struct hfi1_filedata *fd, u16 memtype, struct hfi1_ti
 	return 0;
 }
 
+static int page_array_iter_next(struct hfi1_page_iter *piter)
+{
+	struct page_array_iter *iter =
+		container_of(piter, struct page_array_iter, common);
+
+	if (!iter->tbuf->psets || !iter->tbuf->n_psets)
+		return -EINVAL;
+
+	iter->setidx++;
+
+	return (iter->setidx < iter->tbuf->n_psets);
+}
+
+static void page_array_iter_free(struct hfi1_page_iter *piter)
+{
+	struct page_array_iter *iter =
+		container_of(piter, struct page_array_iter, common);
+
+	kfree(iter);
+}
+
+static struct hfi1_page_iter_ops page_array_iter_ops = {
+	.next = page_array_iter_next,
+	.free = page_array_iter_free
+};
+
+struct hfi1_page_iter *tid_user_buf_iter_begin(struct tid_user_buf *tbuf)
+{
+	struct page_array_iter *iter;
+
+	if (!tbuf->psets || !tbuf->n_psets)
+		return ERR_PTR(-EINVAL);
+
+	iter = kzalloc(sizeof(*iter), GFP_KERNEL);
+	if (!iter)
+		return ERR_PTR(-ENOMEM);
+
+	iter->common.ops = &page_array_iter_ops;
+	iter->tbuf = tbuf;
+
+	return &iter->common;
+}
+
+struct hfi1_page_iter *create_dma_iter(struct tid_user_buf *tbuf)
+{
+	if (tbuf->ops->iter_begin)
+		return tbuf->ops->iter_begin(tbuf);
+
+	return tid_user_buf_iter_begin(tbuf);
+}
+
 /*
  * RcvArray entry allocation for Expected Receives is done by the
  * following algorithm:
@@ -253,11 +305,14 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	 */
 	unsigned int ngroups, pageset_count,
 		tididx = 0, mapped, mapped_pages = 0;
-	u32 *tidlist = NULL;
-	struct tid_user_buf *tidbuf;
+
 	u16 memtype = (tinfo->flags & HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_MASK);
+	struct tid_user_buf *tidbuf;
+	struct hfi1_page_iter *iter;
+	u32 *tidlist = NULL;
 
 	trace_hfi1_exp_tid_update(uctxt->ctxt, fd->subctxt, tinfo);
+
 	ret = create_user_buf(fd, memtype, tinfo, allow_unaligned, &tidbuf);
 	if (ret)
 		return ret;
@@ -301,6 +356,14 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	}
 
 	tididx = 0;
+	iter = create_dma_iter(tidbuf);
+	if (IS_ERR(iter)) {
+		ret = PTR_ERR(iter);
+		goto fail_unreserve;
+	} else if (!iter) {
+		ret = -EFAULT;
+		goto fail_unreserve;
+	}
 
 	/*
 	 * From this point on, we are going to be using shared (between master
@@ -317,7 +380,7 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 
 		ret = program_rcvarray(fd, tidbuf, grp,
 				       dd->rcv_entries.group_size,
-				       tidlist, &tididx, &mapped);
+				       tidlist, &tididx, iter, &mapped);
 		/*
 		 * If there was a failure to program the RcvArray
 		 * entries for the entire group, reset the grp fields
@@ -362,7 +425,7 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 
 			ret = program_rcvarray(fd, tidbuf, grp,
 					       use, tidlist,
-					       &tididx, &mapped);
+					       &tididx, iter, &mapped);
 			if (ret < 0) {
 				hfi1_cdbg(TID,
 					  "Failed to program RcvArray entries %d",
@@ -391,6 +454,9 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	}
 unlock:
 	mutex_unlock(&uctxt->exp_mutex);
+
+	iter->ops->free(iter);
+
 	/*
 	 * mapped_pages is based on implementation page size, not expected
 	 * receive addressing.
@@ -566,7 +632,7 @@ static unsigned int node_npages(const struct tid_rb_node *node)
  * @tbuf
  * @rcventry
  * @grp
- * @pgset Gives page-range from @tbuf to DMA-map and program
+ * @iter
  * @onode out node. Undefined on error.
  *
  * @return 0 on success, non-zero on error.
@@ -574,21 +640,19 @@ static unsigned int node_npages(const struct tid_rb_node *node)
 static int set_rcvarray_entry(struct hfi1_filedata *fd,
 			      struct tid_user_buf *tbuf,
 			      u32 rcventry, struct tid_group *grp,
-			      struct tid_pageset pgset,
+			      struct hfi1_page_iter *iter,
 			      struct tid_rb_node **onode)
 {
-	struct hfi1_ctxtdata *uctxt = fd->uctxt;
-	struct tid_rb_node *node;
-	struct hfi1_devdata *dd = uctxt->dd;
 	struct tid_node_ops *nodeops = get_nodeops(tbuf->type);
-	unsigned int npages = pgset.count;
-	u16 pageidx = pgset.idx;
+	struct hfi1_ctxtdata *uctxt = fd->uctxt;
+	struct hfi1_devdata *dd = uctxt->dd;
+	struct tid_rb_node *node;
 	int ret;
 
 	if (WARN_ON(!nodeops))
 		return -EINVAL;
 
-	node = nodeops->init(fd, tbuf, rcventry, grp, pageidx, npages);
+	node = nodeops->init(fd, tbuf, rcventry, grp, iter);
 	if (IS_ERR(node))
 		return PTR_ERR(node);
 
@@ -608,7 +672,6 @@ static int set_rcvarray_entry(struct hfi1_filedata *fd,
 			       node->vaddr, node->phys,
 			       node->dma_addr, node->type);
 	return 0;
-
 out_unmap:
 	hfi1_cdbg(TID, "Failed to insert RB node %u 0x%lx, 0x%lx %d",
 		  node->rcventry, node->vaddr, node->phys, ret);
@@ -631,6 +694,7 @@ out_unmap:
  * @tidlist: the array of u32 elements when the information about the
  *           programmed RcvArray entries is to be encoded.
  * @tididx: starting offset into tidlist
+ * @iter
  * @pmapped: (output parameter) number of implementation pages programmed into the RcvArray
  *           entries.
  *
@@ -649,14 +713,15 @@ static int program_rcvarray(struct hfi1_filedata *fd,
 			    struct tid_user_buf *tbuf,
 			    struct tid_group *grp, u16 count,
 			    u32 *tidlist, unsigned int *tididx,
+			    struct hfi1_page_iter *iter,
 			    unsigned int *pmapped)
 {
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
 	u16 idx;
-	unsigned int start = *tididx;
 	u32 tidinfo = 0, rcventry, useidx = 0;
 	int mapped = 0;
+	int ret;
 
 	/* Count should never be larger than the group size */
 	if (count > grp->size)
@@ -673,9 +738,7 @@ static int program_rcvarray(struct hfi1_filedata *fd,
 
 	idx = 0;
 	while (idx < count) {
-		u16 setidx = start + idx;
 		struct tid_rb_node *node;
-		int ret = 0;
 
 		/*
 		 * If this entry in the group is used, move to the next one.
@@ -690,8 +753,7 @@ static int program_rcvarray(struct hfi1_filedata *fd,
 		}
 
 		rcventry = grp->base + useidx;
-		ret = set_rcvarray_entry(fd, tbuf, rcventry, grp,
-					 tbuf->psets[setidx], &node);
+		ret = set_rcvarray_entry(fd, tbuf, rcventry, grp, iter, &node);
 		if (ret)
 			return ret;
 		mapped += node->npages;
@@ -702,6 +764,14 @@ static int program_rcvarray(struct hfi1_filedata *fd,
 		grp->used++;
 		grp->map |= 1 << useidx++;
 		idx++;
+		ret = iter->ops->next(iter);
+		if (ret < 0) {
+			/* Make sure ret won't be treated as a success value */
+			return ret;
+		} else if (!ret && idx < count) {
+			/* Exhausted all DMA-pagesets but not done programming */
+			return -EFAULT;
+		}
 	}
 
 	/* Fill the rest of the group with "blank" writes */
