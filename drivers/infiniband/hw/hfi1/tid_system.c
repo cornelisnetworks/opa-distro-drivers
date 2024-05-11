@@ -139,15 +139,28 @@ static struct tid_rb_node *sys_node_init(struct hfi1_filedata *fd,
 					 struct tid_user_buf *tbuf,
 					 u32 rcventry,
 					 struct tid_group *grp,
-					 u16 pageidx,
-					 unsigned int npages)
+					 struct hfi1_page_iter *piter)
 {
 	struct system_tid_user_buf *sbuf =
 		container_of(tbuf, struct system_tid_user_buf, common);
+	struct page_array_iter *iter =
+		container_of(piter, struct page_array_iter, common);
 	struct hfi1_devdata *dd = fd->uctxt->dd;
-	struct page **pages = sbuf->pages + pageidx;
 	struct system_tid_node *snode;
+	unsigned int npages;
+	struct page **pages;
 	dma_addr_t phys;
+	u16 pageidx;
+
+	if (iter->setidx >= tbuf->n_psets)
+		return ERR_PTR(-EINVAL);
+
+	npages = tbuf->psets[iter->setidx].count;
+	pageidx = tbuf->psets[iter->setidx].idx;
+	pages = sbuf->pages + pageidx;
+
+	if (!npages)
+		return ERR_PTR(-EINVAL);
 
 	/*
 	 * Allocate snode first so we can handle a potential failure before
