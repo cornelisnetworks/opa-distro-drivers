@@ -239,7 +239,7 @@ static int sys_user_buf_init(u16 expected_count, bool notify,
 	struct system_tid_user_buf *sbuf;
 	int ret;
 
-	if (!PAGE_ALIGNED(vaddr))
+	if (!IS_ALIGNED(vaddr, max(EXPECTED_ADDR_SIZE, PAGE_SIZE)))
 		return -EINVAL;
 
 	sbuf = kzalloc(sizeof(*sbuf), GFP_KERNEL);
