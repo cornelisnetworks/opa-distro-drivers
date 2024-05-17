@@ -269,7 +269,7 @@ static int nvidia_user_buf_init(u16 expected_count,
 
 	/* Allow non-page-size multiple (vaddr,length) for older userspace. */
 	if (!allow_unaligned) {
-		if (vaddr % NV_GPU_PAGE_SIZE)
+		if (!IS_ALIGNED(vaddr, max(EXPECTED_ADDR_SIZE, NV_GPU_PAGE_SIZE)))
 			return -EINVAL;
 		if (length % NV_GPU_PAGE_SIZE)
 			return -EINVAL;
