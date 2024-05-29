@@ -100,7 +100,6 @@ struct amd_pintree_node {
 
 static void unpin_amd_node(struct amd_pintree_node *node);
 
-static int (*query_rdma_interface)(const struct amd_rdma_interface **);
 static const struct amd_rdma_interface *rdma_ops;
 static struct kmem_cache *pq_state_kmem_cache;
 static struct kmem_cache *pintree_kmem_cache;
@@ -816,12 +815,7 @@ void register_amd_pinning_interface(void)
 	const char *err_str;
 	char name_buf[64];
 
-	query_rdma_interface = symbol_get(amdkfd_query_rdma_interface);
-	if (!query_rdma_interface) {
-		err_str = "missing symbol amdkfd_query_rdma_interface";
-		goto fail;
-	}
-	result = query_rdma_interface(&rdma_ops);
+	result = amdkfd_query_rdma_interface(&rdma_ops);
 	if (result != 0) {
 		err_str = "failed to obtain RDMA interface";
 		goto fail;
@@ -862,7 +856,4 @@ void deregister_amd_pinning_interface(void)
 
 	kmem_cache_destroy(pintree_kmem_cache);
 	kmem_cache_destroy(pq_state_kmem_cache);
-
-	if (query_rdma_interface)
-		symbol_put(amdkfd_query_rdma_interface);
 }
