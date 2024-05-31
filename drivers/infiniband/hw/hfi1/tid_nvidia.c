@@ -188,15 +188,14 @@ static int nvidia_node_init(struct hfi1_filedata *fd,
 		return -EIO;
 	pgsz = 1 << page_shift;
 
+	nvnode = kzalloc(sizeof(*nvnode), GFP_KERNEL);
+	if (!nvnode)
+		return -ENOMEM;
+
 	spin_lock(&nvbuf->nodes_lock);
 	if (nvbuf->invalidated) {
 		ret = -EFAULT;
-		goto unlock;
-	}
-	nvnode = kzalloc(sizeof(*nvnode), GFP_KERNEL);
-	if (!nvnode) {
-		ret = -ENOMEM;
-		goto unlock;
+		goto unlock_free;
 	}
 	*node = &nvnode->common;
 
@@ -218,8 +217,14 @@ static int nvidia_node_init(struct hfi1_filedata *fd,
 	nvnode->common.type = HFI1_MEMINFO_TYPE_NVIDIA;
 
 	list_add_tail(&nvnode->list, &nvbuf->nodes);
-unlock:
 	spin_unlock(&nvbuf->nodes_lock);
+
+	return 0;
+
+unlock_free:
+	spin_unlock(&nvbuf->nodes_lock);
+	kfree(nvnode);
+
 	return ret;
 }
 
