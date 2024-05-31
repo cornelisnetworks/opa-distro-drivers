@@ -234,6 +234,10 @@ struct tid_user_buf_ops {
 			    unsigned int npages);
 
 	/**
+	 * Optional; implementation must either implement find_phys_blocks() or
+	 * ensure that iter_begin() will return a valid iterator after
+	 * .pin_pages().
+	 *
 	 * Implementation must program @tbuf->psets elements such that:
 	 * 1. All pages in a pageset are physically contiguous
 	 * 2. All pages in all pagesets have the same page size
