@@ -244,6 +244,64 @@ struct hfi1_page_iter *create_dma_iter(struct tid_user_buf *tbuf)
 }
 
 /*
+ * Get number of TID-ready pinned-pagesets for @tbuf using hfi1_page_iter.
+ *
+ * @return >= 0 for number of pagesets, < 0 on error.
+ */
+static int pagesets_iter(struct tid_user_buf *tbuf, int cap)
+{
+	struct hfi1_page_iter *iter;
+	int p = 0;
+	int ret;
+
+	iter = create_dma_iter(tbuf);
+	if (IS_ERR(iter))
+		return PTR_ERR(iter);
+
+	while (true) {
+		if (p >= cap)
+			break;
+		p++;
+		ret = iter->ops->next(iter);
+		if (ret < 0)
+			goto bail;
+		else if (!ret)
+			break;
+	}
+	ret = p;
+bail:
+	iter->ops->free(iter);
+	return ret;
+}
+
+/*
+ * Get number of TID-ready pinned-pagesets for @tbuf.
+ *
+ * Each pageset is a physically contiguous range of pages and:
+ * - Starts on a 4KiB-aligned address.
+ * - Length is power-of-two in range [4KiB,2MiB].
+ *
+ * @cap hint on how many pagesets can be returned.
+ *
+ * @return >= 0 number of pagesets, < 0 on error.
+ */
+static int pagesets(struct tid_user_buf *tbuf, int cap)
+{
+	int ret;
+
+	if (tbuf->ops->find_phys_blocks) {
+		ret = tbuf->ops->find_phys_blocks(tbuf, cap);
+		if (ret)
+			return (ret < 0 ? ret : -EFAULT);
+
+		return tbuf->n_psets;
+	}
+
+	/* No find_phys_blocks(); count using iterator */
+	return pagesets_iter(tbuf, cap);
+}
+
+/*
  * RcvArray entry allocation for Expected Receives is done by the
  * following algorithm:
  *
@@ -310,6 +368,7 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	struct tid_user_buf *tidbuf;
 	struct hfi1_page_iter *iter;
 	u32 *tidlist = NULL;
+	unsigned int psets;
 
 	trace_hfi1_exp_tid_update(uctxt->ctxt, fd->subctxt, tinfo);
 
@@ -330,16 +389,17 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	}
 
 	/* Find sets of physically contiguous pages */
-	ret = tidbuf->ops->find_phys_blocks(tidbuf, pinned);
-	if (ret)
+	ret = pagesets(tidbuf, pinned);
+	if (ret < 0)
 		goto fail_unpin;
+	psets = (unsigned int)ret;
 
 	/* Reserve the number of expected tids to be used. */
 	spin_lock(&fd->tid_lock);
-	if (fd->tid_used + tidbuf->n_psets > fd->tid_limit)
+	if (fd->tid_used + psets > fd->tid_limit)
 		pageset_count = fd->tid_limit - fd->tid_used;
 	else
-		pageset_count = tidbuf->n_psets;
+		pageset_count = psets;
 	fd->tid_used += pageset_count;
 	spin_unlock(&fd->tid_lock);
 
