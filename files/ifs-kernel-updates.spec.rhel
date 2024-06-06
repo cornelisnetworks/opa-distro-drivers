@@ -111,16 +111,16 @@ for flavor in %flavors_to_build ; do
 		install -m 644 -t $RPM_BUILD_ROOT/lib/modules/%kver$flv/%kmod_moddir/%{name} "$mod"_$flavor/"$mod".ko
 	done
 done
+
 (targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi/
  mkdir -p $targetdir
  rsrcdir=$(pwd)/include/uapi/rdma
  srcdir=$(pwd)/include/rdma/hfi/
  cd %kdir
- sh ./scripts/headers_install.sh $srcdir/hfi1_user.h $targetdir/hfi1_user.h
- sh ./scripts/headers_install.sh $srcdir/hfi1_ioctl.h $targetdir/hfi1_ioctl.h
+ sh ./scripts/headers_install.sh $targetdir $srcdir hfi1_user.h hfi1_ioctl.h
  targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/
- sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
- sh ./scripts/headers_install.sh $rsrcdir/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h)
+ sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl.h
+ sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl_cmds.h)
 
 %files devel
 %defattr(-,root,root,-)
