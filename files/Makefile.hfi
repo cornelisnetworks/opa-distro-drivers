@@ -8,7 +8,7 @@
 ifneq ($(KERNELRELEASE),)
 #kbuild part of makefile
 
-NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi
+NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi -DRH_MMU_NOTIFIER_V2
 
 ifdef CONFIG_HFI1_NVIDIA
 ifndef NVIDIA_DRIVER_SOURCE
