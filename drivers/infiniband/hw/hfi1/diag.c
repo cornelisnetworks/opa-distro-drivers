@@ -1135,7 +1135,7 @@ static long hfi1_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		case IB_PORT_NOP:
 			if (phys_state == 0)
 				break;
-			/* Fall through */
+			fallthrough;
 		case IB_PORT_DOWN:
 			switch (phys_state) {
 			case 0:
@@ -1168,7 +1168,7 @@ static long hfi1_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 		if (ret)
 			break;
-		/* Fall through */
+		fallthrough;
 	case HFI1_SNOOP_IOCGETLINKSTATE:
 	case HFI1_SNOOP_IOCGETLINKSTATE_EXTRA:
 		if (cmd == HFI1_SNOOP_IOCGETLINKSTATE_EXTRA) {
@@ -1875,7 +1875,7 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	switch (ret) {
 	case HFI1_FILTER_ERR:
 		snoop_dbg("Error in filter call");
-		/* fall through */
+		fallthrough;
 	case HFI1_FILTER_MISS:
 		snoop_dbg("Filter Miss");
 		kfree(s_packet);
@@ -1955,7 +1955,7 @@ void snoop_inline_pio_send(struct hfi1_devdata *dd, struct pio_buf *pbuf,
 	switch (ret) {
 	case HFI1_FILTER_ERR:
 		snoop_dbg("Error in filter call");
-		/* fall through */
+		fallthrough;
 	case HFI1_FILTER_MISS:
 		snoop_dbg("Filter Miss");
 		break;
