@@ -13,11 +13,6 @@
 static void unlock_exp_tids(struct hfi1_ctxtdata *uctxt,
 			    struct exp_tid_set *set,
 			    struct hfi1_filedata *fd);
-static int set_rcvarray_entry(struct hfi1_filedata *fd,
-			      struct tid_user_buf *tbuf,
-			      u32 rcventry, struct tid_group *grp,
-			      struct tid_pageset pgset,
-			      struct tid_rb_node **onode);
 static void cacheless_tid_rb_remove(struct hfi1_filedata *fdata,
 				    struct tid_rb_node *tnode);
 static int program_rcvarray(struct hfi1_filedata *fd,
@@ -147,6 +142,26 @@ static struct tid_node_ops *get_nodeops(u16 type)
 	if (type >= HFI1_MAX_MEMINFO_ENTRIES)
 		return NULL;
 	return nodeops[type];
+}
+
+int tid_user_buf_init(u16 pset_size, unsigned long vaddr, unsigned long length, bool notify,
+		      struct tid_user_buf_ops *ops, u16 type, struct tid_user_buf *tbuf)
+{
+	tbuf->vaddr = vaddr;
+	tbuf->length = length;
+	tbuf->use_mn = notify;
+	tbuf->psets = kcalloc(pset_size, sizeof(*tbuf->psets), GFP_KERNEL);
+	if (!tbuf->psets)
+		return -ENOMEM;
+	tbuf->ops = ops;
+	tbuf->type = type;
+	return 0;
+}
+
+void tid_user_buf_free(struct tid_user_buf *tbuf)
+{
+	kfree(tbuf->psets);
+	tbuf->psets = NULL;
 }
 
 /**
@@ -543,6 +558,67 @@ static unsigned int node_npages(const struct tid_rb_node *node)
 	return (node->npages << node->page_shift) >> EXPECTED_ADDR_SHIFT;
 }
 
+/*
+ * DMA-map and program single TID entry for physically contiguous pinned page
+ * range.
+ *
+ * @fd
+ * @tbuf
+ * @rcventry
+ * @grp
+ * @pgset Gives page-range from @tbuf to DMA-map and program
+ * @onode out node. Undefined on error.
+ *
+ * @return 0 on success, non-zero on error.
+ */
+static int set_rcvarray_entry(struct hfi1_filedata *fd,
+			      struct tid_user_buf *tbuf,
+			      u32 rcventry, struct tid_group *grp,
+			      struct tid_pageset pgset,
+			      struct tid_rb_node **onode)
+{
+	struct hfi1_ctxtdata *uctxt = fd->uctxt;
+	struct tid_rb_node *node;
+	struct hfi1_devdata *dd = uctxt->dd;
+	struct tid_node_ops *nodeops = get_nodeops(tbuf->type);
+	unsigned int npages = pgset.count;
+	u16 pageidx = pgset.idx;
+	int ret;
+
+	if (WARN_ON(!nodeops))
+		return -EINVAL;
+
+	node = nodeops->init(fd, tbuf, rcventry, grp, pageidx, npages);
+	if (IS_ERR(node))
+		return PTR_ERR(node);
+
+	if (node->use_mn) {
+		ret = node->ops->register_notify(node);
+		if (ret)
+			goto out_unmap;
+	}
+	*onode = node;
+	fd->entry_to_rb[node->rcventry] = node;
+
+	/* RcvArray entry requires EXPECTED_ADDR_SIZE page-size npages */
+	hfi1_put_tid(dd, rcventry, PT_EXPECTED, node->dma_addr, ilog2(node_npages(node)) + 1);
+
+	trace_hfi1_exp_tid_reg(uctxt->ctxt, fd->subctxt, rcventry,
+			       node_npages(node),
+			       node->vaddr, node->phys,
+			       node->dma_addr, node->type);
+	return 0;
+
+out_unmap:
+	hfi1_cdbg(TID, "Failed to insert RB node %u 0x%lx, 0x%lx %d",
+		  node->rcventry, node->vaddr, node->phys, ret);
+
+	node->ops->dma_unmap(node);
+	node->ops->free(node);
+
+	return -EFAULT;
+}
+
 /**
  * program_rcvarray() - program an RcvArray group with receive buffers
  * @fd: filedata pointer
@@ -633,68 +709,6 @@ static int program_rcvarray(struct hfi1_filedata *fd,
 		rcv_array_wc_fill(dd, grp->base + useidx);
 	*pmapped = mapped;
 	return idx;
-}
-
-/*
- * DMA-map and program single TID entry for physically contiguous pinned page
- * range.
- *
- * @fd
- * @tbuf
- * @rcventry
- * @grp
- * @pgset Gives page-range from @tbuf to DMA-map and program
- * @onode out node. Undefined on error.
- *
- * @return 0 on success, non-zero on error.
- */
-static int set_rcvarray_entry(struct hfi1_filedata *fd,
-			      struct tid_user_buf *tbuf,
-			      u32 rcventry, struct tid_group *grp,
-			      struct tid_pageset pgset,
-			      struct tid_rb_node **onode)
-{
-	int ret;
-	struct hfi1_ctxtdata *uctxt = fd->uctxt;
-	struct tid_rb_node *node;
-	struct hfi1_devdata *dd = uctxt->dd;
-	struct tid_node_ops *nodeops = get_nodeops(tbuf->type);
-	unsigned int npages = pgset.count;
-	u16 pageidx = pgset.idx;
-
-	if (WARN_ON(!nodeops))
-		return -EINVAL;
-
-	ret = nodeops->init(fd, tbuf, rcventry, grp, pageidx, npages, &node);
-	if (ret)
-		return ret;
-
-	if (node->use_mn) {
-		ret = node->ops->register_notify(node);
-		if (ret)
-			goto out_unmap;
-	}
-
-	*onode = node;
-	fd->entry_to_rb[node->rcventry - uctxt->expected_base] = node;
-
-	/* RcvArray entry requires EXPECTED_ADDR_SIZE page-size npages */
-	hfi1_put_tid(dd, rcventry, PT_EXPECTED, node->dma_addr,
-		     ilog2(node_npages(node)) + 1);
-
-	trace_hfi1_exp_tid_reg(uctxt->ctxt, fd->subctxt, rcventry,
-			       node_npages(node),
-			       node->vaddr, node->phys,
-			       node->dma_addr, node->type);
-	return 0;
-
-out_unmap:
-	hfi1_cdbg(TID, "Failed to insert RB node %u 0x%lx, 0x%lx %d",
-		  node->rcventry, node->vaddr, node->phys, ret);
-
-	node->ops->dma_unmap(node);
-	node->ops->free(node);
-	return -EFAULT;
 }
 
 static int unprogram_rcvarray(struct hfi1_filedata *fd, u32 tidinfo)
