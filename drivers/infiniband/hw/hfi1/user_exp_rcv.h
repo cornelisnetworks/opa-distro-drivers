@@ -59,9 +59,14 @@ struct tid_user_buf {
 	u16 type; /* Implementation must set to HFI1_MEMINFO_TYPE* in tid_user_buf_ops.init() */
 };
 
+int tid_user_buf_init(u16 pset_size, unsigned long vaddr, unsigned long length, bool notify,
+		      struct tid_user_buf_ops *ops, u16 type, struct tid_user_buf *tbuf);
+void tid_user_buf_free(struct tid_user_buf *tbuf);
+
 struct tid_rb_node {
 	struct hfi1_filedata *fdata;
 	struct mutex invalidate_mutex; /* covers hw removal */
+	/* Only used for debug and tracing */
 	unsigned long phys;
 	struct tid_group *grp;
 	struct tid_node_ops *ops;
@@ -93,7 +98,7 @@ struct tid_rb_node {
  * pages are pinned.
  */
 struct tid_user_buf_ops {
-	/*
+	/**
 	 * Allocate and initialize @*tbuf.
 	 *
 	 * Implementation must initialize:
@@ -135,12 +140,12 @@ struct tid_user_buf_ops {
 		    bool allow_unaligned,
 		    struct tid_user_buf **tbuf);
 
-	/*
+	/**
 	 * Free @tbuf.
 	 */
 	void (*free)(struct tid_user_buf *tbuf);
 
-	/*
+	/**
 	 * Pin pages for @tbuf based on (@vaddr,@length) passed into
 	 * @tid_user_buf_ops.init().
 	 *
@@ -156,7 +161,7 @@ struct tid_user_buf_ops {
 	 */
 	int (*pin_pages)(struct hfi1_filedata *fd, struct tid_user_buf *tbuf);
 
-	/*
+	/**
 	 * Get page size of @tbuf's pinned pages.
 	 *
 	 * Caller should not assume that page size is known until after
@@ -168,7 +173,7 @@ struct tid_user_buf_ops {
 	 */
 	unsigned int (*page_size)(struct tid_user_buf *tbuf);
 
-	/*
+	/**
 	 * Unpin only @npages starting at @idx.
 	 *
 	 * Implementation may implement partial unpinning.
@@ -186,7 +191,7 @@ struct tid_user_buf_ops {
 			    unsigned int idx,
 			    unsigned int npages);
 
-	/*
+	/**
 	 * Implementation must program @tbuf->psets elements such that:
 	 * 1. All pages in a pageset are physically contiguous
 	 * 2. All pages in all pagesets have the same page size
@@ -205,14 +210,14 @@ struct tid_user_buf_ops {
 	int (*find_phys_blocks)(struct tid_user_buf *tbuf,
 				unsigned int npages);
 
-	/*
+	/**
 	 * @return true when:
 	 * - @tbuf's virtual->physical mapping has been invalidated
 	 * - @tbuf's physical pages have been released
 	 */
 	bool (*invalidated)(struct tid_user_buf *tbuf);
 
-	/*
+	/**
 	 * Unregister memory-invalidation callback registered in struct
 	 * tid_user_buf_ops.init() implementation.
 	 */
@@ -220,7 +225,7 @@ struct tid_user_buf_ops {
 };
 
 struct tid_node_ops {
-	/*
+	/**
 	 * Create tid_rb_node for pinned-page range. Page range given by
 	 * (@pageidx,@npages). Pinned pages are in @tbuf.
 	 *
@@ -251,24 +256,22 @@ struct tid_node_ops {
 	 * @grp
 	 * @pageidx
 	 * @npages
-	 * @node [out] allocated node
 	 *
-	 * @ return 0 on success, non-zero on failure.
+	 * @return allocated node on success, ERR_PTR() on error.
 	 */
-	int (*init)(struct hfi1_filedata *fd,
-		    struct tid_user_buf *tbuf,
-		    u32 rcventry,
-		    struct tid_group *grp,
-		    u16 pageidx,
-		    unsigned int npages,
-		    struct tid_rb_node **node);
+	struct tid_rb_node *(*init)(struct hfi1_filedata *fd,
+				    struct tid_user_buf *tbuf,
+				    u32 rcventry,
+				    struct tid_group *grp,
+				    u16 pageidx,
+				    unsigned int npages);
 
-	/*
+	/**
 	 * Free @node.
 	 */
 	void (*free)(struct tid_rb_node *node);
 
-	/*
+	/**
 	 * Register for memory invalidation callback. Implementation should
 	 * only register for notification on @node's page-range.
 	 *
@@ -285,7 +288,7 @@ struct tid_node_ops {
 	 */
 	int (*register_notify)(struct tid_rb_node *node);
 
-	/*
+	/**
 	 * Unregister from memory-invalidation callback in anticipation of
 	 * unprogramming TID.
 	 *
@@ -296,7 +299,7 @@ struct tid_node_ops {
 	 */
 	void (*unregister_notify)(struct tid_rb_node *node);
 
-	/*
+	/**
 	 * DMA-unmap mapped memory for @node.
 	 *
 	 * Should be no-op when implementation does not support partial
@@ -304,7 +307,7 @@ struct tid_node_ops {
 	 */
 	void (*dma_unmap)(struct tid_rb_node *node);
 
-	/*
+	/**
 	 * Unpin pages covered by @node.
 	 *
 	 * user_exp_rcv will call this function under node->invalidate_mutex.
