@@ -135,20 +135,19 @@ static void sys_node_unpin_pages(struct hfi1_filedata *fd,
 
 static struct tid_node_ops sys_nodeops;
 
-static int sys_node_init(struct hfi1_filedata *fd,
-			 struct tid_user_buf *tbuf,
-			 u32 rcventry,
-			 struct tid_group *grp,
-			 u16 pageidx,
-			 unsigned int npages,
-			 struct tid_rb_node **node)
+static struct tid_rb_node *sys_node_init(struct hfi1_filedata *fd,
+					 struct tid_user_buf *tbuf,
+					 u32 rcventry,
+					 struct tid_group *grp,
+					 u16 pageidx,
+					 unsigned int npages)
 {
 	struct system_tid_user_buf *sbuf =
 		container_of(tbuf, struct system_tid_user_buf, common);
 	struct hfi1_devdata *dd = fd->uctxt->dd;
-	dma_addr_t phys;
 	struct page **pages = sbuf->pages + pageidx;
 	struct system_tid_node *snode;
+	dma_addr_t phys;
 
 	/*
 	 * Allocate snode first so we can handle a potential failure before
@@ -156,16 +155,15 @@ static int sys_node_init(struct hfi1_filedata *fd,
 	 */
 	snode = kzalloc(struct_size(snode, pages, npages), GFP_KERNEL);
 	if (!snode)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 
-	*node = &snode->common;
 	phys = dma_map_single(&dd->pcidev->dev, __va(page_to_phys(pages[0])),
 			      npages * PAGE_SIZE, DMA_FROM_DEVICE);
 	if (dma_mapping_error(&dd->pcidev->dev, phys)) {
 		dd_dev_err(dd, "Failed to DMA map Exp Rcv pages 0x%llx\n",
 			   phys);
 		kfree(snode);
-		return -EFAULT;
+		return ERR_PTR(-EFAULT);
 	}
 
 	snode->common.fdata = fd;
@@ -183,7 +181,7 @@ static int sys_node_init(struct hfi1_filedata *fd,
 	snode->common.type = HFI1_MEMINFO_TYPE_SYSTEM;
 	memcpy(snode->pages, pages, flex_array_size(snode, pages, npages));
 
-	return 0;
+	return &snode->common;
 }
 
 static void sys_node_free(struct tid_rb_node *node)
@@ -249,21 +247,15 @@ static int sys_user_buf_init(u16 expected_count, bool notify,
 		return -ENOMEM;
 	*tbuf = &sbuf->common;
 	mutex_init(&sbuf->cover_mutex);
-	sbuf->common.vaddr = vaddr;
-	sbuf->common.length = length;
-	sbuf->common.use_mn = notify;
-	sbuf->common.psets = kcalloc(expected_count, sizeof(*sbuf->common.psets),
-				     GFP_KERNEL);
-	if (!sbuf->common.psets) {
-		ret = -ENOMEM;
+
+	ret = tid_user_buf_init(expected_count, vaddr, length, notify, &sys_bufops,
+				HFI1_MEMINFO_TYPE_SYSTEM, *tbuf);
+	if (ret)
 		goto fail_release_mem;
-	}
-	sbuf->common.ops = &sys_bufops;
-	sbuf->common.type = HFI1_MEMINFO_TYPE_SYSTEM;
+
 	sbuf->npages = num_user_pages(vaddr, length);
 
 	return 0;
-
 fail_release_mem:
 	sys_user_buf_free(&sbuf->common);
 	return ret;
@@ -275,7 +267,7 @@ static void sys_user_buf_free(struct tid_user_buf *tbuf)
 		container_of(tbuf, struct system_tid_user_buf, common);
 
 	kfree(sbuf->pages);
-	kfree(sbuf->common.psets);
+	tid_user_buf_free(tbuf);
 	kfree(sbuf);
 }
 
