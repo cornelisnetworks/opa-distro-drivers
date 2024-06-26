@@ -157,46 +157,38 @@ static unsigned int nvidia_pgt_shift(const struct nvidia_p2p_page_table *pages)
 
 static struct tid_node_ops nvidia_nodeops;
 
-static int nvidia_node_init(struct hfi1_filedata *fd,
-			    struct tid_user_buf *tbuf,
-			    u32 rcventry,
-			    struct tid_group *grp,
-			    u16 pageidx,
-			    unsigned int npages,
-			    struct tid_rb_node **node)
+static struct tid_rb_node *nvidia_node_init(struct hfi1_filedata *fd, struct tid_user_buf *tbuf,
+					    u32 rcventry, struct tid_group *grp, u16 pageidx,
+					    unsigned int npages)
 {
 	struct nvidia_tid_user_buf *nvbuf =
 		container_of(tbuf, struct nvidia_tid_user_buf, common);
 	struct nvidia_tid_node *nvnode;
-	unsigned int page_shift;
+	unsigned int ps;
 	u32 pgsz;
-	int ret = 0;
 
 	/* As long as fd is passed in separately, sanity-check */
 	if (nvbuf->fd != fd)
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	if (!nvbuf->pages || !nvbuf->mapping)
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 	if (pageidx > nvbuf->pages->entries ||
 	    (pageidx + npages) > nvbuf->pages->entries)
-		return -EINVAL;
+		return ERR_PTR(-EINVAL);
 
-	page_shift = nvidia_pgt_shift(nvbuf->pages);
+	ps = nvidia_pgt_shift(nvbuf->pages);
 	/* Only 64KiB pages supported right now */
-	if (page_shift != NV_GPU_PAGE_SHIFT)
-		return -EIO;
-	pgsz = 1 << page_shift;
+	if (ps != NV_GPU_PAGE_SHIFT)
+		return ERR_PTR(-EIO);
+	pgsz = 1 << ps;
 
 	nvnode = kzalloc(sizeof(*nvnode), GFP_KERNEL);
 	if (!nvnode)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 
 	spin_lock(&nvbuf->nodes_lock);
-	if (nvbuf->invalidated) {
-		ret = -EFAULT;
+	if (nvbuf->invalidated)
 		goto unlock_free;
-	}
-	*node = &nvnode->common;
 
 	kref_get(&nvbuf->ref);
 	nvnode->userbuf = nvbuf;
@@ -208,7 +200,7 @@ static int nvidia_node_init(struct hfi1_filedata *fd,
 	nvnode->common.rcventry = rcventry;
 	nvnode->pageidx = pageidx;
 	nvnode->common.npages = npages;
-	nvnode->common.page_shift = page_shift;
+	nvnode->common.page_shift = ps;
 	nvnode->common.phys = nvbuf->pages->pages[pageidx]->physical_address;
 	nvnode->common.dma_addr = nvbuf->mapping->dma_addresses[pageidx];
 	nvnode->common.vaddr = tbuf->vaddr + (pageidx * pgsz);
@@ -218,13 +210,12 @@ static int nvidia_node_init(struct hfi1_filedata *fd,
 	list_add_tail(&nvnode->list, &nvbuf->nodes);
 	spin_unlock(&nvbuf->nodes_lock);
 
-	return 0;
-
+	return &nvnode->common;
 unlock_free:
 	spin_unlock(&nvbuf->nodes_lock);
 	kfree(nvnode);
 
-	return ret;
+	return ERR_PTR(-EFAULT);
 }
 
 static void nvidia_node_free(struct tid_rb_node *node)
@@ -265,7 +256,7 @@ static int nvidia_user_buf_init(u16 expected_count,
 	struct nvidia_tid_user_buf *nvbuf;
 	int ret;
 
-	/* Allow non-page-size multiple (vaddr,length) for older userspace. */
+	/* Allow non-page-size multiple (vaddr,length) for older userspace */
 	if (!allow_unaligned) {
 		if (!IS_ALIGNED(vaddr, max(EXPECTED_ADDR_SIZE, NV_GPU_PAGE_SIZE)))
 			return -EINVAL;
@@ -276,39 +267,31 @@ static int nvidia_user_buf_init(u16 expected_count,
 	nvbuf = kzalloc(sizeof(*nvbuf), GFP_KERNEL);
 	if (!nvbuf)
 		return -ENOMEM;
+
 	kref_init(&nvbuf->ref);
 	*tbuf = &nvbuf->common;
 
-	/*
-	 * In case vaddr is not aligned to a page boundary,
-	 * round vaddr off to a page boundary and increase
-	 * length to cover the difference.
-	 *
-	 * Store original vaddr, length on nvbuf for tracing.
-	 */
+	/* Store original vaddr, length on nvbuf for tracing */
 	nvbuf->orig_vaddr = vaddr;
 	nvbuf->orig_length = length;
 	/* Align vaddr to page boundary if it wasn't already */
 	vaddr = ALIGN_DOWN(vaddr, NV_GPU_PAGE_SIZE);
 	/* Compute end based on original unaligned vaddr, not adjusted vaddr */
 	length = ALIGN(nvbuf->orig_vaddr + length, NV_GPU_PAGE_SIZE) - vaddr;
-	nvbuf->common.vaddr = vaddr;
-	nvbuf->common.length = length;
-	nvbuf->common.use_mn = notify;
-	nvbuf->common.psets = kcalloc(expected_count, sizeof(*nvbuf->common.psets),
-				      GFP_KERNEL);
-	if (!nvbuf->common.psets) {
-		ret = -ENOMEM;
+
+	ret = tid_user_buf_init(expected_count, vaddr, length, notify, &nvidia_bufops,
+				HFI1_MEMINFO_TYPE_NVIDIA, *tbuf);
+	if (ret)
 		goto fail_release_mem;
-	}
-	nvbuf->common.ops = &nvidia_bufops;
-	nvbuf->common.type = HFI1_MEMINFO_TYPE_NVIDIA;
+
 	INIT_LIST_HEAD(&nvbuf->nodes);
 	spin_lock_init(&nvbuf->nodes_lock);
+
 	return 0;
 fail_release_mem:
-	// No need to do kref_put here, just kfree()
+	/* No need to do kref_put here, just kfree() */
 	kfree(nvbuf);
+
 	return ret;
 }
 
@@ -340,7 +323,7 @@ static void nvidia_user_buf_kref_cb(struct kref *ref)
 	 */
 	if (nvbuf->pages)
 		WARN_ON(rdma_interface.put_pages(0, 0, nvbuf->common.vaddr, nvbuf->pages));
-	kfree(nvbuf->common.psets);
+	tid_user_buf_free(&nvbuf->common);
 	kfree(nvbuf);
 }
 
@@ -424,7 +407,6 @@ static int nvidia_pin_pages(struct hfi1_filedata *fd,
 	}
 
 	return nvbuf->pages->entries;
-
 fail_unmap:
 	WARN_ON(rdma_interface.dma_unmap_pages(fd->dd->pcidev, nvbuf->pages, nvbuf->mapping));
 	nvbuf->mapping = NULL;
@@ -432,6 +414,7 @@ fail_put_pages:
 	WARN_ON(rdma_interface.put_pages(0, 0, nvbuf->common.vaddr, nvbuf->pages));
 	nvbuf->pages = NULL;
 	trace_recv_pin_gpu_pages_fail(ret, nvbuf->common.vaddr, nvbuf->common.length);
+
 	return ret;
 }
 
@@ -529,6 +512,7 @@ static bool nvidia_invalidated(struct tid_user_buf *tbuf)
 	spin_lock(&nvbuf->nodes_lock);
 	ret = nvbuf->invalidated;
 	spin_unlock(&nvbuf->nodes_lock);
+
 	return ret;
 }
 
@@ -578,10 +562,12 @@ int register_nvidia_tid_ops(void)
 	if (ret)
 		goto fail;
 	pr_info("%s Nvidia p2p TID-DMA support enabled\n", class_name());
+
 	return 0;
 fail:
 	deregister_nvidia_tid_ops();
 	pr_info("%s Nvidia p2p TID-DMA support disabled\n", class_name());
+
 	return ret;
 }
 
