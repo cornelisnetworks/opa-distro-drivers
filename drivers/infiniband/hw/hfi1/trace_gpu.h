@@ -55,16 +55,20 @@
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM hfi1_gpu
 
+const char *hfi1_gpu_type_str(unsigned int mt);
+
 DECLARE_EVENT_CLASS(pin_gpu_pages,
-		    TP_PROTO(unsigned long base, unsigned long addr,
+		    TP_PROTO(unsigned int memtype,
+			     unsigned long base, unsigned long addr,
 			     unsigned long len, unsigned long size,
 			     unsigned int npages, void *arg),
-		    TP_ARGS(base, addr, len, size, npages, arg),
+		    TP_ARGS(memtype, base, addr, len, size, npages, arg),
 		    TP_STRUCT__entry(__field(unsigned long, base)
 				     __field(unsigned long, addr)
 				     __field(unsigned long, len)
 				     __field(unsigned long, size)
 				     __field(unsigned int, npages)
+				     __field(unsigned int, memtype)
 				     __field(void *, arg)
 			    ),
 		    TP_fast_assign(__entry->base = base;
@@ -72,9 +76,11 @@ DECLARE_EVENT_CLASS(pin_gpu_pages,
 				   __entry->len = len;
 				   __entry->size = size;
 				   __entry->npages = npages;
+				   __entry->memtype = memtype;
 				   __entry->arg = arg;
 			    ),
-		    TP_printk("NV: arg: 0x%llx base: 0x%lx, addr: 0x%lx, len: %lu, pin size: %lu, num pages: %u",
+		    TP_printk("%s: arg: 0x%llx base: 0x%lx, addr: 0x%lx, len: %lu, pin size: %lu, num pages: %u",
+			      hfi1_gpu_type_str(__entry->memtype),
 			      (unsigned long long)__entry->arg,
 			      __entry->base,
 			      __entry->addr,
@@ -130,17 +136,20 @@ DECLARE_EVENT_CLASS(gpu_page_table_info,
 );
 
 DECLARE_EVENT_CLASS(pin_gpu_pages_fail,
-		    TP_PROTO(int ret, unsigned long addr, unsigned long size),
-		    TP_ARGS(ret, addr, size),
-		    TP_STRUCT__entry(__field(int, ret)
+		    TP_PROTO(unsigned int memtype, int ret, unsigned long addr, unsigned long size),
+		    TP_ARGS(memtype, ret, addr, size),
+		    TP_STRUCT__entry(__field(unsigned int, memtype)
+				     __field(int, ret)
 				     __field(unsigned long, addr)
 				     __field(unsigned long, size)
 			    ),
-		    TP_fast_assign(__entry->ret = ret;
+		    TP_fast_assign(__entry->memtype = memtype;
+				   __entry->ret = ret;
 				   __entry->addr = addr;
 				   __entry->size = size;
 			    ),
-		    TP_printk("NV: Failed to pin GPU mem pages. ret %d, addr 0x%lx, size %lu",
+		    TP_printk("%s: Failed to pin GPU mem pages. ret %d, addr 0x%lx, size %lu",
+			      hfi1_gpu_type_str(__entry->memtype),
 			      __entry->ret,
 			      __entry->addr,
 			      __entry->size
@@ -171,16 +180,18 @@ TRACE_EVENT(gpu_page_tbl_check,
 );
 
 DEFINE_EVENT(pin_gpu_pages, pin_rcv_pages_gpu,
-	     TP_PROTO(unsigned long base, unsigned long addr,
+	     TP_PROTO(unsigned int memtype,
+		      unsigned long base, unsigned long addr,
 		      unsigned long len, unsigned long size,
 		      unsigned int npages, void *arg),
-	     TP_ARGS(base, addr, len, size, npages, arg));
+	     TP_ARGS(memtype, base, addr, len, size, npages, arg));
 
 DEFINE_EVENT(pin_gpu_pages, pin_sdma_pages_gpu,
-	     TP_PROTO(unsigned long base, unsigned long addr,
+	     TP_PROTO(unsigned int memtype,
+		      unsigned long base, unsigned long addr,
 		      unsigned long len, unsigned long size,
 		      unsigned int npages, void *arg),
-	     TP_ARGS(base, addr, len, size, npages, arg));
+	     TP_ARGS(memtype, base, addr, len, size, npages, arg));
 
 DEFINE_EVENT(invalidate_gpu_pages, unpin_rcv_gpu_pages_callback,
 	     TP_PROTO(void *arg, unsigned long addr, unsigned long len),
@@ -199,12 +210,12 @@ DEFINE_EVENT(gpu_page_table_info, sdma_gpu_page_table_info,
 	     TP_ARGS(entries, page_size));
 
 DEFINE_EVENT(pin_gpu_pages_fail, recv_pin_gpu_pages_fail,
-	     TP_PROTO(int ret, unsigned long addr, unsigned long size),
-	     TP_ARGS(ret, addr, size));
+	     TP_PROTO(unsigned int memtype, int ret, unsigned long addr, unsigned long size),
+	     TP_ARGS(memtype, ret, addr, size));
 
 DEFINE_EVENT(pin_gpu_pages_fail, sdma_pin_gpu_pages_fail,
-	     TP_PROTO(int ret, unsigned long addr, unsigned long size),
-	     TP_ARGS(ret, addr, size));
+	     TP_PROTO(unsigned int memtype, int ret, unsigned long addr, unsigned long size),
+	     TP_ARGS(memtype, ret, addr, size));
 
 DEFINE_EVENT(free_gpu_pages, free_recv_gpu_pages,
 	     TP_PROTO(unsigned long addr),

@@ -562,11 +562,8 @@ static int amd_pin_pages(struct hfi1_filedata *fd,
 				  &fd->dd->pcidev->dev, &abuf->pages,
 				  amd_free_cb, abuf);
 
-	if (ret) {
-		hfi1_cdbg(TID, "vaddr %p .length %lu abuf %p get_pages failed ret %d",
-			  (void *)tbuf->vaddr, tbuf->length, abuf, ret);
+	if (ret)
 		goto fail;
-	}
 
 	/* Can't handle different VA start than what we requested. */
 	if (WARN_ON(tbuf->vaddr != abuf->pages->va)) {
@@ -593,9 +590,8 @@ static int amd_pin_pages(struct hfi1_filedata *fd,
 	}
 	ret = (abuf->pages->size >> ps);
 
-	hfi1_cdbg(TID, "vaddr %p length %lu abuf %p p2p pages %p size %llu ret %d",
-		  (void *)tbuf->vaddr, tbuf->length, abuf, abuf->pages->pages,
-		  abuf->pages->size, ret);
+	trace_pin_rcv_pages_gpu(HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, abuf->pages->va,
+				tbuf->length, abuf->pages->size, ret, tbuf);
 
 	return ret;
 
@@ -603,6 +599,8 @@ fail_put_pages:
 	rdma_ops->put_pages(&abuf->pages);
 fail:
 	abuf->pages = NULL;
+	trace_recv_pin_gpu_pages_fail(HFI1_MEMINFO_TYPE_AMD, ret, tbuf->vaddr, tbuf->length);
+
 	return ret;
 }
 
