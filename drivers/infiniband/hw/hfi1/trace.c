@@ -515,6 +515,18 @@ const char *hfi1_trace_print_rsm_hist(struct trace_seq *p, unsigned int ctxt)
 	return ret;
 }
 
+const char *hfi1_gpu_type_str(unsigned int mt)
+{
+	switch (mt) {
+	case HFI1_MEMINFO_TYPE_AMD:
+		return "AMD";
+	case HFI1_MEMINFO_TYPE_NVIDIA:
+		return "NV";
+	}
+
+	return NULL;
+}
+
 __hfi1_trace_fn(AFFINITY);
 __hfi1_trace_fn(PKT);
 __hfi1_trace_fn(PROC);
