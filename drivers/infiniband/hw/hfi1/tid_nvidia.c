@@ -388,7 +388,8 @@ static int nvidia_pin_pages(struct hfi1_filedata *fd,
 				       nvbuf->common.length, &nvbuf->pages,
 				       nvidia_invalidate_cb, nvbuf);
 	if (ret)
-		trace_recv_pin_gpu_pages_fail(ret, nvbuf->common.vaddr, nvbuf->common.length);
+		trace_recv_pin_gpu_pages_fail(HFI1_MEMINFO_TYPE_NVIDIA, ret, tbuf->vaddr,
+					      tbuf->length);
 	/* Don't WARN on these cases */
 	if (ret == -EINVAL || ret == -ENOMEM)
 		return ret;
@@ -399,8 +400,9 @@ static int nvidia_pin_pages(struct hfi1_filedata *fd,
 		goto fail_put_pages;
 	}
 
-	trace_pin_rcv_pages_gpu(nvbuf->orig_vaddr, nvbuf->common.vaddr, nvbuf->orig_length,
-				nvbuf->common.length, nvbuf->pages->entries, tbuf);
+	trace_pin_rcv_pages_gpu(HFI1_MEMINFO_TYPE_NVIDIA, nvbuf->orig_vaddr, tbuf->vaddr,
+				nvbuf->orig_length, tbuf->length, nvbuf->pages->entries,
+				tbuf);
 
 	if (nvbuf->pages->entries > fd->uctxt->expected_count) {
 		ret = -EINVAL;
@@ -422,7 +424,7 @@ fail_unmap:
 fail_put_pages:
 	WARN_ON(rdma_interface.put_pages(0, 0, nvbuf->common.vaddr, nvbuf->pages));
 	nvbuf->pages = NULL;
-	trace_recv_pin_gpu_pages_fail(ret, nvbuf->common.vaddr, nvbuf->common.length);
+	trace_recv_pin_gpu_pages_fail(HFI1_MEMINFO_TYPE_NVIDIA, ret, tbuf->vaddr, tbuf->length);
 
 	return ret;
 }
