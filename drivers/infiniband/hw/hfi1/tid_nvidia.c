@@ -60,7 +60,6 @@
 
 #define NV_GPU_PAGE_SHIFT 16
 #define NV_GPU_PAGE_SIZE BIT(NV_GPU_PAGE_SHIFT)
-#define NV_GPU_PAGE_MASK (~(NV_GPU_PAGE_SIZE - 1))
 
 #define GPU_PAGE_TO_PFN(page) ((page)->physical_address >> NV_GPU_PAGE_SHIFT)
 
@@ -264,14 +263,13 @@ static int nvidia_user_buf_init(u16 expected_count,
 				struct tid_user_buf **tbuf)
 {
 	struct nvidia_tid_user_buf *nvbuf;
-	unsigned long unaligned_vaddr = vaddr;
 	int ret;
 
 	/* Allow non-page-size multiple (vaddr,length) for older userspace. */
 	if (!allow_unaligned) {
 		if (!IS_ALIGNED(vaddr, max(EXPECTED_ADDR_SIZE, NV_GPU_PAGE_SIZE)))
 			return -EINVAL;
-		if (length % NV_GPU_PAGE_SIZE)
+		if (!IS_ALIGNED(vaddr + length, NV_GPU_PAGE_SIZE))
 			return -EINVAL;
 	}
 
@@ -290,8 +288,10 @@ static int nvidia_user_buf_init(u16 expected_count,
 	 */
 	nvbuf->orig_vaddr = vaddr;
 	nvbuf->orig_length = length;
-	vaddr = (vaddr & NV_GPU_PAGE_MASK);
-	length += (unaligned_vaddr - vaddr);
+	/* Align vaddr to page boundary if it wasn't already */
+	vaddr = ALIGN_DOWN(vaddr, NV_GPU_PAGE_SIZE);
+	/* Compute end based on original unaligned vaddr, not adjusted vaddr */
+	length = ALIGN(nvbuf->orig_vaddr + length, NV_GPU_PAGE_SIZE) - vaddr;
 	nvbuf->common.vaddr = vaddr;
 	nvbuf->common.length = length;
 	nvbuf->common.use_mn = notify;
