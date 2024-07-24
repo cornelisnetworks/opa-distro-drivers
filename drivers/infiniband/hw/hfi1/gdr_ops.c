@@ -1289,7 +1289,7 @@ static int add_gdr_dev(void)
 
 	gdr_dev = MKDEV(gdr_major, 0);
 
-	gdr_class = class_create(THIS_MODULE, GDR_CLASS_NAME);
+	gdr_class = class_create(GDR_CLASS_NAME);
 	if (IS_ERR(gdr_class)) {
 		ret = PTR_ERR(gdr_class);
 		gdr_class = NULL;
