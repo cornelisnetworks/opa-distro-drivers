@@ -51,7 +51,7 @@ MODULE_SOFTDEP("pre: nvidia");
  */
 static unsigned long nvidia_cache_size = 2 * 1024;
 module_param(nvidia_cache_size, ulong, 0644);
-MODULE_PARM_DESC(nvidia_cache_size, "Per-context Nvidia pin cache size limit (in MB)");
+MODULE_PARM_DESC(nvidia_cache_size, "SDMA Nvidia buffer pin cache size limit (in MB)");
 
 /*
  * The Nvidia documentation (https://docs.nvidia.com/cuda/gpudirect-rdma/index.html)
