@@ -96,7 +96,7 @@
 
 static unsigned long gpu_cache_size = 256;
 module_param(gpu_cache_size, ulong, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(gpu_cache_size, "Send and receive side GPU buffers cache size limit (in MB)");
+MODULE_PARM_DESC(gpu_cache_size, "GDRCopy device Nvidia buffer cache size limit (in MB)");
 
 static int gdr_major;
 static struct class *gdr_class;
