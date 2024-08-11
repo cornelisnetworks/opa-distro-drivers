@@ -26,6 +26,7 @@ static struct tid_node_ops amd_nodeops;
 struct amd_tid_user_buf {
 	struct tid_user_buf common;
 	struct amd_p2p_info *pages;
+	struct hfi1_filedata *fd;
 	bool invalidated;
 	unsigned int pgsz;
 
@@ -508,8 +509,10 @@ static void amd_user_buf_kref_cb(struct kref *ref)
 
 	/* Update to .pages, .invalidated must be atomic to other CPUs. */
 	spin_lock(&abuf->pages_lock);
-	hfi1_cdbg(TID, "abuf %p pages %p invalidated %d freeing",
-		  abuf, abuf->pages, abuf->invalidated);
+	trace_unpin_recv_pages_gpu(abuf->fd, HFI1_MEMINFO_TYPE_AMD, 0, abuf, abuf->common.vaddr,
+				   abuf->common.length,
+				   get_dma_addr(abuf->pages),
+				   get_dma_len(abuf->pages));
 	pages = abuf->pages;
 	abuf->pages = NULL;
 	abuf->invalidated = true;
@@ -551,7 +554,8 @@ static void amd_free_cb(void *priv)
 	struct amd_tid_node *n;
 
 	spin_lock(&abuf->pages_lock);
-	hfi1_cdbg(TID, "abuf %p pages %p invalidated asynchronously", abuf, abuf->pages);
+	trace_invalidate_recv_pages_gpu(abuf->fd, HFI1_MEMINFO_TYPE_AMD, abuf->common.vaddr,
+					abuf->common.length, abuf);
 	abuf->pages = NULL;
 	abuf->invalidated = true;
 	spin_unlock(&abuf->pages_lock);
@@ -577,6 +581,7 @@ static int amd_pin_pages(struct hfi1_filedata *fd,
 	unsigned int ps;
 	int ret;
 
+	abuf->fd = fd;
 	ret = rdma_ops->get_pages(tbuf->vaddr, tbuf->length, task_pid(current),
 				  &fd->dd->pcidev->dev, &abuf->pages,
 				  amd_free_cb, abuf);
@@ -609,9 +614,8 @@ static int amd_pin_pages(struct hfi1_filedata *fd,
 	}
 	ret = (abuf->pages->size >> ps);
 
-	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, tbuf->length,
-				 0, 0, abuf, get_dma_addr(abuf->pages),
-				 get_dma_len(abuf->pages));
+	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, tbuf->length, 0, 0,
+				 abuf, get_dma_addr(abuf->pages), get_dma_len(abuf->pages));
 
 	return ret;
 
@@ -619,8 +623,8 @@ fail_put_pages:
 	rdma_ops->put_pages(&abuf->pages);
 fail:
 	abuf->pages = NULL;
-	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, tbuf->length,
-				 ret, 0, abuf, 0, 0);
+	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, tbuf->length, ret, 0,
+				 abuf, 0, 0);
 
 	return ret;
 }
