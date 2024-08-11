@@ -3,15 +3,17 @@
  * Copyright(c) 2022-2024 Cornelis Networks, Inc.
  */
 
+#include <linux/hashtable.h>
 #include <linux/types.h>
 #include <linux/slab.h>
+
+#include <nvidia/nv-p2p.h>
 
 #include "hfi.h"
 #include "common.h"
 #include "device.h"
 #include "pinning.h"
 #include "sdma.h"
-#include "pin_nvidia.h"
 #include "user_sdma.h"
 #include "trace.h"
 
@@ -68,6 +70,65 @@ static_assert(ARRAY_SIZE(nvidia_page_shift) == NVIDIA_P2P_PAGE_SIZE_COUNT);
 #define NVIDIA_PAGE_SIZE_X(x)	(1U << NVIDIA_PAGE_SHIFT_X(x))
 #define NVIDIA_PAGE_OFFSET_MASK_X(x)	(NVIDIA_PAGE_SIZE_X(x) - 1)
 #define NVIDIA_PAGE_MASK_X(x)	(~(u64)NVIDIA_OFFSET_MASK_X(x))
+
+#define NVIDIA_MAX_DEVICES 16
+#define NVIDIA_DEVICE_HASH_OVERSUBSCRIBE 2
+#define NVIDIA_DEVICE_HASH_BITS ilog2(NVIDIA_MAX_DEVICES * NVIDIA_DEVICE_HASH_OVERSUBSCRIBE)
+
+struct nvidia_pq_state {
+	/* on its own cacheline */
+	spinlock_t lock; /* protects num_pintrees and pintree_hash */
+
+	/* new cacheline starts here */
+	struct hfi1_user_sdma_pkt_q *pq ____cacheline_aligned_in_smp;
+	struct pci_dev *hfi_dev;
+	unsigned int num_pintrees;
+	DECLARE_HASHTABLE(pintree_hash, NVIDIA_DEVICE_HASH_BITS);
+};
+
+struct nvidia_pintree {
+	/* on its own cacheline */
+	spinlock_t lock;
+
+	/* new cacheline starts here */
+	u32 device_id ____cacheline_aligned_in_smp;
+	struct hlist_node hash_node;
+	struct rb_root_cached root;
+	struct list_head lru_list;
+	struct nvidia_pq_state *state;
+	size_t size;
+	size_t hits;
+	size_t misses;
+	size_t internal_evictions;
+	size_t external_evictions;
+};
+
+struct nvidia_pintree_node {
+	struct interval_tree_node node;
+	struct list_head lru_node;
+	/* Needed to handle the driver calling back to free a pinned region. */
+	struct nvidia_pintree *pintree;
+	size_t size;
+
+	/*
+	 * These entries can't be combined because the table
+	 * and mapping fields can't be combined. There's little
+	 * value in building a list of these inside a combined node
+	 * as there's little shared, and in the pathological case,
+	 * it turns into one entry in the tree with all the pinnings
+	 * in an attached linked list.
+	 */
+	struct nvidia_p2p_page_table *page_table;
+	struct nvidia_p2p_dma_mapping *mapping;
+
+	atomic_t refcount;
+
+	/*
+	 * For debug only; should only be read in pintree->lock critical
+	 * section
+	 */
+	int inserted;
+};
 
 static struct nvidia_rdma_interface {
 	int (*free_page_table)(struct nvidia_p2p_page_table *page_table);
@@ -313,8 +374,8 @@ static void remove_nvidia_pages(void *data)
 	/* Remove from the tree so that it's not found anymore. */
 	spin_lock(&pintree->lock);
 
-	trace_hfi1_nvidia_node_invalidated(node, 0);
-
+	trace_invalidate_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_NVIDIA, node->node.start,
+					node->size, node);
 	found_node = interval_tree_iter_first(&pintree->root, node->node.start, node->node.last);
 	found = container_of(found_node, struct nvidia_pintree_node, node);
 	if (found == node) {
@@ -361,7 +422,6 @@ static int insert_nvidia_pinning(struct nvidia_pintree *pintree,
 		pintree->size += node->size;
 		node->inserted = 1;
 	}
-	trace_hfi1_nvidia_node_insert(node, result);
 	spin_unlock(&pintree->lock);
 	return result;
 }
@@ -401,8 +461,6 @@ static bool evict_nvidia_pinnings(struct nvidia_pintree *pintree, size_t goal, b
 	spin_lock(&pintree->lock);
 	list_for_each_entry_safe(cur, tmp, &pintree->lru_list, lru_node) {
 		if (atomic_read(&cur->refcount) == 0) {
-			trace_hfi1_nvidia_node_evict(cur, 0);
-
 			interval_tree_remove(&cur->node, &pintree->root);
 			list_move(&cur->lru_node, &evict_list);
 			(*stat)++;
@@ -418,6 +476,7 @@ static bool evict_nvidia_pinnings(struct nvidia_pintree *pintree, size_t goal, b
 		unpin_nvidia_node(cur);
 		kfree(cur);
 	}
+	trace_evict_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_NVIDIA, total, goal);
 
 	return total >= goal;
 }
@@ -458,8 +517,6 @@ retry:
 		if (evict_nvidia_pinnings(pintree, len, false))
 			goto retry;
 	}
-
-	trace_hfi1_nvidia_node_pin(node, start, last, result);
 
 	if (result != 0)
 		return result;
@@ -554,6 +611,31 @@ static struct nvidia_pintree_node *find_nvidia_pinning(struct nvidia_pintree *pi
 	return node;
 }
 
+static unsigned int _nvidia_size_shift(enum nvidia_p2p_page_size_type ps)
+{
+	switch (ps) {
+	case NVIDIA_P2P_PAGE_SIZE_4KB:
+		return 12;
+	case NVIDIA_P2P_PAGE_SIZE_64KB:
+		return 16;
+	case NVIDIA_P2P_PAGE_SIZE_128KB:
+		return 17;
+	default:
+		break;
+	}
+	return 0;
+}
+
+static unsigned long nv_dma_addr(const struct nvidia_p2p_dma_mapping *map)
+{
+	return map ? (unsigned long)map->dma_addresses : 0;
+}
+
+static unsigned long nv_dma_len(const struct nvidia_p2p_dma_mapping *map)
+{
+	return map ? map->entries << _nvidia_size_shift(map->page_size_type) : 0;
+}
+
 static int get_cache_entry(struct nvidia_pintree *pintree,
 			   struct nvidia_pintree_node **node_p,
 			   u64 start, u64 len)
@@ -572,6 +654,11 @@ static int get_cache_entry(struct nvidia_pintree *pintree,
 								       &tree_size);
 		if (!node) {
 			ret = add_nvidia_pinning(pintree, node_p, start, last, tree_size);
+			trace_pin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_NVIDIA,
+						 start, (last + 1 - start),
+						 0, 0, *node_p,
+						 (!ret ? nv_dma_addr((*node_p)->mapping) : 0),
+						 (!ret ? nv_dma_len((*node_p)->mapping) : 0));
 			if (ret == -EEXIST) {
 				/*
 				 * Another CPU has inserted a conflicting
@@ -587,6 +674,11 @@ static int get_cache_entry(struct nvidia_pintree *pintree,
 
 		if (node->node.start <= start) {
 			*node_p = node;
+
+			trace_pin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_NVIDIA, start,
+						 (last + 1 - start), 0, 1, node,
+						 nv_dma_addr(node->mapping),
+						 nv_dma_len(node->mapping));
 			return 0;
 		}
 
@@ -599,6 +691,11 @@ static int get_cache_entry(struct nvidia_pintree *pintree,
 		ret = add_nvidia_pinning(pintree, node_p, start, node->node.start - 1,
 					 tree_size);
 
+		trace_pin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_NVIDIA,
+					 start, (last + 1 - start),
+					 0, 1, node_p,
+					 (!ret ? nv_dma_addr((*node_p)->mapping) : 0),
+					 (!ret ? nv_dma_len((*node_p)->mapping) : 0));
 		atomic_dec(&node->refcount);
 		if (ret == -EEXIST) {
 			/*

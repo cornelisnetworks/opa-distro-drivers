@@ -515,9 +515,11 @@ const char *hfi1_trace_print_rsm_hist(struct trace_seq *p, unsigned int ctxt)
 	return ret;
 }
 
-const char *hfi1_gpu_type_str(unsigned int mt)
+const char *hfi1_memtype_str(unsigned int mt)
 {
 	switch (mt) {
+	case HFI1_MEMINFO_TYPE_SYSTEM:
+		return "System";
 	case HFI1_MEMINFO_TYPE_AMD:
 		return "AMD";
 	case HFI1_MEMINFO_TYPE_NVIDIA:

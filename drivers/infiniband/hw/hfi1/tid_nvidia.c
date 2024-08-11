@@ -56,7 +56,7 @@
 #include "device.h"
 #include "user_exp_rcv.h"
 #include "pinning.h"
-#include "trace_gpu.h"
+#include "trace_pin.h"
 
 #define NV_GPU_PAGE_SHIFT 16
 #define NV_GPU_PAGE_SIZE BIT(NV_GPU_PAGE_SHIFT)
@@ -134,7 +134,22 @@ static void nvidia_node_unpin_pages(struct hfi1_filedata *fd,
 	/* No-op; NVIDIA doesn't support unpinning single pages in mapped-memory range. */
 }
 
-/*
+static unsigned int _nvidia_size_shift(enum nvidia_p2p_page_size_type ps)
+{
+	switch (ps) {
+	case NVIDIA_P2P_PAGE_SIZE_4KB:
+		return 12;
+	case NVIDIA_P2P_PAGE_SIZE_64KB:
+		return 16;
+	case NVIDIA_P2P_PAGE_SIZE_128KB:
+		return 17;
+	default:
+		break;
+	}
+	return 0;
+}
+
+/**
  * Get page-size shift based on @pages. Page size is 1<<(page-size shift).
  *
  * Any page-size shift < EXPECTED_ADDR_SHIFT won't work with the implementation
@@ -144,15 +159,31 @@ static void nvidia_node_unpin_pages(struct hfi1_filedata *fd,
  */
 static unsigned int nvidia_pgt_shift(const struct nvidia_p2p_page_table *pages)
 {
-	switch (pages->page_size) {
-	case NVIDIA_P2P_PAGE_SIZE_4KB:
-		return 12;
-	case NVIDIA_P2P_PAGE_SIZE_64KB:
-		return 16;
-	case NVIDIA_P2P_PAGE_SIZE_128KB:
-		return 17;
-	}
-	return 0;
+	return _nvidia_size_shift(pages->page_size);
+}
+
+/**
+ * Same as nvidia_pgt_shift() but with struct nvidia_p2p_dma_mapping
+ */
+static unsigned int nvidia_dma_shift(const struct nvidia_p2p_dma_mapping *map)
+{
+	return _nvidia_size_shift(map->page_size_type);
+}
+
+/**
+ * Convenience function for tracepoints.
+ */
+static unsigned long nvbuf_dma_addr(struct nvidia_tid_user_buf *nv)
+{
+	return nv->mapping ? (unsigned long)nv->mapping->dma_addresses : 0;
+}
+
+/**
+ * Convenience function for tracepoints.
+ */
+static unsigned long nvbuf_dma_len(struct nvidia_tid_user_buf *nv)
+{
+	return nv->mapping ? nv->mapping->entries << nvidia_dma_shift(nv->mapping) : 0;
 }
 
 static struct tid_node_ops nvidia_nodeops;
@@ -317,6 +348,11 @@ static void nvidia_user_buf_kref_cb(struct kref *ref)
 		container_of(ref, struct nvidia_tid_user_buf, ref);
 
 	spin_lock(&nvbuf->nodes_lock);
+	trace_unpin_recv_pages_gpu(nvbuf->fd, HFI1_MEMINFO_TYPE_NVIDIA, 0, nvbuf,
+				   nvbuf->orig_vaddr, nvbuf->orig_length,
+				   nvbuf_dma_addr(nvbuf),
+				   nvbuf_dma_len(nvbuf));
+
 	/* Putting back final ref, there should be no nodes left */
 	WARN_ON(!list_empty(&nvbuf->nodes));
 	nvbuf->destroyed = true;
@@ -332,6 +368,7 @@ static void nvidia_user_buf_kref_cb(struct kref *ref)
 	 */
 	if (nvbuf->pages)
 		WARN_ON(rdma_interface.put_pages(0, 0, nvbuf->common.vaddr, nvbuf->pages));
+
 	tid_user_buf_free(&nvbuf->common);
 	kfree(nvbuf);
 }
@@ -355,6 +392,10 @@ static void nvidia_invalidate_cb(void *ctxt)
 	 * rdma_interface.put_pages(). I.e. kfree(nvbuf) could not have
 	 * occurred yet and *nvbuf is still valid.
 	 */
+	trace_invalidate_recv_pages_gpu(nvbuf->fd, HFI1_MEMINFO_TYPE_NVIDIA,
+					nvbuf->orig_vaddr, nvbuf->orig_length,
+					nvbuf);
+
 	spin_lock(&nvbuf->nodes_lock);
 	/* Prevent any new TID nodes being created against this memory */
 	nvbuf->invalidated = true;
@@ -387,22 +428,17 @@ static int nvidia_pin_pages(struct hfi1_filedata *fd,
 	ret = rdma_interface.get_pages(0, 0, nvbuf->common.vaddr,
 				       nvbuf->common.length, &nvbuf->pages,
 				       nvidia_invalidate_cb, nvbuf);
-	if (ret)
-		trace_recv_pin_gpu_pages_fail(HFI1_MEMINFO_TYPE_NVIDIA, ret, tbuf->vaddr,
-					      tbuf->length);
+
 	/* Don't WARN on these cases */
 	if (ret == -EINVAL || ret == -ENOMEM)
-		return ret;
+		goto fail;
 	if (WARN_ON(ret))
-		return ret;
+		goto fail;
 	if (WARN_ON(!NVIDIA_P2P_PAGE_TABLE_VERSION_COMPATIBLE(nvbuf->pages))) {
 		ret = -EIO;
 		goto fail_put_pages;
 	}
 
-	trace_pin_rcv_pages_gpu(HFI1_MEMINFO_TYPE_NVIDIA, nvbuf->orig_vaddr, tbuf->vaddr,
-				nvbuf->orig_length, tbuf->length, nvbuf->pages->entries,
-				tbuf);
 
 	if (nvbuf->pages->entries > fd->uctxt->expected_count) {
 		ret = -EINVAL;
@@ -417,6 +453,11 @@ static int nvidia_pin_pages(struct hfi1_filedata *fd,
 		goto fail_unmap;
 	}
 
+	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_NVIDIA, nvbuf->orig_vaddr,
+				 nvbuf->orig_length, 0, 0, nvbuf,
+				 nvbuf_dma_addr(nvbuf),
+				 nvbuf_dma_len(nvbuf));
+
 	return nvbuf->pages->entries;
 fail_unmap:
 	WARN_ON(rdma_interface.dma_unmap_pages(fd->dd->pcidev, nvbuf->pages, nvbuf->mapping));
@@ -424,7 +465,9 @@ fail_unmap:
 fail_put_pages:
 	WARN_ON(rdma_interface.put_pages(0, 0, nvbuf->common.vaddr, nvbuf->pages));
 	nvbuf->pages = NULL;
-	trace_recv_pin_gpu_pages_fail(HFI1_MEMINFO_TYPE_NVIDIA, ret, tbuf->vaddr, tbuf->length);
+fail:
+	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_NVIDIA, nvbuf->orig_vaddr,
+				 nvbuf->orig_length, ret, 0, nvbuf, 0, 0);
 
 	return ret;
 }

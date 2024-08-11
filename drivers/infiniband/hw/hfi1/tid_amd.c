@@ -473,6 +473,25 @@ fail:
 	return ret;
 }
 
+static unsigned long get_dma_addr(struct amd_p2p_info *a)
+{
+	return a ? sg_dma_address(a->pages->sgl) : 0;
+}
+
+static unsigned long get_dma_len(struct amd_p2p_info *a)
+{
+	struct sg_table *sgt = a->pages;
+	struct scatterlist *sg;
+	unsigned long l = 0;
+	int i;
+
+	if (a)
+		for_each_sgtable_sg(sgt, sg, i)
+			l += sg_dma_len(sg);
+
+	return l;
+}
+
 static void amd_user_buf_kref_cb(struct kref *ref)
 {
 	struct amd_tid_user_buf *abuf =
@@ -590,8 +609,9 @@ static int amd_pin_pages(struct hfi1_filedata *fd,
 	}
 	ret = (abuf->pages->size >> ps);
 
-	trace_pin_rcv_pages_gpu(HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, abuf->pages->va,
-				tbuf->length, abuf->pages->size, ret, tbuf);
+	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, tbuf->length,
+				 0, 0, abuf, get_dma_addr(abuf->pages),
+				 get_dma_len(abuf->pages));
 
 	return ret;
 
@@ -599,7 +619,8 @@ fail_put_pages:
 	rdma_ops->put_pages(&abuf->pages);
 fail:
 	abuf->pages = NULL;
-	trace_recv_pin_gpu_pages_fail(HFI1_MEMINFO_TYPE_AMD, ret, tbuf->vaddr, tbuf->length);
+	trace_pin_recv_pages_gpu(fd, HFI1_MEMINFO_TYPE_AMD, tbuf->vaddr, tbuf->length,
+				 ret, 0, abuf, 0, 0);
 
 	return ret;
 }
