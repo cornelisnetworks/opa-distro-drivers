@@ -80,7 +80,6 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/pin_amd.c
 	drivers/infiniband/hw/hfi1/pin_system.c
 	drivers/infiniband/hw/hfi1/pin_nvidia.c
-	drivers/infiniband/hw/hfi1/pin_nvidia.h
 	drivers/infiniband/hw/hfi1/pinning.c
 	drivers/infiniband/hw/hfi1/pinning.h
 	drivers/infiniband/hw/hfi1/pio.c
@@ -105,14 +104,13 @@ files_to_copy[$modules_cnt]="
 	drivers/infiniband/hw/hfi1/trace.h
 	drivers/infiniband/hw/hfi1/trace_ctxts.h
 	drivers/infiniband/hw/hfi1/trace_dbg.h
-	drivers/infiniband/hw/hfi1/trace_gpu.h
+	drivers/infiniband/hw/hfi1/trace_pin.h
 	drivers/infiniband/hw/hfi1/trace_ibhdrs.h
 	drivers/infiniband/hw/hfi1/trace_misc.h
 	drivers/infiniband/hw/hfi1/trace_rc.h
 	drivers/infiniband/hw/hfi1/trace_rx.h
 	drivers/infiniband/hw/hfi1/trace_tx.h
 	drivers/infiniband/hw/hfi1/trace_mmu.h
-	drivers/infiniband/hw/hfi1/trace_nvidia.h
 	drivers/infiniband/hw/hfi1/uc.c
 	drivers/infiniband/hw/hfi1/ud.c
 	drivers/infiniband/hw/hfi1/user_exp_rcv.c

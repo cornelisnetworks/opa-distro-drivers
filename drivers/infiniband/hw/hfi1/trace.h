@@ -23,10 +23,6 @@ __print_symbolic(etype,                         \
 #include "trace_mmu.h"
 #include "trace_iowait.h"
 #include "trace_tid.h"
-#ifdef CONFIG_HFI1_NVIDIA
-#include "trace_nvidia.h"
-#endif
-/* For hfi1-GDRCopy */
 #if defined(CONFIG_HFI1_NVIDIA) || defined(CONFIG_HFI1_AMD)
-#include "trace_gpu.h"
+#include "trace_pin.h"
 #endif
