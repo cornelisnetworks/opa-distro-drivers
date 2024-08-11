@@ -299,6 +299,8 @@ static void remove_amd_pages(void *data)
 
 	/* Remove from the tree so that it's not found anymore. */
 	spin_lock(&pintree->lock);
+	trace_invalidate_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, node->node.start,
+					node->size, node);
 	node->invalidated = true;
 
 	found_node = interval_tree_iter_first(&pintree->root, node->node.start, node->node.last);
@@ -371,17 +373,46 @@ unlock:
 	return result;
 }
 
+static unsigned long get_dma_addr(struct amd_pintree_node *n)
+{
+	return sg_dma_address(n->p2p_info->pages->sgl);
+}
+
+static unsigned long get_dma_len(struct amd_pintree_node *n)
+{
+	struct sg_table *sgt = n->p2p_info->pages;
+	struct scatterlist *sg;
+	unsigned long l = 0;
+	int i;
+
+	for_each_sgtable_sg(sgt, sg, i)
+		l += sg_dma_len(sg);
+
+	return l;
+}
+
 static void unpin_amd_node(struct amd_pintree_node *node)
 {
 	struct amd_pintree *pintree = node->pintree;
 	struct amd_pq_state *state = pintree->state;
 	struct hfi1_user_sdma_pkt_q *pq = state->pq;
+	/* Save off VA, DMA for tracing after memory is freed */
+	unsigned long va, va_len;
+	unsigned long dma, dma_len;
 	int result;
+
+	va = node->p2p_info->va;
+	va_len = node->p2p_info->size;
+	dma = get_dma_addr(node);
+	dma_len = get_dma_len(node);
 
 	/* There must be no I/O referencing this node. */
 	WARN_ON(atomic_read(&node->refcount) != 0);
 
 	result = rdma_ops->put_pages(&node->p2p_info);
+	trace_unpin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, result, node, va, va_len,
+				   dma, dma_len);
+
 	if (result)
 		dd_dev_info(pq->dd, "ROCmRDMA put_pages() failed while unwinding pinning: %d\n",
 			    result);
@@ -417,6 +448,7 @@ static bool evict_amd_pinnings(struct amd_pintree *pintree, size_t goal, bool in
 		unpin_amd_node(cur);
 		kfree(cur);
 	}
+	trace_evict_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, total, goal);
 
 	return total >= goal;
 }
@@ -434,6 +466,7 @@ static int pin_amd_region(struct amd_pintree *pintree, struct pid *pid,
 retry:
 	result = rdma_ops->get_pages(start, len, pid, state->dma_device,
 				     &node->p2p_info, remove_amd_pages, node);
+
 	if (result == -ENOSPC && retry) {
 		PIN_PQ_DBG(pq, "get_pages failed with ENOSPC, trying eviction");
 		retry = false;
@@ -561,11 +594,22 @@ static int incremental_pin_amd_region(struct amd_pintree *pintree, struct pid *p
 				 */
 				continue;
 			}
+
+			trace_pin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, start,
+						 last + 1 - start, ret, 0, *node_p,
+						 (!ret ? get_dma_addr(*node_p) : 0),
+						 (!ret ? get_dma_len(*node_p) : 0));
+
 			return ret;
 		}
 
 		if (node->node.start <= start) {
 			*node_p = node;
+			trace_pin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, start,
+						 last + 1 - start, 0, 1, node,
+						 get_dma_addr(node),
+						 get_dma_len(node));
+
 			return 0;
 		}
 
@@ -585,6 +629,11 @@ static int incremental_pin_amd_region(struct amd_pintree *pintree, struct pid *p
 			 */
 			continue;
 		}
+		trace_pin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, start,
+					 (node->node.start - 1), ret, 0, *node_p,
+					 (!ret ? get_dma_addr(*node_p) : 0),
+					 (!ret ? get_dma_len(*node_p) : 0));
+
 		return ret;
 	}
 }
@@ -675,8 +724,10 @@ static int add_amd_iovec_to_sdma_packet(struct amd_pq_state *state,
 
 	device_id = iovec->context;
 	pintree = get_amd_pintree(state, device_id);
-	if (!pintree)
+	if (!pintree) {
+		SDMA_DBG(req, "Failed to get pintree");
 		return -ENOMEM;
+	}
 
 	SDMA_DBG(req, "start=0x%llx len=%zu device_id=0x%08x", (uintptr_t)iovec->iov.iov_base + iovec->offset,
 		 from_this_iovec, device_id);
