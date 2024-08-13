@@ -5,6 +5,8 @@
 
 #include <linux/types.h>
 #include <linux/slab.h>
+#include <linux/kref.h>
+#include <linux/refcount.h>
 
 #include "hfi.h"
 #include "common.h"
@@ -75,6 +77,11 @@ struct amd_pq_state {
 struct amd_pintree {
 	/* on its own cacheline */
 	spinlock_t lock;
+	/*
+	 * Number of existing nodes that reference this pintree; wait to reach zero
+	 * before destroying pintree.
+	 */
+	refcount_t ref;
 
 	/* new cacheline starts here */
 	uint32_t device_id ____cacheline_aligned_in_smp;
@@ -96,11 +103,10 @@ struct amd_pintree_node {
 	struct amd_pintree *pintree;
 	size_t size;
 	struct amd_p2p_info *p2p_info;
-	atomic_t refcount;
+	/* There are two groups of ref holders: the pintree and SDMA descriptors */
+	struct kref ref;
 	bool invalidated;
 };
-
-static void unpin_amd_node(struct amd_pintree_node *node);
 
 static const struct amd_rdma_interface *rdma_ops;
 static struct kmem_cache *pq_state_kmem_cache;
@@ -132,6 +138,8 @@ static struct amd_pintree *init_amd_pintree(struct amd_pq_state *state, uint32_t
 	spin_lock_init(&pintree->lock);
 	pintree->root = RB_ROOT_CACHED;
 	INIT_LIST_HEAD(&pintree->lru_list);
+	/* One ref taken for the pq/state */
+	refcount_set(&pintree->ref, 1);
 	pintree->state = state;
 	pintree->device_id = device_id;
 
@@ -142,12 +150,79 @@ static struct amd_pintree *init_amd_pintree(struct amd_pq_state *state, uint32_t
 	return pintree;
 }
 
+static unsigned long get_dma_addr(struct amd_pintree_node *n)
+{
+	return sg_dma_address(n->p2p_info->pages->sgl);
+}
+
+static unsigned long get_dma_len(struct amd_pintree_node *n)
+{
+	struct sg_table *sgt = n->p2p_info->pages;
+	struct scatterlist *sg;
+	unsigned long l = 0;
+	int i;
+
+	for_each_sgtable_sg(sgt, sg, i)
+		l += sg_dma_len(sg);
+
+	return l;
+}
+
+static void unpin_amd_node(struct amd_pintree_node *node)
+{
+	struct amd_pintree *pintree = node->pintree;
+	struct amd_pq_state *state = pintree->state;
+	struct hfi1_user_sdma_pkt_q *pq = state->pq;
+	/* Save off VA, DMA for tracing after memory is freed */
+	unsigned long va, va_len;
+	unsigned long dma, dma_len;
+	int result;
+
+	va = node->p2p_info->va;
+	va_len = node->p2p_info->size;
+	dma = get_dma_addr(node);
+	dma_len = get_dma_len(node);
+
+	result = rdma_ops->put_pages(&node->p2p_info);
+	trace_unpin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, result, node, va, va_len,
+				   dma, dma_len);
+
+	if (result)
+		dd_dev_info(pq->dd, "ROCmRDMA put_pages() failed while unwinding pinning: %d\n",
+			    result);
+}
+
+/*
+ * Process context destructor.
+ */
+static void amd_node_kref_cb(struct kref *kref)
+{
+	struct amd_pintree_node *n = container_of(kref, struct amd_pintree_node, ref);
+
+	unpin_amd_node(n);
+	refcount_dec(&n->pintree->ref);
+	kfree(n);
+}
+
+/**
+ * remove_amd_pages() (amdgpu free_callback) destructor.
+ *
+ * The AMD/ROCm code will free AMD stuff after remove_amd_pages() returns; this
+ * just needs to decrement pintree->nodes and kfree() the node memory.
+ */
+static void amd_node_kref_cb_no_unpin(struct kref *kref)
+{
+	struct amd_pintree_node *n = container_of(kref, struct amd_pintree_node, ref);
+
+	refcount_dec(&n->pintree->ref);
+	kfree(n);
+}
+
 static void cleanup_amd_pintree(struct amd_pintree *pintree)
 {
 	struct amd_pq_state *state = pintree->state;
 	struct hfi1_user_sdma_pkt_q *pq = state->pq;
-	struct interval_tree_node *found_node;
-	struct amd_pintree_node *found;
+	struct amd_pintree_node *n;
 
 	PIN_PQ_DBG(pq, "enter");
 
@@ -155,42 +230,39 @@ static void cleanup_amd_pintree(struct amd_pintree *pintree)
 	hash_del(&pintree->hash_node);
 	spin_unlock(&state->lock);
 
+	/*
+	 * Release pintree refs to nodes still in cache.
+	 *
+	 * If remove_amd_pages() races with this function and removes node from cache,
+	 * remove_amd_node() is responsible for doing the cache's kref_put().
+	 */
 	while (1) {
-		/*
-		 * Although there must not be any activity on the pq at this
-		 * point, the locks are still necessary as the AMD driver
-		 * may invoke remove_amd_pages() on a pintree node at any
-		 * point before the invocation of put_pages() for that node
-		 * occurs below.
-		 */
 		spin_lock(&pintree->lock);
-		found_node = interval_tree_iter_first(&pintree->root, 0UL, ~0UL);
-		if (!found_node) {
+		if (list_empty(&pintree->lru_list)) {
 			spin_unlock(&pintree->lock);
 			break;
 		}
-
-		found = container_of(found_node, struct amd_pintree_node, node);
-		if (atomic_read(&found->refcount) > 0) {
-			spin_unlock(&pintree->lock);
-			PIN_PQ_DBG(pq, "spinning until node refcount is zero (%u)",
-				   atomic_read(&found->refcount));
-			cond_resched();
-			continue;
-		}
-
-		interval_tree_remove(&found->node, &pintree->root);
+		n = list_first_entry(&pintree->lru_list, struct amd_pintree_node, lru_node);
+		interval_tree_remove(&n->node, &pintree->root);
+		list_del(&n->lru_node);
 		spin_unlock(&pintree->lock);
-
-		unpin_amd_node(found);
 		/*
-		 * It is necessary to wait until after put_pages() is called
-		 * to free the node in order to cleanly resolve races
-		 * between cleanup_amd_pintree() completing and calls to
-		 * remove_amd_pages() by the AMD driver.
+		 * If we reached here, remove_amd_pages() did not race for n or this CPU won the
+		 * race. Either way, this CPU is responsible for doing the cache's kref_put().
 		 */
-		kfree(found);
+		kref_put(&n->ref, amd_node_kref_cb);
 	}
+
+	PIN_PQ_DBG(pq, "spinning until no outstanding AMD SDMA nodes (current:%u)",
+		   refcount_read(&pintree->ref));
+	/*
+	 * Wait for outstanding SDMA requests referencing nodes that reference
+	 * pintree to complete. Only ref left will be for pq/state.
+	 */
+	while (refcount_read(&pintree->ref) > 1)
+		cond_resched();
+
+	PIN_PQ_DBG(pq, "all outstanding AMD SDMA nodes destroyed");
 
 	kmem_cache_free(pintree_kmem_cache, pintree);
 }
@@ -268,6 +340,20 @@ static void free_amd_pinning_interface(struct hfi1_user_sdma_pkt_q *pq)
 	kmem_cache_free(pq_state_kmem_cache, state);
 }
 
+/**
+ * Must call in context where n cannot be destroyed, i.e. another CPU cannot do
+ * final kref_put(&n->ref,...).
+ *
+ * @return number of outstanding I/O ref holders to @n.
+ */
+static unsigned int outstanding_io(struct amd_pintree_node *n)
+{
+	unsigned int c = kref_read(&n->ref);
+
+	WARN_ON(!c);
+	return (!c ? 0 : c - 1);
+}
+
 /* This is the free callback passed to rdma_ops->get_pages() */
 static void remove_amd_pages(void *data)
 {
@@ -313,16 +399,17 @@ static void remove_amd_pages(void *data)
 		spin_unlock(&pintree->lock);
 
 		/* Spin until I/O is done. */
-		while (atomic_read(&node->refcount) > 0)
+		while (outstanding_io(node))
 			rep_nop();
 
 		/*
-		 * The AMD driver will free all of its associated resources
-		 * upon return from this function.
+		 * Since this CPU found node in cache, this CPU is responsible
+		 * for doing cache's (and last) kref_put(&node->ref,...).
 		 */
-		kfree(found);
+		kref_put(&node->ref, amd_node_kref_cb_no_unpin);
 	} else {
 		spin_unlock(&pintree->lock);
+
 		/*
 		 * This can happen during free_amd_pinning_interface() if
 		 * the AMD driver calls remove_amd_pages() for a pintree
@@ -363,59 +450,15 @@ static int insert_amd_pinning(struct amd_pintree *pintree, struct amd_pintree_no
 	 * Take safety ref; release after sdma_txadd_daddr() when any
 	 * per-descriptor references have been taken.
 	 */
-	atomic_inc(&node->refcount);
+	kref_get(&node->ref);
 	interval_tree_insert(&node->node, &pintree->root);
 	list_add_tail(&node->lru_node, &pintree->lru_list);
 	pintree->size += node->size;
 
+
 unlock:
 	spin_unlock(&pintree->lock);
 	return result;
-}
-
-static unsigned long get_dma_addr(struct amd_pintree_node *n)
-{
-	return sg_dma_address(n->p2p_info->pages->sgl);
-}
-
-static unsigned long get_dma_len(struct amd_pintree_node *n)
-{
-	struct sg_table *sgt = n->p2p_info->pages;
-	struct scatterlist *sg;
-	unsigned long l = 0;
-	int i;
-
-	for_each_sgtable_sg(sgt, sg, i)
-		l += sg_dma_len(sg);
-
-	return l;
-}
-
-static void unpin_amd_node(struct amd_pintree_node *node)
-{
-	struct amd_pintree *pintree = node->pintree;
-	struct amd_pq_state *state = pintree->state;
-	struct hfi1_user_sdma_pkt_q *pq = state->pq;
-	/* Save off VA, DMA for tracing after memory is freed */
-	unsigned long va, va_len;
-	unsigned long dma, dma_len;
-	int result;
-
-	va = node->p2p_info->va;
-	va_len = node->p2p_info->size;
-	dma = get_dma_addr(node);
-	dma_len = get_dma_len(node);
-
-	/* There must be no I/O referencing this node. */
-	WARN_ON(atomic_read(&node->refcount) != 0);
-
-	result = rdma_ops->put_pages(&node->p2p_info);
-	trace_unpin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, result, node, va, va_len,
-				   dma, dma_len);
-
-	if (result)
-		dd_dev_info(pq->dd, "ROCmRDMA put_pages() failed while unwinding pinning: %d\n",
-			    result);
 }
 
 static bool evict_amd_pinnings(struct amd_pintree *pintree, size_t goal, bool internal)
@@ -432,7 +475,7 @@ static bool evict_amd_pinnings(struct amd_pintree *pintree, size_t goal, bool in
 	total = 0;
 	spin_lock(&pintree->lock);
 	list_for_each_entry_safe(cur, tmp, &pintree->lru_list, lru_node) {
-		if (atomic_read(&cur->refcount) == 0) {
+		if (!outstanding_io(cur)) {
 			interval_tree_remove(&cur->node, &pintree->root);
 			list_move(&cur->lru_node, &evict_list);
 			(*stat)++;
@@ -444,10 +487,8 @@ static bool evict_amd_pinnings(struct amd_pintree *pintree, size_t goal, bool in
 	pintree->size -= total;
 	spin_unlock(&pintree->lock);
 
-	list_for_each_entry_safe(cur, tmp, &evict_list, lru_node) {
-		unpin_amd_node(cur);
-		kfree(cur);
-	}
+	list_for_each_entry_safe(cur, tmp, &evict_list, lru_node)
+		kref_put(&cur->ref, amd_node_kref_cb);
 	trace_evict_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, total, goal);
 
 	return total >= goal;
@@ -508,7 +549,7 @@ static struct amd_pintree_node *find_amd_pinning(struct amd_pintree *pintree,
 		 * Take safety ref; release after sdma_txadd_daddr() when any
 		 * per-descriptor references have been taken.
 		 */
-		atomic_inc(&node->refcount);
+		kref_get(&node->ref);
 		pintree->hits++;
 	} else {
 		pintree->misses++;
@@ -565,12 +606,17 @@ static int add_amd_pinning(struct amd_pintree *pintree, struct pid *pid,
 	if (!node)
 		return -ENOMEM;
 
+	/* This ref will become the cache's ref */
+	kref_init(&node->ref);
 	node->pintree = pintree;
+	refcount_inc(&pintree->ref);
 	result = pin_amd_region(pintree, pid, start_page, end_page - 1, node);
-	if (result)
+	if (result) {
+		refcount_dec(&pintree->ref);
 		kfree(node);
-	else
+	} else {
 		*node_p = node;
+	}
 
 	return result;
 }
@@ -615,9 +661,9 @@ static int incremental_pin_amd_region(struct amd_pintree *pintree, struct pid *p
 
 		/*
 		 * This node will not be returned, instead a new node will be.
-		 * So release the reference.
+		 * So release the safety ref.
 		 */
-		atomic_dec(&node->refcount);
+		kref_put(&node->ref, amd_node_kref_cb);
 
 		/* Prepend a node to cover the beginning of the allocation */
 		ret = add_amd_pinning(pintree, pid, node_p, start, node->node.start - 1,
@@ -648,12 +694,12 @@ static int get_amd_cache_entry(struct amd_pintree *pintree, struct pid *pid,
 
 static void amd_node_get(void *ctx)
 {
-	atomic_inc(&((struct amd_pintree_node *)ctx)->refcount);
+	kref_get(&((struct amd_pintree_node *)ctx)->ref);
 }
 
 static void amd_node_put(void *ctx)
 {
-	atomic_dec(&((struct amd_pintree_node *)ctx)->refcount);
+	kref_put(&((struct amd_pintree_node *)ctx)->ref, amd_node_kref_cb);
 }
 
 static int add_amd_mapping_to_sdma_packet(struct pid *pid,
@@ -709,6 +755,7 @@ static int add_amd_mapping_to_sdma_packet(struct pid *pid,
 		sg = sg_next(sg);
 		from_this_cache_entry -= from_this_sgl;
 	}
+
 	return 0;
 }
 
@@ -753,7 +800,7 @@ static int add_amd_iovec_to_sdma_packet(struct amd_pq_state *state,
 						     from_this_cache_entry);
 
 		/* Release safety ref */
-		atomic_dec(&cache_entry->refcount);
+		kref_put(&cache_entry->ref, amd_node_kref_cb);
 		if (ret) {
 			SDMA_DBG(req, "SDMA txreq add amd segment failed %d", ret);
 			return ret;
@@ -841,7 +888,7 @@ static int get_amd_stats(struct hfi1_user_sdma_pkt_q *pq, int index,
 		u64 len;
 
 		stats->cache_entries++;
-		stats->total_refcounts += atomic_read(&node->refcount);
+		stats->total_refcounts += outstanding_io(node);
 		len = interval_node->last - interval_node->start + 1;
 		stats->total_bytes += len;
 		next = interval_node->start + len;
