@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/kref.h>
 #include <linux/refcount.h>
+#include <linux/workqueue.h>
 
 #include "hfi.h"
 #include "common.h"
@@ -59,6 +60,10 @@ static unsigned long amd_cache_size = ~0UL;
 module_param(amd_cache_size, ulong, 0644);
 MODULE_PARM_DESC(amd_cache_size, "Per-context AMD pin cache size limit (in MB)");
 
+static unsigned int amd_use_cache;
+module_param(amd_use_cache, uint, 0444);
+MODULE_PARM_DESC(amd_use_cache, "Disabled: do rdma_get_pages()/rdma_put_pages() for each SDMA txreq. Enabled: use ROCm-buffer:DMA-mapped-page cache");
+
 #define AMD_MAX_DEVICES 16
 #define AMD_DEVICE_HASH_OVERSUBSCRIBE 2
 #define AMD_DEVICE_HASH_BITS ilog2(AMD_MAX_DEVICES * AMD_DEVICE_HASH_OVERSUBSCRIBE)
@@ -106,6 +111,8 @@ struct amd_pintree_node {
 	/* There are two groups of ref holders: the pintree and SDMA descriptors */
 	struct kref ref;
 	bool invalidated;
+	/* For rdma_put_pages() queued from interrupt context */
+	struct execute_work cleanup_work;
 };
 
 static const struct amd_rdma_interface *rdma_ops;
@@ -197,15 +204,26 @@ static void unpin_amd_node(struct amd_pintree_node *node)
 }
 
 /*
- * Process context destructor.
+ * pintree->ref will prevent cleanup_amd_pintree() from destroying pintree
+ * until all deferred amd_pintree_node work has completed.
+ */
+static void free_amd_node(struct work_struct *work)
+{
+	struct amd_pintree_node *n = container_of(work, struct amd_pintree_node, cleanup_work.work);
+
+	unpin_amd_node(n);
+	refcount_dec(&n->pintree->ref);
+	kfree(n);
+}
+
+/*
+ * Process and interrupt context destructor.
  */
 static void amd_node_kref_cb(struct kref *kref)
 {
 	struct amd_pintree_node *n = container_of(kref, struct amd_pintree_node, ref);
 
-	unpin_amd_node(n);
-	refcount_dec(&n->pintree->ref);
-	kfree(n);
+	execute_in_process_context(free_amd_node, &n->cleanup_work);
 }
 
 /**
@@ -434,6 +452,9 @@ static int insert_amd_pinning(struct amd_pintree *pintree, struct amd_pintree_no
 	struct interval_tree_node *existing;
 	int result = 0;
 
+	if (!amd_use_cache)
+		return 0;
+
 	spin_lock(&pintree->lock);
 	if (WARN_ON(node->invalidated)) {
 		spin_unlock(&pintree->lock);
@@ -607,7 +628,12 @@ static int add_amd_pinning(struct amd_pintree *pintree, struct pid *pid,
 	if (!node)
 		return -ENOMEM;
 
-	/* This ref will become the cache's ref */
+	/*
+	 * When amd_use_cache is true, this ref becomes the cache's ref.
+	 * When amd_use_cache is false, this ref is the safety ref that is
+	 * kref_put() in add_amd_iovec_to_sdma_packet() after the pinning is
+	 * added to all applicable SDMA descriptors.
+	 */
 	kref_init(&node->ref);
 	node->pintree = pintree;
 	refcount_inc(&pintree->ref);
@@ -698,7 +724,9 @@ static void amd_node_get(void *ctx)
 
 static void amd_node_put(void *ctx)
 {
-	kref_put(&((struct amd_pintree_node *)ctx)->ref, amd_node_kref_cb);
+	struct amd_pintree_node *n = ctx;
+
+	kref_put(&n->ref, amd_node_kref_cb);
 }
 
 static int add_amd_mapping_to_sdma_packet(struct pid *pid,
@@ -798,7 +826,11 @@ static int add_amd_iovec_to_sdma_packet(struct amd_pq_state *state,
 		ret = add_amd_mapping_to_sdma_packet(pid, req->pq, tx, cache_entry, start,
 						     from_this_cache_entry);
 
-		/* Release safety ref */
+		/*
+		 * When amd_use_cache is true, this releases the safety ref.
+		 * When amd_use_cache is false, this releases the kref that would have become the
+		 * cache's ref.
+		 */
 		kref_put(&cache_entry->ref, amd_node_kref_cb);
 		if (ret) {
 			SDMA_DBG(req, "SDMA txreq add amd segment failed %d", ret);
