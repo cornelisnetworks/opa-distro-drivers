@@ -72,8 +72,15 @@ endif
 
 ifdef CONFIG_HFI1_NVIDIA
 ifndef NVIDIA_DRIVER_SOURCE
-NVIDIA_VERSION=$(shell rpm -q nvidia-driver | cut -d '-' -f 3)
-NVIDIA_DRIVER_SOURCE=/usr/src/nvidia-$(NVIDIA_VERSION)
+# E.g. from nvidia-driver:open-dkms
+#   $ rpm -ql --whatprovides nvidia-kmod | grep 'nv-p2p.h'
+#   /usr/src/nvidia-open-560.28.03/nvidia-peermem/nv-p2p.h
+#   /usr/src/nvidia-open-560.28.03/nvidia/nv-p2p.h
+# From nvidia-driver:latest-dkms
+#   $ rpm -ql --whatprovides nvidia-kmod | grep 'nv-p2p.h'
+#   /usr/src/nvidia-555.42.06/nvidia-peermem/nv-p2p.h
+#   /usr/src/nvidia-555.42.06/nvidia/nv-p2p.h
+NVIDIA_DRIVER_SOURCE := $(realpath $(dir $(shell rpm -ql --whatprovides nvidia-kmod | grep 'nvidia/nv-p2p.h'))/..)
 endif
 endif
 
