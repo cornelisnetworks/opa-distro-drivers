@@ -647,13 +647,33 @@ static struct tid_user_buf_ops amd_bufops = {
 	.iter_begin = amd_page_iter_begin
 };
 
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+static int (*query_rdma)(const struct amd_rdma_interface **);
+#endif
+
 int register_amd_tid_ops(void)
 {
 	int ret;
 
-	ret = amdkfd_query_rdma_interface(&rdma_ops);
-	if (WARN_ON(ret))
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+	query_rdma = symbol_get(amdkfd_query_rdma_interface);
+	if (WARN_ON(!query_rdma)) {
+		ret = -EFAULT;
 		goto bail;
+	}
+
+	ret = query_rdma(&rdma_ops);
+#else
+	ret = amdkfd_query_rdma_interface(&rdma_ops);
+#endif
+
+	if (WARN_ON(ret)) {
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+		symbol_put(amdkfd_query_rdma_interface);
+		query_rdma = NULL;
+#endif
+		goto bail;
+	}
 
 	pr_info("%s AMD p2p TID-DMA support enabled\n", class_name());
 	return register_tid_ops(HFI1_MEMINFO_TYPE_AMD, &amd_bufops, &amd_nodeops);
@@ -665,4 +685,9 @@ bail:
 void deregister_amd_tid_ops(void)
 {
 	deregister_tid_ops(HFI1_MEMINFO_TYPE_AMD);
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+	if (query_rdma)
+		symbol_put(amdkfd_query_rdma_interface);
+	query_rdma = NULL;
+#endif
 }

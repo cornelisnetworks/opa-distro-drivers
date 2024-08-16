@@ -391,7 +391,7 @@ else
 fi
 
 if [[ $build_amd = y ]] ; then
-	sed -i "s/CONFIG_HFI_AMD/CONFIG_HFI1_AMD=y/g" $workdir/rpmbuild/SPECS/$rpmname.spec
+	sed -i "s/CONFIG_HFI_AMD/CONFIG_HFI1_AMD=y CONFIG_HFI1_AMD_SOFTDEP=y/g" $workdir/rpmbuild/SPECS/$rpmname.spec
 else
 	sed -i "s/CONFIG_HFI_AMD//g" $workdir/rpmbuild/SPECS/$rpmname.spec
 fi
