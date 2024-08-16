@@ -16,6 +16,10 @@
 
 #include <drm/amd_rdma.h>
 
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+MODULE_SOFTDEP("pre: amdgpu");
+#endif
+
 /*
  * Estimate of the maximum number of pin caches that will be established in
  * the system for a single GPU. The cap on pin cache size is set to
@@ -807,13 +811,26 @@ static struct pinning_interface amd_pinning_interface = {
 	.get_stats = get_amd_stats,
 };
 
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+static int (*query_rdma)(const struct amd_rdma_interface **);
+#endif
+
 void register_amd_pinning_interface(void)
 {
 	int result;
 	const char *err_str;
 	char name_buf[64];
 
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+	query_rdma = symbol_get(amdkfd_query_rdma_interface);
+	if (!query_rdma) {
+		err_str = "missing symbol amdkfd_query_rdma_interface";
+		goto fail;
+	}
+	result = query_rdma(&rdma_ops);
+#else
 	result = amdkfd_query_rdma_interface(&rdma_ops);
+#endif
 	if (result != 0) {
 		err_str = "failed to obtain RDMA interface";
 		goto fail;
@@ -854,4 +871,8 @@ void deregister_amd_pinning_interface(void)
 
 	kmem_cache_destroy(pintree_kmem_cache);
 	kmem_cache_destroy(pq_state_kmem_cache);
+#ifdef CONFIG_HFI1_AMD_SOFTDEP
+	if (query_rdma)
+		symbol_put(amdkfd_query_rdma_interface);
+#endif
 }
