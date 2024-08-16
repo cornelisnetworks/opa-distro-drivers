@@ -48,6 +48,7 @@ endif
 hfi1-$(CONFIG_HFI1_AMD) += pin_amd.o tid_amd.o
 ccflags-$(CONFIG_HFI1_AMD) += -I$(AMDGPU_DRIVER_SOURCE)/include
 ccflags-$(CONFIG_HFI1_AMD) += -DCONFIG_HFI1_AMD
+ccflags-$(CONFIG_HFI1_AMD_SOFTDEP) += -DCONFIG_HFI1_AMD_SOFTDEP
 
 ifdef MVERSION
 CFLAGS_driver.o = -DHFI1_DRIVER_VERSION_BASE=\"$(MVERSION)\"
