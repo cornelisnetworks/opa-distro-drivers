@@ -119,7 +119,7 @@ static unsigned int __amd_page_iter_dma_len(struct amd_page_iter *iter)
 	if (iter->offset >= len)
 		return 0;
 
-	len = min(len - iter->offset, MAX_EXPECTED_BUFFER);
+	len = min_t(size_t, len - iter->offset, MAX_EXPECTED_BUFFER);
 	/* At end of current DMA range */
 	if (!len)
 		return 0;
