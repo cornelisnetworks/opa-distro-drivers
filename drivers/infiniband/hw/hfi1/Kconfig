@@ -36,3 +36,13 @@ config HFI1_AMD
 	help
 	  Build hfi1 AMD GPU memory-pinning code for user_sdma. Requires AMD
 	  ROCk out-of-tree driver header files.
+config HFI1_AMD_SOFTDEP
+	bool "Softdep on amdgpu and use symbol_get() to link"
+	depends on HFI1_AMD
+	default y
+	help
+	  Add amdgpu as a soft dependency and get amdkfd_query_rdma_interface()
+	  using symbol_get(). This allows hfi1 to load even if amdgpu is not
+	  available. Does not work on kernels where symbol_get() of
+	  non-EXPORT_SYMBOL_GPL() symbols fails. This is at present necessary
+	  when amdgpu Module.symvers is not available when hfi1 is built.
