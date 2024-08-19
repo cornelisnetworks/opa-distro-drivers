@@ -27,6 +27,6 @@ __print_symbolic(etype,                         \
 #include "trace_nvidia.h"
 #endif
 /* For hfi1-GDRCopy */
-#ifdef NVIDIA_GPU_DIRECT
+#if defined(CONFIG_HFI1_NVIDIA) || defined(CONFIG_HFI1_AMD)
 #include "trace_gpu.h"
 #endif
