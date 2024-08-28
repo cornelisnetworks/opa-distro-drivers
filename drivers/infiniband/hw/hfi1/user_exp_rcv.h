@@ -70,7 +70,6 @@ struct tid_rb_node {
 	unsigned long vaddr;
 	/* Number of pages, implementation-sized */
 	unsigned int npages;
-	struct page *pages[] __counted_by(npages);
 	/* Implementation page-size shift */
 	unsigned int page_shift;
 	u32 rcventry;
