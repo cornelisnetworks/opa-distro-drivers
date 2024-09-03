@@ -53,6 +53,9 @@ MODULE_PARM_DESC(cap_mask, "Bit mask of enabled/disabled HW features");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("Cornelis Omni-Path Express driver");
 
+#define HFI1_DRIVER_VERSION HFI1_DRIVER_VERSION_BASE
+MODULE_VERSION(HFI1_DRIVER_VERSION);
+
 /*
  * MAX_PKT_RCV is the max # if packets processed per receive interrupt.
  */
