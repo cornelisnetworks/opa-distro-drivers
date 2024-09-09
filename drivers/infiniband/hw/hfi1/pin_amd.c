@@ -176,20 +176,24 @@ static void unpin_amd_node(struct amd_pintree_node *node)
 	/* Save off VA, DMA for tracing after memory is freed */
 	unsigned long va, va_len;
 	unsigned long dma, dma_len;
-	int result;
+	int ret;
+
+	if (!node->p2p_info)
+		return;
 
 	va = node->p2p_info->va;
 	va_len = node->p2p_info->size;
 	dma = get_dma_addr(node);
 	dma_len = get_dma_len(node);
 
-	result = rdma_ops->put_pages(&node->p2p_info);
-	trace_unpin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, result, node, va, va_len,
+	ret = rdma_ops->put_pages(&node->p2p_info);
+	node->p2p_info = NULL;
+	trace_unpin_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, ret, node, va, va_len,
 				   dma, dma_len);
 
-	if (result)
+	if (ret)
 		dd_dev_info(pq->dd, "ROCmRDMA put_pages() failed while unwinding pinning: %d\n",
-			    result);
+			    ret);
 }
 
 /*
@@ -519,6 +523,7 @@ retry:
 	if (result) {
 		PIN_PQ_DBG(pq, "get_pages failed with %d start=0x%llx length=%zu",
 			   result, start, len);
+		node->p2p_info = NULL;
 		return result;
 	}
 
@@ -526,11 +531,7 @@ retry:
 	node->node.last = last;
 	node->size = len;
 
-	result = insert_amd_pinning(pintree, node);
-	if (result)
-		unpin_amd_node(node);
-
-	return result;
+	return insert_amd_pinning(pintree, node);
 }
 
 static struct amd_pintree_node *find_amd_pinning(struct amd_pintree *pintree,
@@ -611,12 +612,10 @@ static int add_amd_pinning(struct amd_pintree *pintree, struct pid *pid,
 	node->pintree = pintree;
 	refcount_inc(&pintree->ref);
 	result = pin_amd_region(pintree, pid, start_page, end_page - 1, node);
-	if (result) {
-		refcount_dec(&pintree->ref);
-		kfree(node);
-	} else {
+	if (result)
+		kref_put(&node->ref, amd_node_kref_cb);
+	else
 		*node_p = node;
-	}
 
 	return result;
 }
