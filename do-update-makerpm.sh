@@ -277,6 +277,10 @@ if [[ $build_nvidia = y ]]; then
 	rpmrelease+="cuda"
 fi
 
+if [[ $build_amd = y ]] ; then
+	rpmrelease+="amd"
+fi
+
 # after cd, where are we *really*
 cd -P "$workdir"; workdir=$(pwd)
 tardir=$workdir/stage
