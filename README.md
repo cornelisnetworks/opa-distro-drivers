@@ -15,3 +15,7 @@ development and a work in progress. These have not yet been through a full
 validation cycle. While we expect the code to work it is still in testing and
 your mileage may vary. Please report any bugs through the issue tracker or
 Cornelis Networks support.
+
+Check out the branch which corresponds to your distro above. This "master"
+branch contains no useful code and is merely a place we hang scripts/build
+helpers and this README.
