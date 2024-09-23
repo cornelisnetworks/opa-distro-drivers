@@ -722,7 +722,7 @@ static int set_rcvarray_entry(struct hfi1_filedata *fd,
 			goto out_unmap;
 	}
 	*onode = node;
-	fd->entry_to_rb[node->rcventry] = node;
+	fd->entry_to_rb[node->rcventry - uctxt->expected_base] = node;
 
 	/* RcvArray entry requires EXPECTED_ADDR_SIZE page-size npages */
 	hfi1_put_tid(dd, rcventry, PT_EXPECTED, node->dma_addr, ilog2(node_npages(node)) + 1);
