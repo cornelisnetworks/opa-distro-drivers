@@ -114,9 +114,11 @@ struct amd_pintree_node {
 	struct amd_p2p_info *p2p_info;
 	/* There are two groups of ref holders: the pintree and SDMA descriptors */
 	struct kref ref;
-	bool invalidated;
+
 	/* For rdma_put_pages() queued from interrupt context */
 	struct execute_work cleanup_work;
+
+	/* For mmu_interval_notifier notifications on ROCm VA range */
 	struct mmu_interval_notifier notifier;
 	bool in_mmu;
 	bool in_cache;
@@ -352,21 +354,6 @@ static void amd_node_kref_cb(struct kref *kref)
 }
 
 /**
- * remove_amd_pages() (amdgpu free_callback) destructor.
- *
- * The AMD/ROCm code will free AMD stuff after remove_amd_pages() returns; this
- * just needs to decrement pintree->nodes and kfree() the node memory.
- */
-static void amd_node_kref_cb_no_unpin(struct kref *kref)
-{
-	struct amd_pintree_node *n = container_of(kref, struct amd_pintree_node, ref);
-
-	amd_node_mmu_unregister(n);
-	refcount_dec(&n->pintree->ref);
-	kfree(n);
-}
-
-/**
  * kref destructor for amd_mmu_invalidate_cb().
  *
  * Calling mmu_interval_notifier_remove() under the mmu_interval_notifier
@@ -407,7 +394,6 @@ static bool amd_mmu_invalidate_cb(struct mmu_interval_notifier *mni,
 
 	spin_lock(&cache->lock);
 	removed = _amd_pintree_remove(n, NULL, true);
-	n->invalidated = true;
 	spin_unlock(&cache->lock);
 
 	/*
@@ -432,12 +418,7 @@ static void cleanup_amd_pintree(struct amd_pintree *pintree)
 	hash_del(&pintree->hash_node);
 	spin_unlock(&state->lock);
 
-	/*
-	 * Release pintree refs to nodes still in cache.
-	 *
-	 * If remove_amd_pages() races with this function and removes node from cache,
-	 * remove_amd_node() is responsible for doing the cache's kref_put().
-	 */
+	/* Release pintree refs to nodes still in cache */
 	while (1) {
 		spin_lock(&pintree->lock);
 		if (list_empty(&pintree->lru_list)) {
@@ -448,10 +429,6 @@ static void cleanup_amd_pintree(struct amd_pintree *pintree)
 		amd_pintree_remove(n, NULL);
 		spin_unlock(&pintree->lock);
 
-		/*
-		 * If we reached here, remove_amd_pages() did not race for n or this CPU won the
-		 * race. Either way, this CPU is responsible for doing the cache's kref_put().
-		 */
 		kref_put(&n->ref, amd_node_kref_cb);
 	}
 
@@ -556,75 +533,6 @@ static unsigned int outstanding_io(struct amd_pintree_node *n)
 	return (!c ? 0 : c - 1);
 }
 
-/* This is the free callback passed to rdma_ops->get_pages() */
-static void remove_amd_pages(void *data)
-{
-	struct amd_pintree_node *node = data;
-	struct interval_tree_node *found_node;
-	struct amd_pintree_node *found;
-	struct amd_pintree *pintree = node->pintree;
-	struct amd_pq_state *state = pintree->state;
-
-	/*
-	 * amd_rdma_interface->get_pages() takes a pages-freed callback but at
-	 * the time this was implemented, there was no indication that amdgpu
-	 * actually calls the callback.
-	 */
-	WARN_ONCE(true, "Unexpected callback");
-
-	/*
-	 * The ROCmRDMA API documentation indicates this may be called as a
-	 * result of GECC events (the name of on-board ECC functionality)
-	 * and also says that I/O must be stopped 'immediately', raising the
-	 * question of whether that means this may be called from within an
-	 * interrupt handler. Review of the ROCK-Kernel-Driver source code
-	 * as of version 5.16.9.22.20 revealed that this callback is only
-	 * invoked as a result of an ioctl used by userspace to free GPU
-	 * memory so being called in interrupt context does not need to be
-	 * considered at this time.
-	 */
-	WARN_ON(in_interrupt());
-
-	/* Remove from the tree so that it's not found anymore. */
-	spin_lock(&pintree->lock);
-	trace_invalidate_sdma_pages_gpu(pintree, HFI1_MEMINFO_TYPE_AMD, node->node.start,
-					node->size, node);
-	node->invalidated = true;
-
-	found_node = interval_tree_iter_first(&pintree->root, node->node.start, node->node.last);
-	found = container_of(found_node, struct amd_pintree_node, node);
-	if (found == node) {
-		amd_pintree_remove(node, NULL);
-		pintree->external_evictions++;
-		spin_unlock(&pintree->lock);
-
-		/* Spin until I/O is done. */
-		while (outstanding_io(node))
-			rep_nop();
-
-		/*
-		 * Since this CPU found node in cache, this CPU is responsible
-		 * for doing cache's (and last) kref_put(&node->ref,...).
-		 */
-		kref_put(&node->ref, amd_node_kref_cb_no_unpin);
-	} else {
-		spin_unlock(&pintree->lock);
-
-		/*
-		 * This can happen during free_amd_pinning_interface() if
-		 * the AMD driver calls remove_amd_pages() for a pintree
-		 * node that cleanup_...() has removed from the tree but
-		 * hasn't yet called put_pages() for.  As cleanup_...() does
-		 * not free the node until after it calls put_pages(), the
-		 * node will always still be valid through this point.
-		 * However, there is no further work to be done here in this
-		 * case.
-		 */
-		dd_dev_info(state->pq->dd, "node %p not found in %s: found %p\n",
-			    node, __func__, found);
-	}
-}
-
 /**
  * Takes additional transaction "safety" kref with kref_get(&node->ref). This
  * prevents @node from being destroyed until after sdma_txadd_daddr() when any
@@ -648,17 +556,13 @@ static int insert_amd_pinning(struct amd_pintree *pintree, struct amd_pintree_no
 	 * amd_mmu_invalidate_cb() cannot run until after spin_unlock() at the
 	 * earliest.
 	 *
-	 * Final kref_put() in caller's error path will call
-	 * amd_node_mmu_unregister() in the event of an error in this function.
+	 * Destructor called by final kref_put() in caller's error-handling will
+	 * call amd_node_mmu_unregister() in the event that this function
+	 * returns an error.
 	 */
 	result = amd_node_mmu_register(node);
 	if (result)
 		goto unlock;
-
-	if (WARN_ON(node->invalidated)) {
-		result = -EFAULT;
-		goto unlock;
-	}
 
 	/*
 	 * The lookup is required because interval trees can support overlap, but
@@ -728,7 +632,7 @@ static int pin_amd_region(struct amd_pintree *pintree, struct pid *pid,
 	len = (last + 1) - start;
 retry:
 	result = rdma_ops->get_pages(start, len, pid, state->dma_device,
-				     &node->p2p_info, remove_amd_pages, node);
+				     &node->p2p_info, NULL, node);
 
 	if (result == -ENOSPC && retry) {
 		PIN_PQ_DBG(pq, "get_pages failed with ENOSPC, trying eviction");
