@@ -60,9 +60,13 @@ static unsigned long amd_cache_size = ~0UL;
 module_param(amd_cache_size, ulong, 0644);
 MODULE_PARM_DESC(amd_cache_size, "Per-context AMD pin cache size limit (in MB)");
 
-static unsigned int amd_use_cache;
+static unsigned int amd_use_cache = 1;
 module_param(amd_use_cache, uint, 0444);
-MODULE_PARM_DESC(amd_use_cache, "Disabled: do rdma_get_pages()/rdma_put_pages() for each SDMA txreq. Enabled: use ROCm-buffer:DMA-mapped-page cache");
+MODULE_PARM_DESC(amd_use_cache, "Enabled: use user SDMA ROCm VA:DMA cache when handling user SDMA requests. Disabled: do not use ROCm VA:DMA cache; do rdma_get_pages()/rdma_put_pages() for each (iovec,VA) in user SDMA request.");
+
+static unsigned int amd_use_mmu = 1;
+module_param(amd_use_mmu, uint, 0444);
+MODULE_PARM_DESC(amd_use_mmu, "Enabled: use mmu_notifier to maintain user SDMA ROCm VA:DMA cache; not applicable when amd_use_cache=0. Disabled: do not use mmu_notifier to maintain user SDMA ROCm VA:DMA cache; do not use with amd_use_cache=1.");
 
 #define AMD_MAX_DEVICES 16
 #define AMD_DEVICE_HASH_OVERSUBSCRIBE 2
@@ -113,11 +117,59 @@ struct amd_pintree_node {
 	bool invalidated;
 	/* For rdma_put_pages() queued from interrupt context */
 	struct execute_work cleanup_work;
+	struct mmu_interval_notifier notifier;
+	bool in_mmu;
+	bool in_cache;
 };
 
 static const struct amd_rdma_interface *rdma_ops;
 static struct kmem_cache *pq_state_kmem_cache;
 static struct kmem_cache *pintree_kmem_cache;
+
+static bool amd_mmu_invalidate_cb(struct mmu_interval_notifier *mni,
+				  const struct mmu_notifier_range *range,
+				  unsigned long cur_seq);
+
+static struct mmu_interval_notifier_ops mmu_ops = {
+	.invalidate = amd_mmu_invalidate_cb,
+};
+
+/**
+ * Must be called in concurrency-safe context w.r.t. @*n
+ */
+static int amd_node_mmu_register(struct amd_pintree_node *n)
+{
+	int ret;
+
+	if (!amd_use_mmu)
+		return 0;
+
+	/* Double-insert should not happen */
+	if (WARN_ON(n->in_mmu))
+		return -EINVAL;
+
+	ret = mmu_interval_notifier_insert(&n->notifier, current->mm, n->node.start,
+					   n->size, &mmu_ops);
+	if (ret)
+		return ret;
+	n->in_mmu = true;
+	return 0;
+}
+
+/**
+ * Must be called in concurrency-safe (single CPU, inside critical-section)
+ * context w.r.t. @*n.
+ */
+static void amd_node_mmu_unregister(struct amd_pintree_node *n)
+{
+	if (!amd_use_mmu)
+		return;
+
+	if (n->in_mmu) {
+		mmu_interval_notifier_remove(&n->notifier);
+		n->in_mmu = false;
+	}
+}
 
 /**
  * Must call holding @n->pintree->lock.
@@ -127,19 +179,25 @@ static struct kmem_cache *pintree_kmem_cache;
  * @external_eviction count this removal as an external eviction in
  *                    @n->pintree->external_evictions?
  */
-static void _amd_pintree_remove(struct amd_pintree_node *n, struct list_head *list,
+static bool _amd_pintree_remove(struct amd_pintree_node *n, struct list_head *list,
 				bool external_eviction)
 {
 	struct amd_pintree *cache = n->pintree;
+
+	if (!n->in_cache)
+		return false;
 
 	interval_tree_remove(&n->node, &cache->root);
 	if (list)
 		list_move(&n->lru_node, list);
 	else
 		list_del(&n->lru_node);
+	n->in_cache = false;
 	cache->size -= n->size;
 	if (external_eviction)
 		cache->external_evictions++;
+
+	return true;
 }
 
 /**
@@ -242,6 +300,42 @@ static void free_amd_node(struct work_struct *work)
 {
 	struct amd_pintree_node *n = container_of(work, struct amd_pintree_node, cleanup_work.work);
 
+	/*
+	 * free_amd_node() is called by destructor triggered by final
+	 * kref_put(&n->ref,...) and so will always be executed on one CPU.
+	 * I.e. there should be no risk of concurrent access to node n.
+	 *
+	 * However, without locking here, the only thing that is guaranteed to
+	 * be visible to the CPU executing free_amd_node() is n->ref.refcount.
+	 * Other updates to *n made before the kref_put() may not be visible to
+	 * this CPU. This is a particular risk if something like this happened:
+	 *
+	 * Begin: node n->ref.refcount=2
+	 * CPU0                                      CPU1
+	 * amd_mmu_invalidate_cb()
+	 *   spin_lock(&n->lock)
+	 *   interval_tree_remove(&n->node,...)
+	 *   n->in_cache = false
+	 *   spin_unlock(&n->lock)
+	 *   kref_put(&n->ref,amd_node_kref_defer)
+	 *   // refcount=1
+	 *                                           // not changing
+	 *                                           // anything on n so no
+	 *                                           // lock needed, right?
+	 *                                           kref_put(&n->ref,amd_node_kref_cb)
+	 *                                           // refcount=0, destroy
+	 *                                           amd_node_kref_cb()
+	 *                                             if (n->in_cache)
+	 *                                               // Bad things!
+	 *                                               // in_cache is actually
+	 *                                               // false but write not
+	 *                                               // visible to CPU1
+	 *
+	 * So use a memory barrier here to make any changes to *n visible.
+	 */
+	smp_mb();
+
+	amd_node_mmu_unregister(n);
 	unpin_amd_node(n);
 	refcount_dec(&n->pintree->ref);
 	kfree(n);
@@ -267,8 +361,63 @@ static void amd_node_kref_cb_no_unpin(struct kref *kref)
 {
 	struct amd_pintree_node *n = container_of(kref, struct amd_pintree_node, ref);
 
+	amd_node_mmu_unregister(n);
 	refcount_dec(&n->pintree->ref);
 	kfree(n);
+}
+
+/**
+ * kref destructor for amd_mmu_invalidate_cb().
+ *
+ * Calling mmu_interval_notifier_remove() under the mmu_interval_notifier
+ * callback will deadlock. So defer destructor call that includes
+ * mmu_interval_notifier_remove().
+ */
+static void amd_node_kref_defer(struct kref *kref)
+{
+	struct amd_pintree_node *n = container_of(kref, struct amd_pintree_node, ref);
+
+	INIT_WORK(&n->cleanup_work.work, free_amd_node);
+	schedule_work(&n->cleanup_work.work);
+}
+
+/**
+ * AMD ROCm VA mmu_interval_notifier callback function.
+ *
+ * Must work correctly whether or not callback context object (struct
+ * amd_pintree_node) is in the cache.
+ *
+ * struct amd_pintree_node reference-counting/lifetime management code must
+ * also assume that amd_mmu_invalidate_cb() may never be called in the life of
+ * a node.
+ */
+static bool amd_mmu_invalidate_cb(struct mmu_interval_notifier *mni,
+				  const struct mmu_notifier_range *range,
+				  unsigned long cur_seq)
+{
+	struct amd_pintree_node *n = container_of(mni, struct amd_pintree_node, notifier);
+	struct amd_pintree *cache = n->pintree;
+	bool removed;
+
+	if (range->event != MMU_NOTIFY_UNMAP)
+		return true;
+
+	trace_invalidate_sdma_pages_gpu(cache, HFI1_MEMINFO_TYPE_AMD, n->node.start,
+					n->size, n);
+
+	spin_lock(&cache->lock);
+	removed = _amd_pintree_remove(n, NULL, true);
+	n->invalidated = true;
+	spin_unlock(&cache->lock);
+
+	/*
+	 * Cannot call mmu_interval_notifier_remove() in callback; defer
+	 * possible destruction.
+	 */
+	if (removed)
+		kref_put(&n->ref, amd_node_kref_defer);
+
+	return true;
 }
 
 static void cleanup_amd_pintree(struct amd_pintree *pintree)
@@ -298,6 +447,7 @@ static void cleanup_amd_pintree(struct amd_pintree *pintree)
 		n = list_first_entry(&pintree->lru_list, struct amd_pintree_node, lru_node);
 		amd_pintree_remove(n, NULL);
 		spin_unlock(&pintree->lock);
+
 		/*
 		 * If we reached here, remove_amd_pages() did not race for n or this CPU won the
 		 * race. Either way, this CPU is responsible for doing the cache's kref_put().
@@ -475,18 +625,39 @@ static void remove_amd_pages(void *data)
 	}
 }
 
+/**
+ * Takes additional transaction "safety" kref with kref_get(&node->ref). This
+ * prevents @node from being destroyed until after sdma_txadd_daddr() when any
+ * per descriptor kref_get(&node->ref) should have been done.
+ *
+ * Safety ref should be kref_put() after all sdma_txadd_daddr() for @node.
+ *
+ * Safety ref not taken when function returns !0.
+ */
 static int insert_amd_pinning(struct amd_pintree *pintree, struct amd_pintree_node *node)
 {
 	struct interval_tree_node *existing;
-	int result = 0;
+	int result;
 
 	if (!amd_use_cache)
 		return 0;
 
 	spin_lock(&pintree->lock);
+	/*
+	 * Register with mmu_notifier inside critical section so
+	 * amd_mmu_invalidate_cb() cannot run until after spin_unlock() at the
+	 * earliest.
+	 *
+	 * Final kref_put() in caller's error path will call
+	 * amd_node_mmu_unregister() in the event of an error in this function.
+	 */
+	result = amd_node_mmu_register(node);
+	if (result)
+		goto unlock;
+
 	if (WARN_ON(node->invalidated)) {
-		spin_unlock(&pintree->lock);
-		return -EFAULT;
+		result = -EFAULT;
+		goto unlock;
 	}
 
 	/*
@@ -507,7 +678,7 @@ static int insert_amd_pinning(struct amd_pintree *pintree, struct amd_pintree_no
 	interval_tree_insert(&node->node, &pintree->root);
 	list_add_tail(&node->lru_node, &pintree->lru_list);
 	pintree->size += node->size;
-
+	node->in_cache = true;
 
 unlock:
 	spin_unlock(&pintree->lock);
