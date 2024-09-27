@@ -119,6 +119,37 @@ static const struct amd_rdma_interface *rdma_ops;
 static struct kmem_cache *pq_state_kmem_cache;
 static struct kmem_cache *pintree_kmem_cache;
 
+/**
+ * Must call holding @n->pintree->lock.
+ *
+ * @n node to remove
+ * @list to move @n->lru_node to if @list is non-NULL
+ * @external_eviction count this removal as an external eviction in
+ *                    @n->pintree->external_evictions?
+ */
+static void _amd_pintree_remove(struct amd_pintree_node *n, struct list_head *list,
+				bool external_eviction)
+{
+	struct amd_pintree *cache = n->pintree;
+
+	interval_tree_remove(&n->node, &cache->root);
+	if (list)
+		list_move(&n->lru_node, list);
+	else
+		list_del(&n->lru_node);
+	cache->size -= n->size;
+	if (external_eviction)
+		cache->external_evictions++;
+}
+
+/**
+ * Must call holding @n->pintree->lock.
+ */
+static void amd_pintree_remove(struct amd_pintree_node *n, struct list_head *list)
+{
+	_amd_pintree_remove(n, list, false);
+}
+
 static struct amd_pintree *init_amd_pintree(struct amd_pq_state *state, uint32_t device_id)
 {
 	struct amd_pintree *pintree;
@@ -265,8 +296,7 @@ static void cleanup_amd_pintree(struct amd_pintree *pintree)
 			break;
 		}
 		n = list_first_entry(&pintree->lru_list, struct amd_pintree_node, lru_node);
-		interval_tree_remove(&n->node, &pintree->root);
-		list_del(&n->lru_node);
+		amd_pintree_remove(n, NULL);
 		spin_unlock(&pintree->lock);
 		/*
 		 * If we reached here, remove_amd_pages() did not race for n or this CPU won the
@@ -414,9 +444,7 @@ static void remove_amd_pages(void *data)
 	found_node = interval_tree_iter_first(&pintree->root, node->node.start, node->node.last);
 	found = container_of(found_node, struct amd_pintree_node, node);
 	if (found == node) {
-		interval_tree_remove(&node->node, &pintree->root);
-		list_del(&node->lru_node);
-		pintree->size -= node->size;
+		amd_pintree_remove(node, NULL);
 		pintree->external_evictions++;
 		spin_unlock(&pintree->lock);
 
@@ -501,15 +529,13 @@ static bool evict_amd_pinnings(struct amd_pintree *pintree, size_t goal, bool in
 	spin_lock(&pintree->lock);
 	list_for_each_entry_safe(cur, tmp, &pintree->lru_list, lru_node) {
 		if (!outstanding_io(cur)) {
-			interval_tree_remove(&cur->node, &pintree->root);
-			list_move(&cur->lru_node, &evict_list);
+			amd_pintree_remove(cur, &evict_list);
 			(*stat)++;
 			total += cur->size;
 			if (total >= goal)
 				break;
 		}
 	}
-	pintree->size -= total;
 	spin_unlock(&pintree->lock);
 
 	list_for_each_entry_safe(cur, tmp, &evict_list, lru_node)
