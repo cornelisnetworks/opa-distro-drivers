@@ -198,6 +198,18 @@ static struct opa_smp *cport_get_portinfo(struct hfi1_devdata *dd, int port)
 	return rsp;
 }
 
+/*
+ * Called on PF0 after all new VFs appear.
+ */
+int hfi1_sriov_sync_ports(struct hfi1_devdata *dd, int si_mask)
+{
+	int ret = 0;
+
+	if (dd->is_vf)
+		return -EINVAL;
+	return ret;
+}
+
 #ifdef DEBUG_CPORT_TRAP
 static const char *ps_state_name(struct opa_port_states *ps)
 {

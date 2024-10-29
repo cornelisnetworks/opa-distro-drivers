@@ -312,6 +312,7 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 		newcnt = 0;
 		for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 			struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
+
 			if (!port_available_pidx(dd, pidx))
 				continue;
 

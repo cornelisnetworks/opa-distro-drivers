@@ -1462,6 +1462,8 @@ struct hfi1_devrsrcs {
 	u8 pfunit;	/* unit number of PF0 */
 	u8 si_idx;	/* SI index of this VF/PF */
 	u8 num_vfs;	/* max number VFs to be configured */
+	atomic_t sync_pending;
+	int sync_done;
 	/* per-VF ranges */
 	struct hfi1_ctxtrsrcs c;
 	u8 first_sdma_engine; /* first SDMA engine to use */
@@ -1569,6 +1571,7 @@ struct hfi1_devdata {
 	struct work_struct update_cntr_work;
 	struct work_struct rcverr_work;
 	struct work_struct freeze_work;
+	struct work_struct sync_vf_work;
 	/* exclusive access to 8051 memory */
 	spinlock_t dc8051_memlock;
 	int dc8051_timed_out;	/* remember if the 8051 timed out */
@@ -1792,6 +1795,9 @@ struct hfi1_devdata {
 	bool eprom_available;	/* true if EPROM is available for this device */
 	bool aspm_supported;	/* Does HW support ASPM */
 	bool aspm_enabled;	/* ASPM state: enabled/disabled */
+	bool is_vm;		/* driver is running in a VM */
+	bool is_sriov;		/* device is in SRIOV environment */
+	bool is_vf;		/* device is an active VF in SRIOV */
 	struct rhashtable *sdma_rht;
 
 	/* vnic data */
@@ -1866,6 +1872,7 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit);
 extern unsigned int snoop_drop_send;
 extern unsigned int snoop_force_capture;
 int hfi1_count_active_units(void);
+void hfi1_pf0_cleanup(struct hfi1_devdata *dd);
 
 int hfi1_diag_add(struct hfi1_devdata *dd);
 void hfi1_diag_remove(struct hfi1_devdata *dd);
