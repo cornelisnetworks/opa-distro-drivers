@@ -22,6 +22,7 @@ u64 gen_create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
 int cport_set_link_state(struct hfi1_pportdata *ppd, struct opa_port_info *pi, u32 state);
 int cport_start_link(struct hfi1_pportdata *ppd, struct opa_port_info *pi);
 int cport_read_temp(struct hfi1_devdata *dd, struct cport_temp *gen_temp);
+int hfi1_sriov_sync_ports(struct hfi1_devdata *dd, int si_mask);
 
 int init_cport_trap128(struct hfi1_devdata *dd);
 int deinit_cport_trap128(struct hfi1_devdata *dd);
