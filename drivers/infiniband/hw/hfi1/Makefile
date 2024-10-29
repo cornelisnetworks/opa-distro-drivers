@@ -57,6 +57,7 @@ hfi1-y := \
 	rc.o \
 	ruc.o \
 	sdma.o \
+	sriov.o \
 	sysfs.o \
 	tid_rdma.o \
 	tid_system.o \
