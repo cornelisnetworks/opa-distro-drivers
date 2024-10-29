@@ -35,6 +35,7 @@
 #include "pinning.h"
 #include "cport_traps.h"
 #include "bulksvc.h"
+#include "sriov.h"
 
 #ifdef NVIDIA_GPU_DIRECT
 #include "gdr_ops.h"
@@ -44,6 +45,7 @@
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
 
 #undef CPORT_TRAP_DEBUG	/* all MCTXT TRAP events from CPORT */
+#define PDEV_SRIOV_DEBUG
 
 /*
  * min buffers we want to have per context, after driver
@@ -1845,6 +1847,15 @@ static void shutdown_device(struct hfi1_devdata *dd)
 	sdma_exit(dd);
 }
 
+/*
+ * SRIOV has been disabled. Do any cleanup not handled by
+ * VF remove_one() calls.
+ */
+void hfi1_pf0_cleanup(struct hfi1_devdata *dd)
+{
+	/* TODO: other cleanup */
+}
+
 /**
  * hfi1_free_ctxtdata - free a context's allocated data
  * @dd: the hfi1_ib device
@@ -1970,6 +1981,8 @@ static void hfi1_free_devdata(struct hfi1_devdata *dd)
 	dd->rcvhdrtail_dummy_kvaddr = NULL;
 	sdma_clean(dd);
 	hfi1_bulksvc_teardown(dd);
+	hfi1_sriov_free_cfg(dd);
+	/* dd is freed by the time this returns: */
 	rvt_dealloc_device(&dd->verbs_dev.rdi);
 }
 
@@ -1999,6 +2012,19 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 	dd->num_pports = nports;
 	dd->pport = (struct hfi1_pportdata *)(dd + 1);
 	dd->pcidev = pdev;
+	/*
+	 * Check for PCI device being a VF in SRIOV.
+	 * The VFs do not have a Power Management capability block.
+	 */
+	dd->is_vf = (params->chip_type != CHIP_WFR && !pdev->pm_cap);
+	dd->is_sriov = (dd->is_vf || sriov_is_enabled());
+#if defined(CONFIG_X86)
+	dd->is_vm = boot_cpu_has(X86_FEATURE_HYPERVISOR);
+#endif
+#ifdef PDEV_SRIOV_DEBUG
+	dev_warn(&pdev->dev, "is_vm=%d is_vf=%d is_physfn=%d is_virtfn=%d physfn=%p\n",
+		dd->is_vm, dd->is_vf, pdev->is_physfn, pdev->is_virtfn, pdev->physfn);
+#endif
 	pci_set_drvdata(pdev, dd);
 
 	/*
@@ -2177,6 +2203,7 @@ static struct pci_driver hfi1_pci_driver = {
 	.shutdown = shutdown_one,
 	.id_table = hfi1_pci_tbl,
 	.err_handler = &hfi1_pci_err_handler,
+	.sriov_configure = hfi1_sriov_configure,
 };
 
 static void __init compute_krcvqs(void)
@@ -2387,12 +2414,12 @@ static void cleanup_device_data(struct hfi1_devdata *dd)
 	vfree(dd->events);
 	vfree(dd->status);
 
-	/* finalize the cport */
+	/* finalize the cport - CSR perms revoked on PF0 */
 	stop_cport(dd);
 	/* release interrupts */
 	msix_clean_up_interrupts(dd);
 
-	/* register reads and writes are invalid after this call */
+	/* CSR reads and writes are invalid after this call */
 	hfi1_pcie_ddcleanup(dd);
 }
 
@@ -2419,6 +2446,26 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	int ret = 0, j, pidx, initfail;
 	struct hfi1_devdata *dd;
 	const struct chip_params *params;
+
+#ifdef CONFIG_HFI_L8SIM
+	if (!(pdev->bus->bus_flags & PCI_BUS_FLAGS_SIMULATED)) {
+		dev_warn(&pdev->dev, "Ignoring real hardware on simulator driver\n");
+		return -ENODEV;
+	}
+#endif
+	/* VF in host driver - leave for KVM */
+	if (pdev->is_virtfn) {
+		/* It is theoretically possible for the host driver to claim
+		 * a VF, so there may need to be some decision made whether
+		 * to claim the device or leave it for KVM.
+		 */
+		/* TODO: how do we avoid claiming the device without
+		 * producing errors and possible SRIOV-enable failure.
+		 */
+		ret = hfi1_sriov_init(pdev); /* may do nothing */
+		if (ret)
+			return ret; /* do not claim device */
+	}
 
 	/* First, lock the non-writable module parameters */
 	HFI1_CAP_LOCK();
@@ -2494,6 +2541,10 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	ret = hfi1_pcie_init(dd);
 	if (ret)
 		goto free_dd;
+
+	/* TEMP: skip rest of init if SRIOV VF */
+	if (dd->is_vf)
+		goto sriov_skip;
 
 	ret = create_workqueues(dd);
 	if (ret)
@@ -2585,6 +2636,8 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			goto destroy_wqs;
 	}
 
+	hfi1_sriov_auto_conf(dd);
+sriov_skip:
 	return 0;
 
 destroy_wqs:
@@ -2616,6 +2669,21 @@ static void wait_for_clients(struct hfi1_devdata *dd)
 static void remove_one(struct pci_dev *pdev)
 {
 	struct hfi1_devdata *dd = pci_get_drvdata(pdev);
+
+	if (pdev->is_virtfn) {
+		/*
+		 * Should only reach here if the VF was claimed by the driver,
+		 * however, this cannot destroy device functionality.
+		 */
+		hfi1_sriov_remove(pdev); /* TODO: does this need to be last? */
+	}
+
+	/*
+	 * If VFs are still active, must shut them down now,
+	 * before PF0 becomes unusable.
+	 */
+	if (pdev->is_physfn)
+		hfi1_sriov_disable(dd->pcidev);
 
 	/* close debugfs files before ib unregister */
 	hfi1_dbg_ibdev_exit(&dd->verbs_dev);
