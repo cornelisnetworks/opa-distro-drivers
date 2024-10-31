@@ -36,6 +36,7 @@
 #include "cport_traps.h"
 #include "bulksvc.h"
 #include "sriov.h"
+#include "vf2pf.h"
 
 #ifdef NVIDIA_GPU_DIRECT
 #include "gdr_ops.h"
@@ -1791,6 +1792,7 @@ static void shutdown_device(struct hfi1_devdata *dd)
 		set_intr_bits(dd, 0, dd->params->is_last_source, false);
 		msix_shut_down_interrupts(dd, false);
 	} else {
+		vf2pf_deinit_irq(dd); /* gracefully stop using interrupts */
 		/* mask all but the cport interrupt source */
 		set_intr_bits(dd, 0, dd->params->is_cport_int - 1, false);
 		set_intr_bits(dd, dd->params->is_cport_int + 1,
@@ -2414,6 +2416,8 @@ static void cleanup_device_data(struct hfi1_devdata *dd)
 	vfree(dd->events);
 	vfree(dd->status);
 
+	vf2pf_deinit(dd); /* still requires CSR access/permissions */
+
 	/* finalize the cport - CSR perms revoked on PF0 */
 	stop_cport(dd);
 	/* release interrupts */
@@ -2637,6 +2641,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	hfi1_sriov_auto_conf(dd);
+	vf2pf_ready(dd);
 sriov_skip:
 	return 0;
 

@@ -70,6 +70,7 @@ hfi1-y := \
 	uverbs.o \
 	verbs.o \
 	verbs_txreq.o \
+	vf2pf.o \
 	vnic_main.o \
 	vnic_sdma.o
 
