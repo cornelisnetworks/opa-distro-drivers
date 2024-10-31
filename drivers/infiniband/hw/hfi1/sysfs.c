@@ -11,6 +11,7 @@
 #include "trace.h"
 #include "chip_gen.h"
 #include "bulksvc.h"
+#include "vf2pf.h"
 
 static struct hfi1_pportdata *hfi1_get_pportdata_kobj(struct kobject *kobj)
 {
@@ -859,6 +860,8 @@ int hfi1_verbs_register_sysfs(struct hfi1_devdata *dd)
 				goto bail;
 		}
 	}
+
+	vf2pf_init_sysfs(dd, class_dev);
 
 	return 0;
 bail:
