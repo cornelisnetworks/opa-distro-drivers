@@ -10,6 +10,8 @@
 #include "hfi.h"
 #include "sriov.h"
 #include "chip_jkr.h"
+#include "chip_gen.h"
+#include "vf2pf.h"
 
 #define HFI_SRIOV_DEBUG
 #define HFI_SRIOV_BRINGUP
@@ -167,6 +169,11 @@ int hfi1_sriov_configure(struct pci_dev *pdev, int nvf)
 
 	if (!nvf)
 		return hfi1_sriov_deconfigure(dd);
+
+	/* prepare VF resources (contexts) for creation of VFs */
+	ret = vf2pf_prep(dd);
+	if (ret)
+		return ret;
 
 	ret = pci_enable_sriov(pdev, nvf);
 	if (ret < 0) {

@@ -8,6 +8,7 @@
 #include "affinity.h"
 #include "sdma.h"
 #include "netdev.h"
+#include "vf2pf.h"
 
 /**
  * msix_initialize() - Calculate, request and configure MSIx IRQs
@@ -25,6 +26,7 @@ int msix_initialize(struct hfi1_devdata *dd)
 	/*
 	 * MSIx interrupt count:
 	 *	one for the general, "slow path" interrupt
+	 *	as needed for vf2pf
 	 *	one per used SDMA engine
 	 *	one per kernel receive context
 	 *	one for each bulksvc context
@@ -32,7 +34,7 @@ int msix_initialize(struct hfi1_devdata *dd)
 	 *	one for the bulksvc doorbell
 	 *      ...any new IRQs should be added here.
 	 */
-	total = 1 + (dr->last_sdma_engine - dr->first_sdma_engine);
+	total = 1 + vf2pf_num_irq(dd) + (dr->last_sdma_engine - dr->first_sdma_engine);
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
@@ -348,7 +350,12 @@ int msix_request_irqs(struct hfi1_devdata *dd)
  */
 int msix_early_request_irqs(struct hfi1_devdata *dd)
 {
-	return msix_request_general_irq(dd);
+	int ret;
+
+	ret = msix_request_general_irq(dd);
+	if (ret)
+		return ret;
+	return vf2pf_init_irq(dd);
 }
 
 /**
