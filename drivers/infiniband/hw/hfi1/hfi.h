@@ -1489,6 +1489,7 @@ struct hfi1_devdata {
 	struct device *ui_device;
 	const struct chip_params *params;
 	struct hfi1_cport *cport;
+	void *vf2pf;	/* struct depends on vf2pf implementation */
 	struct workqueue_struct *hfi1_wq;
 	struct hfi1_bulksvc *bulksvc; /* allocation implies emablement */
 
