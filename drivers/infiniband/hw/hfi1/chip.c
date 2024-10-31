@@ -29,6 +29,7 @@
 #include "netdev.h"
 #include "chip_registers_jkr.h"
 #include "bulksvc.h"
+#include "vf2pf.h"
 
 uint num_vls = HFI1_MAX_VLS_SUPPORTED;
 module_param(num_vls, uint, S_IRUGO);
@@ -16193,6 +16194,10 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	ret = hfi1_pcie_ddinit(dd, pdev);
 	if (ret < 0)
 		goto bail;
+
+	ret = vf2pf_init(dd);
+	if (ret)
+		goto bail_cleanup;
 
 	if (num_vls < HFI1_MIN_VLS_SUPPORTED ||
 	    num_vls > HFI1_MAX_VLS_SUPPORTED) {
