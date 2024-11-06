@@ -30,7 +30,7 @@
 #define SDMA_BLOCK_SIZE 64			/* bytes */
 #define RCV_BUF_BLOCK_SIZE 64               /* bytes */
 #define PIO_CMASK 0x7ff	/* counter mask for free and fill counters */
-#define MAX_EAGER_ENTRIES    2048	/* max receive eager entries */
+#define WFR_MAX_EAGER_ENTRIES 2048	/* max receive eager entries */
 #define MAX_TID_PAIR_ENTRIES 1024	/* max receive expected pairs */
 /*
  * Virtual? Allocation Unit, defined as AU = 8*2^vAU, 64 bytes, AU is fixed
@@ -602,6 +602,10 @@ enum {
 /* read and write hardware registers */
 u64 read_csr(const struct hfi1_devdata *dd, u32 offset);
 void write_csr(const struct hfi1_devdata *dd, u32 offset, u64 value);
+u64 read_ctxt_csr(const struct hfi1_devdata *dd, u32 offset, u32 ctxt,
+		  u32 stride);
+void write_ctxt_csr(const struct hfi1_devdata *dd, u32 offset, u32 ctxt,
+		    u32 stride, u64 value);
 
 int read_lcb_csr(struct hfi1_pportdata *ppd, u32 offset, u64 *data);
 int write_lcb_csr(struct hfi1_pportdata *ppd, u32 offset, u64 data);
@@ -764,6 +768,7 @@ u64 read_port_cntr(struct hfi1_pportdata *ppd, int index, int vl);
 u64 write_port_cntr(struct hfi1_pportdata *ppd, int index, int vl, u64 data);
 u32 read_logical_state(struct hfi1_devdata *dd);
 void force_recv_intr(struct hfi1_ctxtdata *rcd);
+void force_intr(struct hfi1_devdata *dd, u16 nr);
 
 /* Per VL indexes */
 enum {

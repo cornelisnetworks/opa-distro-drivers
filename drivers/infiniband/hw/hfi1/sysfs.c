@@ -9,6 +9,7 @@
 #include "hfi.h"
 #include "mad.h"
 #include "trace.h"
+#include "chip_gen.h"
 
 static struct hfi1_pportdata *hfi1_get_pportdata_kobj(struct kobject *kobj)
 {
@@ -556,21 +557,53 @@ static ssize_t tempsense_show(struct device *device,
 	struct hfi1_ibdev *dev =
 		rdma_device_to_drv_device(device, struct hfi1_ibdev, rdi.ibdev);
 	struct hfi1_devdata *dd = dd_from_dev(dev);
-	struct hfi1_temp temp;
+	struct hfi1_cport *cport;
 	int ret;
+	int n;
+	s16 gen_temp; /* signed, in 0.125 degC increments */
+	bool neg;
 
-	ret = hfi1_tempsense_rd(dd, &temp);
-	if (ret)
-		return ret;
+	if (dd->params->chip_type == CHIP_WFR) {
+		struct hfi1_temp temp;
 
-	return sysfs_emit(buf, "%u.%02u %u.%02u %u.%02u %u.%02u %u %u %u\n",
-			  temp_d(temp.curr), temp_f(temp.curr),
-			  temp_d(temp.lo_lim), temp_f(temp.lo_lim),
-			  temp_d(temp.hi_lim), temp_f(temp.hi_lim),
-			  temp_d(temp.crit_lim), temp_f(temp.crit_lim),
-			  temp.triggers & 0x1,
-			  temp.triggers & 0x2,
-			  temp.triggers & 0x4);
+		ret = hfi1_tempsense_rd(dd, &temp);
+		if (ret)
+			return ret;
+
+		return sysfs_emit(buf, "%u.%02u %u.%02u %u.%02u %u.%02u %u %u %u\n",
+				  temp_d(temp.curr), temp_f(temp.curr),
+				  temp_d(temp.lo_lim), temp_f(temp.lo_lim),
+				  temp_d(temp.hi_lim), temp_f(temp.hi_lim),
+				  temp_d(temp.crit_lim), temp_f(temp.crit_lim),
+				  temp.triggers & 0x1,
+				  temp.triggers & 0x2,
+				  temp.triggers & 0x4);
+	}
+
+	/* beyond WFR */
+	cport = dd->cport;
+	if (!cport)
+		return -EINVAL;
+
+	/* the firmware does not update often, use cached value until timeout */
+	if (time_after(jiffies, cport->temp_timeout)) {
+		ret = cport_read_temp(dd, &gen_temp);
+		if (ret)
+			return ret;
+		cport->temp = gen_temp;
+		/* firmware updates every ~15 seconds */
+		cport->temp_timeout = jiffies + msecs_to_jiffies(5000);
+	} else {
+		gen_temp = cport->temp;
+	}
+	n = gen_temp * 125;
+	neg = false;
+	if (n < 0) {
+		neg = true;
+		n = -n;
+	}
+	return sysfs_emit(buf, "%s%u.%03u\n", neg ? "-" : "",
+			  n / 1000, n % 1000);
 }
 static DEVICE_ATTR_RO(tempsense);
 

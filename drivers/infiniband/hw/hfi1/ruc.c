@@ -515,7 +515,8 @@ void hfi1_do_send(struct rvt_qp *qp, bool in_thread)
 
 		if (qp->s_last != READ_ONCE(qp->s_head)) {
 			wqe = rvt_get_swqe_ptr(qp, qp->s_last);
-			rvt_send_complete(qp, wqe, IB_WC_GENERAL_ERR);
+			rvt_send_complete(qp, wqe, IB_WC_GENERAL_ERR,
+					  RVT_QP_LOCK_STATE_NONE);
 		}
 		return;
 	}

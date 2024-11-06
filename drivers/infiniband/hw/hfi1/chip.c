@@ -1054,14 +1054,14 @@ static void clear_rsm_rule(struct hfi1_devdata *dd, int rule_index);
  * another register containing more information.
  */
 static const struct err_reg_info misc_errs[NUM_MISC_ERRS] = {
-	EE_N(CCE_ERR,	      handle_cce_err,    "CceErr"),
-	EE_I(RCV_ERR,	      handle_rxe_err,    "RxeErr"),
-	EE_N(MISC_ERR,	      handle_misc_err,   "MiscErr"),
+	EE_N(CCE_ERR,		  handle_cce_err,    "CceErr"),
+	EE_I(WFR_RCV_ERR,	  handle_rxe_err,    "RxeErr"),
+	EE_N(MISC_ERR,		  handle_misc_err,   "MiscErr"),
 	{}, /* reserved */
-	EE_N(SEND_PIO_ERR,    handle_pio_err,    "PioErr"),
-	EE_N(SEND_DMA_ERR,    handle_sdma_err,   "SDmaErr"),
-	EE_E(SEND_EGRESS_ERR, handle_egress_err, "EgressErr"),
-	EE_N(SEND_ERR,	      handle_txe_err,    "TxeErr")
+	EE_N(WFR_SEND_PIO_ERR,    handle_pio_err,    "PioErr"),
+	EE_N(WFR_SEND_DMA_ERR,    handle_sdma_err,   "SDmaErr"),
+	EE_E(WFR_SEND_EGRESS_ERR, handle_egress_err, "EgressErr"),
+	EE_N(WFR_SEND_ERR,	  handle_txe_err,    "TxeErr")
 	/* the rest are reserved */
 };
 
@@ -1076,7 +1076,7 @@ static const struct err_reg_info misc_errs[NUM_MISC_ERRS] = {
  * information.
  */
 static const struct err_reg_info sdma_eng_err =
-	EE_S(SEND_DMA_ENG_ERR, handle_sdma_eng_err, "SDmaEngErr");
+	EE_S(WFR_SEND_DMA_ENG_ERR, handle_sdma_eng_err, "SDmaEngErr");
 
 static const struct err_reg_info various_err[NUM_VARIOUS] = {
 	{}, /* PbcInt */
@@ -1178,6 +1178,39 @@ CNTR_ELEM(#name, \
 	  access_ibp_##cntr)
 
 /**
+ * ctxt_csr_addr - return addr for readq/writeq for a per-context register
+ * @dd: the dd device
+ * @offset: the offset of the CSR within bar0
+ * @ctxt: the context number
+ * @stride: the per-context stride
+ *
+ * This routine returns the appropriate ioremaped BAR address based on the
+ * offset and context.
+ */
+static inline void __iomem *ctxt_csr_addr(const struct hfi1_devdata *dd,
+					  u32 offset, u32 ctxt, u32 stride)
+{
+	void __iomem *base;
+	u32 cbi = ctxt_bar_idx(ctxt);
+	u32 cbc = ctxt_bar_ctxt(ctxt);
+
+	if (offset >= dd->base2_start) {
+		base = dd->bar_maps[cbi].kregbase2;
+		offset -= dd->base2_start;
+	} else {
+		base = dd->bar_maps[cbi].kregbase1;
+	}
+
+	if (!base) {
+		WARN(1, "bad context: offset 0x%x, ctxt %d, stride %d\n",
+		     offset, ctxt, stride);
+		/* return address of first register of bar0 - not writable */
+		return dd->bar_maps[0].kregbase1;
+	}
+	return base + offset + (cbc * stride);
+}
+
+/**
  * hfi1_addr_from_offset - return addr for readq/writeq
  * @dd: the dd device
  * @offset: the offset of the CSR within bar0
@@ -1185,13 +1218,10 @@ CNTR_ELEM(#name, \
  * This routine selects the appropriate base address
  * based on the indicated offset.
  */
-static inline void __iomem *hfi1_addr_from_offset(
-	const struct hfi1_devdata *dd,
-	u32 offset)
+static inline void __iomem *hfi1_addr_from_offset(const struct hfi1_devdata *dd,
+						  u32 offset)
 {
-	if (offset >= dd->base2_start)
-		return dd->kregbase2 + (offset - dd->base2_start);
-	return dd->kregbase1 + offset;
+	return ctxt_csr_addr(dd, offset, 0, 0);
 }
 
 /**
@@ -1227,6 +1257,22 @@ void write_csr(const struct hfi1_devdata *dd, u32 offset, u64 value)
 			return;
 		writeq(value, base);
 	}
+}
+
+u64 read_ctxt_csr(const struct hfi1_devdata *dd, u32 offset, u32 ctxt,
+		  u32 stride)
+{
+	if (unlikely(!(dd->flags & HFI1_PRESENT)))
+		return -1;
+	return readq(ctxt_csr_addr(dd, offset, ctxt, stride));
+}
+
+void write_ctxt_csr(const struct hfi1_devdata *dd, u32 offset, u32 ctxt,
+		    u32 stride, u64 value)
+{
+	if (unlikely(!(dd->flags & HFI1_PRESENT)))
+		return;
+	writeq(value, ctxt_csr_addr(dd, offset, ctxt, stride));
 }
 
 /**
@@ -5180,7 +5226,7 @@ bool is_urg_masked(struct hfi1_ctxtdata *rcd)
 	u32 is = rcd->dd->params->is_rcvurgent_start + rcd->ctxt;
 	u8 bit = is % 64;
 
-	mask = read_csr(rcd->dd, CCE_INT_MASK + (8 * (is / 64)));
+	mask = read_csr(rcd->dd, rcd->dd->params->cce_int_mask_reg + (8 * (is / 64)));
 	return !(mask & BIT_ULL(bit));
 }
 
@@ -8315,28 +8361,31 @@ irqreturn_t general_interrupt(int irq, void *data)
 	u64 regs[LARGEST_NUM_INT_CSRS];
 	u64 mask;
 	u32 bit;
+	u32 num_int_csrs = dd->params->num_int_csrs;
+	u32 cce_int_clear_reg = dd->params->cce_int_clear_reg;
+	u32 cce_int_status_reg = dd->params->cce_int_status_reg;
 	int i;
 	irqreturn_t handled = IRQ_NONE;
 
 	this_cpu_inc(*dd->int_counter);
 
 	/* phase 1: scan and clear all handled interrupts */
-	for (i = 0; i < dd->params->num_int_csrs; i++) {
+	for (i = 0; i < num_int_csrs; i++) {
 		/* create mask from hw masked and remapped */
 		mask = dd->gi_mask[i].cce_int_mask & dd->gi_mask[i].remap;
 		if (mask == 0) {
 			regs[i] = 0;	/* used later */
 			continue;
 		}
-		regs[i] = read_csr(dd, CCE_INT_STATUS + (8 * i)) & mask;
+		regs[i] = read_csr(dd, cce_int_status_reg + (8 * i)) & mask;
 		/* only clear if anything is set */
 		if (regs[i])
-			write_csr(dd, CCE_INT_CLEAR + (8 * i), regs[i]);
+			write_csr(dd, cce_int_clear_reg + (8 * i), regs[i]);
 	}
 
 	/* phase 2: call the appropriate handler */
 	for_each_set_bit(bit, (unsigned long *)&regs[0],
-			 dd->params->num_int_csrs * 64) {
+			 num_int_csrs * 64) {
 		is_interrupt(dd, bit);
 		handled = IRQ_HANDLED;
 	}
@@ -8349,10 +8398,10 @@ static inline void __hfi1_sde_eoi_intr(struct sdma_engine *sde, u32 off, u64 sta
 	struct hfi1_devdata *dd = sde->dd;
 
 	/* clear the interrupt(s) *after* handling them */
-	write_csr(dd, CCE_INT_CLEAR + off, status);
+	write_csr(dd, dd->params->cce_int_clear_reg + off, status);
 	/* TODO: which intr to force? */
 	if (sdma_work_pending(sde))
-		write_csr(dd, CCE_INT_FORCE + off, sde->int_mask);
+		write_csr(dd, dd->params->cce_int_force_reg + off, sde->int_mask);
 }
 
 irqreturn_t sdma_interrupt(int irq, void *data)
@@ -8372,7 +8421,7 @@ irqreturn_t sdma_interrupt(int irq, void *data)
 
 	/* This read_csr is really bad in the hot path */
 	off = 8 * (dd->params->is_sdma_start / 64);
-	status = read_csr(dd, CCE_INT_STATUS + off) & sde->imask;
+	status = read_csr(dd, dd->params->cce_int_status_reg + off) & sde->imask;
 	if (likely(status)) {
 		/* handle the interrupt(s) */
 		sdma_engine_interrupt(sde, status);
@@ -8397,7 +8446,7 @@ irqreturn_t sdma_interrupt_thr(int irq, void *data)
 
 	/* This read_csr is really bad in the hot path */
 	off = 8 * (dd->params->is_sdma_start / 64);
-	status = read_csr(dd, CCE_INT_STATUS + off) & sde->imask;
+	status = read_csr(dd, dd->params->cce_int_status_reg + off) & sde->imask;
 	ty = jiffies + msecs_to_jiffies(sdma_yield);
 	if (likely(status)) {
 again:
@@ -8422,6 +8471,25 @@ again:
 }
 
 /*
+ * Force a 0->1 transition on the given interrupt number.
+ *
+ * Caller is responsible for any complications that might
+ * arise from other concurrent activity.
+ */
+void force_intr(struct hfi1_devdata *dd, u16 nr)
+{
+	u32 reg = (nr / 64) * 8;
+	u64 bit = 1ull << (nr % 64);
+
+	/* clear bit first, to be sure it is off */
+	write_csr(dd, dd->params->cce_int_clear_reg + reg, bit);
+	/* force the above write on the chip */
+	read_csr(dd, dd->params->cce_int_clear_reg + reg);
+
+	write_csr(dd, dd->params->cce_int_force_reg + reg, bit);
+}
+
+/*
  * Clear the receive interrupt.  Use a read of the interrupt clear CSR
  * to insure that the write completed.  This does NOT guarantee that
  * queued DMA writes to memory from the chip are pushed.
@@ -8429,7 +8497,7 @@ again:
 static inline void clear_recv_intr(struct hfi1_ctxtdata *rcd)
 {
 	struct hfi1_devdata *dd = rcd->dd;
-	u32 addr = CCE_INT_CLEAR + (8 * rcd->ireg);
+	u32 addr = dd->params->cce_int_clear_reg + (8 * rcd->ireg);
 
 	write_csr(dd, addr, rcd->imask);
 	/* force the above write on the chip and get a value back */
@@ -8439,7 +8507,7 @@ static inline void clear_recv_intr(struct hfi1_ctxtdata *rcd)
 /* force the receive interrupt */
 void force_recv_intr(struct hfi1_ctxtdata *rcd)
 {
-	write_csr(rcd->dd, CCE_INT_FORCE + (8 * rcd->ireg), rcd->imask);
+	write_csr(rcd->dd, rcd->dd->params->cce_int_force_reg + (8 * rcd->ireg), rcd->imask);
 }
 
 /*
@@ -9978,6 +10046,12 @@ void wfr_set_port_tid_count(struct hfi1_ctxtdata *rcd)
 {
 }
 
+/* RcvArray base address */
+static inline u8 __iomem *rcvarray_base(struct hfi1_devdata *dd, u32 ctxt)
+{
+	return dd->bar_maps[ctxt_bar_idx(ctxt)].rcvarray_wc;
+}
+
 /*
  * Update a TID entry of a given receive context.
  *
@@ -9993,6 +10067,7 @@ void wfr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
 		 u32 type, unsigned long pa, u16 order, bool flush)
 {
 	struct hfi1_devdata *dd = rcd->dd;
+	u8 __iomem *base = rcvarray_base(dd, rcd->ctxt);
 	u64 reg;
 
 	if (!(dd->flags & HFI1_PRESENT))
@@ -10009,8 +10084,8 @@ void wfr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
 		| (u64)order << RCV_ARRAY_RT_BUF_SIZE_SHIFT
 		| ((pa >> RT_ADDR_SHIFT) & RCV_ARRAY_RT_ADDR_MASK)
 					<< RCV_ARRAY_RT_ADDR_SHIFT;
-	trace_hfi1_write_rcvarray(dd->rcvarray_wc + (index * 8), reg);
-	writeq(reg, dd->rcvarray_wc + (index * 8));
+	trace_hfi1_write_rcvarray(base + (index * 8), reg);
+	writeq(reg, base + (index * 8));
 
 	if (type == PT_EAGER || flush || (index & 3) == 3)
 		flush_wc();
@@ -10031,13 +10106,13 @@ void wfr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type)
 	 * Doing the WC fill writes only makes sense if the device is
 	 * present and the RcvArray has been mapped as WC memory.
 	 */
-	if ((dd->flags & HFI1_PRESENT) && dd->rcvarray_wc) {
+	if (dd->flags & HFI1_PRESENT) {
 		if (type == PT_EAGER)
 			index += rcd->eager_base;
 		else if (type == PT_EXPECTED)
 			index += rcd->expected_base;
 
-		writeq(0, dd->rcvarray_wc + (index * 8));
+		writeq(0, rcvarray_base(dd, rcd->ctxt) + (index * 8));
 		if ((index & 3) == 3)
 			flush_wc();
 	}
@@ -10051,7 +10126,8 @@ void wfr_init_tids(struct hfi1_devdata *dd)
 
 	num_rcv = chip_rcv_array_count(dd);
 	for (i = 0; i < num_rcv; i++) {
-		writeq(reg, dd->rcvarray_wc + (i * 8));
+		/* WFR RcvArray addressing is not ctxt relative, just use 0 */
+		writeq(reg, rcvarray_base(dd, 0) + (i * 8));
 		if ((i & 3) == 3)
 			flush_wc();
 	}
@@ -13430,12 +13506,8 @@ int hfi1_tempsense_rd(struct hfi1_devdata *dd, struct hfi1_temp *temp)
 		return -EINVAL;
 	}
 
-	if (dd->params->chip_type == CHIP_JKR) {
-		/* TODO ask CPORT for ASIC temperature */
-		dd_dev_info(dd, "%s: tempsense not implemented for JKR\n",
-			    __func__);
+	if (dd->params->chip_type != CHIP_WFR)
 		return -EINVAL;
-	}
 
 	reg = read_csr(dd, ASIC_STS_THERM);
 	temp->curr = ((reg >> ASIC_STS_THERM_CURR_TEMP_SHIFT) &
@@ -13467,10 +13539,10 @@ static void read_mod_write(struct hfi1_devdata *dd, u16 src, u64 bits,
 {
 	u64 reg;
 	u16 idx = src / BITS_PER_REGISTER;
-	unsigned long flags;
+	u32 cce_int_mask_reg = dd->params->cce_int_mask_reg + (8 * idx);
 
-	spin_lock_irqsave(&dd->irq_src_lock, flags);
-	reg = read_csr(dd, CCE_INT_MASK + (8 * idx));
+	spin_lock(&dd->irq_src_lock);
+	reg = read_csr(dd, cce_int_mask_reg);
 	if (set) {
 		reg |= bits;
 		dd->gi_mask[idx].cce_int_mask |= bits;
@@ -13478,8 +13550,8 @@ static void read_mod_write(struct hfi1_devdata *dd, u16 src, u64 bits,
 		reg &= ~bits;
 		dd->gi_mask[idx].cce_int_mask &= ~bits;
 	}
-	write_csr(dd, CCE_INT_MASK + (8 * idx), reg);
-	spin_unlock_irqrestore(&dd->irq_src_lock, flags);
+	write_csr(dd, cce_int_mask_reg, reg);
+	spin_unlock(&dd->irq_src_lock);
 }
 
 /**
@@ -13522,9 +13594,10 @@ int set_intr_bits(struct hfi1_devdata *dd, u16 first, u16 last, bool set)
 void clear_all_interrupts(struct hfi1_devdata *dd)
 {
 	int i;
+	u32 cce_int_clear_reg = dd->params->cce_int_clear_reg;
 
 	for (i = 0; i < dd->params->num_int_csrs; i++)
-		write_csr(dd, CCE_INT_CLEAR + (8 * i), ~(u64)0);
+		write_csr(dd, cce_int_clear_reg + (8 * i), ~(u64)0);
 
 	write_csr(dd, dd->params->csr_err_clear_reg, ~(u64)0);
 	write_csr(dd, dd->params->send_pio_err_clear_reg, ~(u64)0);
@@ -13599,11 +13672,12 @@ void remap_sdma_interrupts(struct hfi1_devdata *dd, int engine, int msix_intr)
 void reset_interrupts(struct hfi1_devdata *dd)
 {
 	int i;
+	u32 cce_int_mask_reg = dd->params->cce_int_mask_reg;
 
 	/* all interrupts handled by the general handler */
 	for (i = 0; i < dd->params->num_int_csrs; i++) {
 		dd->gi_mask[i].remap = ~(u64)0;
-		dd->gi_mask[i].cce_int_mask = read_csr(dd, CCE_INT_MASK + (8 * i));
+		dd->gi_mask[i].cce_int_mask = read_csr(dd, cce_int_mask_reg + (8 * i));
 	}
 
 	/* all chip interrupts map to MSI-X 0 */
@@ -13846,8 +13920,8 @@ do_recalc:
 			     + qos_rmt_entries(num_kernel_contexts[pidx] - 1, NULL, NULL);
 	}
 
-	if (rmt_count > NUM_MAP_ENTRIES) {
-		over = rmt_count - NUM_MAP_ENTRIES;
+	if (rmt_count > dd->params->rsm_map_table_entries) {
+		over = rmt_count - dd->params->rsm_map_table_entries;
 		ret = reduce_rcv_ctxts(dd, n_usr_ctxts, over, "available RMT entries");
 		if (ret)
 			return -EINVAL;
@@ -14032,6 +14106,8 @@ static void set_partition_keys(struct hfi1_pportdata *ppd)
  */
 static void write_uninitialized_csrs_and_memories(struct hfi1_devdata *dd)
 {
+	u32 num_qp_table_regs = dd->params->qp_map_table_entries /
+				dd->params->qp_map_table_entries_per_csr;
 	int i, j;
 
 	/* CceIntMap */
@@ -14064,7 +14140,7 @@ static void write_uninitialized_csrs_and_memories(struct hfi1_devdata *dd)
 
 	/* RcvQPMapTable */
 	for (i = 0; i < dd->num_pports; i++) {
-		for (j = 0; j < 32; j++) {
+		for (j = 0; j < num_qp_table_regs; j++) {
 			u32 off = dd->params->rcv_qp_map_table_reg + (8 * i);
 
 			write_iport_csr(dd, i, off, 0);
@@ -14109,6 +14185,8 @@ static void clear_cce_status(struct hfi1_devdata *dd, u64 status_bits,
 static void reset_cce_csrs(struct hfi1_devdata *dd)
 {
 	int i;
+	u32 cce_int_clear_reg = dd->params->cce_int_clear_reg;
+	u32 cce_int_mask_reg = dd->params->cce_int_mask_reg;
 
 	/* CCE_REVISION read-only */
 	/* CCE_REVISION2 read-only */
@@ -14141,8 +14219,8 @@ static void reset_cce_csrs(struct hfi1_devdata *dd)
 		write_csr(dd, dd->params->cce_msix_int_map_vec_reg + (8 * i), 0);
 	for (i = 0; i < dd->params->num_int_csrs; i++) {
 		/* CCE_INT_STATUS read-only */
-		write_csr(dd, CCE_INT_MASK + (8 * i), 0);
-		write_csr(dd, CCE_INT_CLEAR + (8 * i), ~0ull);
+		write_csr(dd, cce_int_mask_reg + (8 * i), 0);
+		write_csr(dd, cce_int_clear_reg + (8 * i), ~0ull);
 		/* CCE_INT_FORCE leave alone */
 		/* CCE_INT_BLOCKED read-only */
 	}
@@ -14388,6 +14466,10 @@ static void init_rbufs(struct hfi1_pportdata *ppd)
 /* set RXE CSRs to chip reset defaults */
 static void reset_rxe_csrs(struct hfi1_devdata *dd)
 {
+	u32 num_rmt_csrs = dd->params->rsm_map_table_entries /
+			   dd->params->rsm_map_table_entries_per_csr;
+	u32 num_qp_table_regs = dd->params->qp_map_table_entries /
+				dd->params->qp_map_table_entries_per_csr;
 	int i, j;
 
 	/*
@@ -14414,7 +14496,7 @@ static void reset_rxe_csrs(struct hfi1_devdata *dd)
 		write_iport_csr(dd, pidx, dd->params->rcv_err_mask_reg, 0);
 		write_iport_csr(dd, pidx, dd->params->rcv_err_clear_reg, ~0ull);
 		/* RCV_ERR_FORCE leave alone */
-		for (i = 0; i < 32; i++)
+		for (i = 0; i < num_qp_table_regs; i++)
 			write_iport_csr(dd, pidx,
 					dd->params->rcv_qp_map_table_reg + (8 * i), 0);
 		for (i = 0; i < 4; i++)
@@ -14432,8 +14514,8 @@ static void reset_rxe_csrs(struct hfi1_devdata *dd)
 	// ...or not.  Is this called by JKR?
 	for (i = 0; i < dd->params->rsm_rule_size; i++)
 		clear_rsm_rule(dd, i);
-	for (i = 0; i < 32; i++)
-		write_csr(dd, RCV_RSM_MAP_TABLE + (8 * i), 0);
+	for (i = 0; i < num_rmt_csrs; i++)
+		write_csr(dd, dd->params->rcv_rsm_map_table_reg + (8 * i), 0);
 
 	/*
 	 * RXE Kernel and User Per-Context CSRs
@@ -14561,6 +14643,7 @@ static int init_chip(struct hfi1_devdata *dd)
 {
 	int i;
 	int ret = 0;
+	u32 cce_int_mask_reg = dd->params->cce_int_mask_reg;
 
 	/*
 	 * Put the HFI CSRs in a known state.
@@ -14589,7 +14672,7 @@ static int init_chip(struct hfi1_devdata *dd)
 	}
 	/* mask all interrupt sources */
 	for (i = 0; i < dd->params->num_int_csrs; i++)
-		write_csr(dd, CCE_INT_MASK + (8 * i), 0ull);
+		write_csr(dd, cce_int_mask_reg + (8 * i), 0ull);
 
 	/*
 	 * DC Reset: do a full DC reset before the register clear.
@@ -14707,15 +14790,21 @@ void init_kdeth_qp(struct hfi1_devdata *dd)
 u16 hfi1_get_qp_map(struct hfi1_pportdata *ppd, u16 idx)
 {
 	struct hfi1_devdata *dd = ppd->dd;
+	u32 tbl_idx;
+	u32 reg_idx;
+	u32 entry_idx;
 	u32 off;
 	u64 reg;
 
-	idx &= 0xff;  /* table has 256 entries */
-	off = dd->params->rcv_qp_map_table_reg + (idx / 8) * 8;
+	tbl_idx = idx & (dd->params->qp_map_table_entries - 1);
+	reg_idx = tbl_idx / dd->params->qp_map_table_entries_per_csr;
+	entry_idx = tbl_idx % dd->params->qp_map_table_entries_per_csr;
+
+	off = dd->params->rcv_qp_map_table_reg + (reg_idx * 8);
 	reg = read_iport_csr(dd, ppd->hw_pidx, off);
-	reg >>= (idx % 8) * 8;
-	reg &= 0xff; /* packing: 8 bits per context */
-	return reg;
+
+	return (reg >> (entry_idx * dd->params->qp_map_table_entry_shift))
+		& dd->params->qp_map_table_entry_mask;
 }
 
 /**
@@ -14741,16 +14830,21 @@ static void init_qpmap_table(struct hfi1_pportdata *ppd,
 {
 	struct hfi1_devdata *dd = ppd->dd;
 	u64 reg = 0;
-	u32 regno = dd->params->rcv_qp_map_table_reg;
-	int i;
 	u64 ctxt = first_ctxt;
+	u32 regno = dd->params->rcv_qp_map_table_reg;
+	u32 entry_shift = dd->params->qp_map_table_entry_shift;
+	u32 entry_top = dd->params->qp_map_table_entries_per_csr - 1;
+	int count = dd->params->qp_map_table_entries;
+	int i;
 
-	for (i = 0; i < 256; i++) {
-		reg |= ctxt << (8 * (i % 8));
+	for (i = 0; i < count; i++) {
+		u32 entry_idx = i % dd->params->qp_map_table_entries_per_csr;
+
+		reg |= ctxt << (entry_shift * entry_idx);
 		ctxt++;
 		if (ctxt > last_ctxt)
 			ctxt = first_ctxt;
-		if (i % 8 == 7) {
+		if (entry_idx == entry_top) {
 			write_iport_csr(dd, ppd->hw_pidx, regno, reg);
 			reg = 0;
 			regno += 8;
@@ -14762,14 +14856,15 @@ static void init_qpmap_table(struct hfi1_pportdata *ppd,
 }
 
 struct rsm_map_table {
-	u64 map[NUM_MAP_REGS];
 	unsigned int used;
+	u64 map[];
 };
 
-static void set_rmt_entry(struct rsm_map_table *rmt, u8 idx, u8 value);
+static void set_rmt_entry(struct hfi1_devdata *dd, struct rsm_map_table *rmt,
+			  u16 idx, u16 value);
 
 struct rsm_rule_data {
-	u8 offset;
+	u16 offset;
 	u8 pkt_type;
 	u8 pidx_mask;
 	u32 field1_off;
@@ -14791,11 +14886,16 @@ struct rsm_rule_data {
 static struct rsm_map_table *alloc_rsm_map_table(struct hfi1_devdata *dd)
 {
 	struct rsm_map_table *rmt;
-	u8 rxcontext = is_ax(dd) ? 0 : 0xff;  /* 0 is default if a0 ver. */
+	u32 num_rmt_csrs = dd->params->rsm_map_table_entries /
+			   dd->params->rsm_map_table_entries_per_csr;
+	/* 0 is default if a0 version */
+	u16 rxcontext = is_ax(dd) ? 0 : dd->params->rsm_map_table_entry_mask;
+	u32 i;
 
-	rmt = kmalloc(sizeof(*rmt), GFP_KERNEL);
+	rmt = kmalloc(sizeof(*rmt) + (sizeof(rmt->map[0]) * num_rmt_csrs), GFP_KERNEL);
 	if (rmt) {
-		memset(rmt->map, rxcontext, sizeof(rmt->map));
+		for (i = 0; i < dd->params->rsm_map_table_entries; ++i)
+			set_rmt_entry(dd, rmt, i, rxcontext);
 		rmt->used = 0;
 		// FIXME: This should be from a "resource start" point.
 	}
@@ -14804,25 +14904,22 @@ static struct rsm_map_table *alloc_rsm_map_table(struct hfi1_devdata *dd)
 }
 
 /*
- * Write the final RMT map table to the chip and free the table.  OK if
- * table is NULL.
+ * Write the final RSM map table to the chip and enable RSM on each port.
  */
 static void complete_rsm_map_table(struct hfi1_devdata *dd,
 				   struct rsm_map_table *rmt)
 {
+	u32 num_rmt_csrs = dd->params->rsm_map_table_entries /
+			   dd->params->rsm_map_table_entries_per_csr;
 	int i;
 
-	if (rmt) {
-		/* write table to chip */
-		for (i = 0; i < NUM_MAP_REGS; i++)
-			write_csr(dd, RCV_RSM_MAP_TABLE + (8 * i), rmt->map[i]);
+	/* write table to chip */
+	for (i = 0; i < num_rmt_csrs; i++)
+		write_csr(dd, dd->params->rcv_rsm_map_table_reg + (8 * i), rmt->map[i]);
 
-		/* enable RSM on each port */
-		for (i = 0; i < dd->num_pports; i++) {
-			add_rcvctrl(dd->pport + i,
-				    RCV_CTRL_RCV_RSM_ENABLE_SMASK);
-		}
-	}
+	/* enable RSM on each port */
+	for (i = 0; i < dd->num_pports; i++)
+		add_rcvctrl(dd->pport + i, RCV_CTRL_RCV_RSM_ENABLE_SMASK);
 }
 
 /*
@@ -14831,19 +14928,19 @@ static void complete_rsm_map_table(struct hfi1_devdata *dd,
 static void add_rsm_rule(struct hfi1_devdata *dd, u8 rule_index,
 			 struct rsm_rule_data *rrd)
 {
-	write_csr(dd, RCV_RSM_CFG + (8 * rule_index),
-		  (u64)rrd->offset << RCV_RSM_CFG_OFFSET_SHIFT |
+	write_csr(dd, dd->params->rcv_rsm_cfg_reg + (8 * rule_index),
+		  (u64)rrd->offset << dd->params->rsm_rule_offset_shift |
 		  (u64)rrd->pidx_mask << 40 | /* port enable mask (non WFR) */
 		  1ull << (rule_index % 4) | /* enable bit, no chain */
 		  (u64)rrd->pkt_type << RCV_RSM_CFG_PACKET_TYPE_SHIFT);
-	write_csr(dd, RCV_RSM_SELECT + (8 * rule_index),
+	write_csr(dd, dd->params->rcv_rsm_select_reg + (8 * rule_index),
 		  (u64)rrd->field1_off << RCV_RSM_SELECT_FIELD1_OFFSET_SHIFT |
 		  (u64)rrd->field2_off << RCV_RSM_SELECT_FIELD2_OFFSET_SHIFT |
 		  (u64)rrd->index1_off << RCV_RSM_SELECT_INDEX1_OFFSET_SHIFT |
 		  (u64)rrd->index1_width << RCV_RSM_SELECT_INDEX1_WIDTH_SHIFT |
 		  (u64)rrd->index2_off << RCV_RSM_SELECT_INDEX2_OFFSET_SHIFT |
 		  (u64)rrd->index2_width << RCV_RSM_SELECT_INDEX2_WIDTH_SHIFT);
-	write_csr(dd, RCV_RSM_MATCH + (8 * rule_index),
+	write_csr(dd, dd->params->rcv_rsm_match_reg + (8 * rule_index),
 		  (u64)rrd->mask1 << RCV_RSM_MATCH_MASK1_SHIFT |
 		  (u64)rrd->value1 << RCV_RSM_MATCH_VALUE1_SHIFT |
 		  (u64)rrd->mask2 << RCV_RSM_MATCH_MASK2_SHIFT |
@@ -14858,9 +14955,9 @@ static void clear_rsm_rule(struct hfi1_devdata *dd, int rule_index)
 	if (rule_index < 0 || rule_index >= dd->params->rsm_rule_size)
 		return;
 
-	write_csr(dd, RCV_RSM_CFG + (8 * rule_index), 0);
-	write_csr(dd, RCV_RSM_SELECT + (8 * rule_index), 0);
-	write_csr(dd, RCV_RSM_MATCH + (8 * rule_index), 0);
+	write_csr(dd, dd->params->rcv_rsm_cfg_reg + (8 * rule_index), 0);
+	write_csr(dd, dd->params->rcv_rsm_select_reg + (8 * rule_index), 0);
+	write_csr(dd, dd->params->rcv_rsm_match_reg + (8 * rule_index), 0);
 	if (test_and_clear_bit(rule_index, dd->rsm_rule_bitmap) == 0) {
 		dd_dev_err(dd, "%s: rule_index %d not set\n", __func__,
 			   rule_index);
@@ -14986,7 +15083,7 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 	extended_vl = 1 << n;
 
 	/* enough room in the map table? */
-	if (rmt->used + rmt_entries > NUM_MAP_ENTRIES)
+	if (rmt->used + rmt_entries > dd->params->rsm_map_table_entries)
 		goto bail;
 
 	/* allocate a rule */
@@ -14997,7 +15094,7 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 	/* fill block in RMT with this port's control context */
 	ctxt = ppd->rcv_context_base + HFI1_CTRL_CTXT;
 	for (i = 0; i < rmt_entries; i++)
-		set_rmt_entry(rmt, rmt->used + i, ctxt);
+		set_rmt_entry(dd, rmt, rmt->used + i, ctxt);
 
 	/* overwrite applicable qos entries */
 	ctxt = ppd->rcv_context_base + FIRST_KERNEL_KCTXT;
@@ -15009,7 +15106,7 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 		     krcvqs[i] && qpn < qpns_per_vl; qpn++) {
 			/* generate the index the hardware will produce */
 			idx = rmt->used + ((qpn << n) ^ i);
-			set_rmt_entry(rmt, idx, tctxt);
+			set_rmt_entry(dd, rmt, idx, tctxt);
 			tctxt++;
 			if (tctxt == ctxt + krcvqs[i])
 				tctxt = ctxt;
@@ -15069,16 +15166,20 @@ static void init_qos(struct hfi1_devdata *dd, struct rsm_map_table *rmt)
 }
 
 /* set a single RSM Map Table (RMT) entry in the given map */
-static void set_rmt_entry(struct rsm_map_table *rmt, u8 idx, u8 value)
+static void set_rmt_entry(struct hfi1_devdata *dd, struct rsm_map_table *rmt,
+			  u16 idx, u16 value)
 {
 	u64 reg;
 	int regoff, regidx;
+	u32 entries_per_csr = dd->params->rsm_map_table_entries_per_csr;
+	u32 entry_mask = dd->params->rsm_map_table_entry_mask;
+	u32 entry_shift = dd->params->rsm_map_table_entry_shift;
 
-	regoff = ((int)idx % 8) * 8;
-	regidx = (int)idx / 8;
+	regoff = ((int)idx % entries_per_csr) * entry_shift;
+	regidx = (int)idx / entries_per_csr;
 	reg = rmt->map[regidx];
-	reg &= ~(RCV_RSM_MAP_TABLE_RCV_CONTEXT_A_MASK << regoff);
-	reg |= (u64)value << regoff;
+	reg &= ~((u64)entry_mask << regoff);
+	reg |= ((u64)(value & entry_mask) << regoff);
 	rmt->map[regidx] = reg;
 }
 
@@ -15088,7 +15189,7 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 	struct hfi1_devdata *dd = ppd->dd;
 	struct rsm_rule_data rrd;
 	int i, idx, start, end;
-	u8 offset;
+	u16 offset;
 	u32 total_cnt;
 	int rule_index;
 
@@ -15106,7 +15207,7 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 	total_cnt = end - start;
 
 	/* there needs to be enough room in the map table */
-	if (rmt->used + total_cnt > NUM_MAP_ENTRIES) {
+	if (rmt->used + total_cnt > dd->params->rsm_map_table_entries) {
 		ppd_dev_err(ppd, "FECN handling disabled - too many contexts allocated\n");
 		return;
 	}
@@ -15125,11 +15226,12 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 	 * There are only enough bits in offset for the table size, so
 	 * start with that to allow for a "negative" offset.
 	 */
-	offset = (u8)(NUM_MAP_ENTRIES + rmt->used - start);
+	offset = (dd->params->rsm_map_table_entries + rmt->used - start) &
+		 dd->params->rsm_map_table_entry_mask;
 
 	for (i = start, idx = rmt->used; i < end; i++, idx++) {
 		/* replace with identity mapping */
-		set_rmt_entry(rmt, idx, i);
+		set_rmt_entry(dd, rmt, idx, i);
 	}
 
 	/*
@@ -15163,7 +15265,7 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 static inline int hfi1_netdev_set_free_rmt_idx(struct hfi1_pportdata *ppd,
 					       struct rsm_map_table *rmt)
 {
-	if (rmt->used + NUM_NETDEV_MAP_ENTRIES > NUM_MAP_ENTRIES) {
+	if (rmt->used + NUM_NETDEV_MAP_ENTRIES > ppd->dd->params->rsm_map_table_entries) {
 		ppd_dev_err(ppd, "Not enough RMT entries, used = %d\n",
 			    rmt->used);
 		return -ENOSPC;
@@ -15178,35 +15280,46 @@ static void hfi1_netdev_update_rmt(struct hfi1_pportdata *ppd)
 	struct hfi1_devdata *dd = ppd->dd;
 	int i, j;
 	int ctx_id = 0;
+	u8 left_shift;
 	u64 reg;
 	u32 regoff;
 	int rmt_start = hfi1_netdev_get_free_rmt_idx(ppd);
 	int ctxt_count = hfi1_netdev_ctxt_count(ppd);
+	u32 entries_per_csr = ppd->dd->params->rsm_map_table_entries_per_csr;
+	u32 entry_mask = ppd->dd->params->rsm_map_table_entry_mask;
+	u32 entry_shift = ppd->dd->params->rsm_map_table_entry_shift;
+	u32 ctxt;
 
 	dev_dbg(&(dd)->pcidev->dev, "RMT start = %d, end %d\n",
 		rmt_start,
 		rmt_start + NUM_NETDEV_MAP_ENTRIES);
 
-	/* Update RSM mapping table, 32 regs, 256 entries - 1 ctx per byte */
-	regoff = RCV_RSM_MAP_TABLE + (rmt_start / 8) * 8;
+	/* Update RSM mapping table */
+	regoff = dd->params->rcv_rsm_map_table_reg + ((rmt_start / entries_per_csr) * 8);
 	reg = read_csr(dd, regoff);
 	for (i = 0; i < NUM_NETDEV_MAP_ENTRIES; i++) {
 		/* Update map register with netdev context */
-		j = (rmt_start + i) % 8;
-		reg &= ~(0xffllu << (j * 8));
-		reg |= (u64)hfi1_netdev_get_ctxt(ppd, ctx_id++)->ctxt << (j * 8);
+		j = (rmt_start + i) % entries_per_csr;
+		left_shift = j * entry_shift;
+		ctxt = hfi1_netdev_get_ctxt(ppd, ctx_id++)->ctxt;
+		reg &= ~((u64)entry_mask << left_shift);
+		reg |= ((u64)(ctxt & entry_mask) << left_shift);
 		/* Wrap up netdev ctx index */
 		ctx_id %= ctxt_count;
+
 		/* Write back map register */
-		if (j == 7 || ((i + 1) == NUM_NETDEV_MAP_ENTRIES)) {
+		if ((j == entries_per_csr - 1) || ((i + 1) == NUM_NETDEV_MAP_ENTRIES)) {
 			dev_dbg(&(dd)->pcidev->dev,
-				"RMT[%d] =0x%llx\n",
-				regoff - RCV_RSM_MAP_TABLE, reg);
+				"RMT[%d] = 0x%llx\n",
+				(regoff - dd->params->rcv_rsm_map_table_reg) /
+					entries_per_csr,
+				reg);
 
 			write_csr(dd, regoff, reg);
-			regoff += 8;
-			if (i < (NUM_NETDEV_MAP_ENTRIES - 1))
+			if (i < (NUM_NETDEV_MAP_ENTRIES - 1)) {
+				regoff += 8;
 				reg = read_csr(dd, regoff);
+			}
 		}
 	}
 }
@@ -15420,7 +15533,7 @@ static int do_port_mapping(struct hfi1_pportdata *ppd,
 	int row;
 
 	/* check for room in RMT - need 1 entry */
-	if (rmt->used >= NUM_MAP_ENTRIES) {
+	if (rmt->used >= dd->params->rsm_map_table_entries) {
 		ppd_dev_err(ppd, "%s: out of RMT entries\n", __func__);
 		return -ENOSPC;
 	}
@@ -15428,7 +15541,7 @@ static int do_port_mapping(struct hfi1_pportdata *ppd,
 	rmt_index = rmt->used++;
 
 	/* update the RSM Map Table entry with the target context */
-	set_rmt_entry(rmt, rmt_index, target_ctxt);
+	set_rmt_entry(dd, rmt, rmt_index, target_ctxt);
 
 	/* assign the rules */
 	for (row = 0; row < rrd_len; row++) {
@@ -15822,33 +15935,36 @@ static int check_int_registers(struct hfi1_devdata *dd)
 	u64 reg;
 	u64 all_bits = ~(u64)0;
 	u64 mask;
+	u32 cce_int_mask_reg = dd->params->cce_int_mask_reg;
+	u32 cce_int_clear_reg = dd->params->cce_int_clear_reg;
+	u32 cce_int_status_reg = dd->params->cce_int_status_reg;
 
 	/* Clear CceIntMask[0] to avoid raising any interrupts */
-	mask = read_csr(dd, CCE_INT_MASK);
-	write_csr(dd, CCE_INT_MASK, 0ull);
-	reg = read_csr(dd, CCE_INT_MASK);
+	mask = read_csr(dd, cce_int_mask_reg);
+	write_csr(dd, cce_int_mask_reg, 0ull);
+	reg = read_csr(dd, cce_int_mask_reg);
 	if (reg)
 		goto err_exit;
 
 	/* Clear all interrupt status bits */
-	write_csr(dd, CCE_INT_CLEAR, all_bits);
-	reg = read_csr(dd, CCE_INT_STATUS);
+	write_csr(dd, cce_int_clear_reg, all_bits);
+	reg = read_csr(dd, cce_int_status_reg);
 	if (reg)
 		goto err_exit;
 
 	/* Set all interrupt status bits */
-	write_csr(dd, CCE_INT_FORCE, all_bits);
-	reg = read_csr(dd, CCE_INT_STATUS);
+	write_csr(dd, dd->params->cce_int_force_reg, all_bits);
+	reg = read_csr(dd, cce_int_status_reg);
 	if (reg != all_bits)
 		goto err_exit;
 
 	/* Restore the interrupt mask */
-	write_csr(dd, CCE_INT_CLEAR, all_bits);
-	write_csr(dd, CCE_INT_MASK, mask);
+	write_csr(dd, cce_int_clear_reg, all_bits);
+	write_csr(dd, cce_int_mask_reg, mask);
 
 	return 0;
 err_exit:
-	write_csr(dd, CCE_INT_MASK, mask);
+	write_csr(dd, cce_int_mask_reg, mask);
 	dd_dev_err(dd, "Interrupt registers not properly mapped by VMM\n");
 	return -EINVAL;
 }

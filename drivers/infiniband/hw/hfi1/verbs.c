@@ -593,7 +593,8 @@ static void verbs_sdma_complete(
 
 	spin_lock(&qp->s_lock);
 	if (tx->wqe) {
-		rvt_send_complete(qp, tx->wqe, IB_WC_SUCCESS);
+		rvt_send_complete(qp, tx->wqe, IB_WC_SUCCESS,
+				  RVT_QP_LOCK_STATE_S);
 	} else if (qp->ibqp.qp_type == IB_QPT_RC) {
 		struct hfi1_opa_header *hdr;
 
@@ -1125,7 +1126,8 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 pio_bail:
 	spin_lock_irqsave(&qp->s_lock, flags);
 	if (qp->s_wqe) {
-		rvt_send_complete(qp, qp->s_wqe, wc_status);
+		rvt_send_complete(qp, qp->s_wqe, wc_status,
+				  RVT_QP_LOCK_STATE_S);
 	} else if (qp->ibqp.qp_type == IB_QPT_RC) {
 		if (unlikely(wc_status == IB_WC_GENERAL_ERR))
 			hfi1_rc_verbs_aborted(qp, &ps->s_txreq->phdr.hdr);
@@ -1336,7 +1338,8 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 			hfi1_cdbg(PIO, "%s() Failed. Completing with err",
 				  __func__);
 			spin_lock_irqsave(&qp->s_lock, flags);
-			rvt_send_complete(qp, qp->s_wqe, IB_WC_GENERAL_ERR);
+			rvt_send_complete(qp, qp->s_wqe, IB_WC_GENERAL_ERR,
+					  RVT_QP_LOCK_STATE_S);
 			spin_unlock_irqrestore(&qp->s_lock, flags);
 		}
 		return -EINVAL;

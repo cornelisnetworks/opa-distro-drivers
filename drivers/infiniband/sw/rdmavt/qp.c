@@ -703,7 +703,8 @@ void rvt_qp_mr_clean(struct rvt_qp *qp, u32 lkey)
 	if (rvt_ss_has_lkey(&qp->r_sge, lkey) ||
 	    rvt_qp_sends_has_lkey(qp, lkey) ||
 	    rvt_qp_acks_has_lkey(qp, lkey))
-		lastwqe = rvt_error_qp(qp, IB_WC_LOC_PROT_ERR);
+		lastwqe = rvt_error_qp(qp, IB_WC_LOC_PROT_ERR,
+				       RVT_QP_LOCK_STATE_RS);
 check_lwqe:
 	spin_unlock(&qp->s_lock);
 	spin_unlock(&qp->s_hlock);
@@ -1272,18 +1273,7 @@ bail_qp:
 	return ret;
 }
 
-/**
- * rvt_error_qp - put a QP into the error state
- * @qp: the QP to put into the error state
- * @err: the receive completion error to signal if a RWQE is active
- *
- * Flushes both send and receive work queues.
- *
- * Return: true if last WQE event should be generated.
- * The QP r_lock and s_lock should be held and interrupts disabled.
- * If we are already in error state, just return.
- */
-int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err)
+int __rvt_error_qp_locked(struct rvt_qp *qp, enum ib_wc_status err)
 {
 	struct ib_wc wc;
 	int ret = 0;
@@ -1361,6 +1351,64 @@ int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err)
 	}
 
 bail:
+	return ret;
+}
+
+/**
+ * rvt_error_qp - put a QP into the error state
+ * @qp: the QP to put into the error state
+ * @err: the receive completion error to signal if a RWQE is active
+ * @lock_state: caller ownership representation of r and s lock
+ *
+ * Flushes both send and receive work queues.
+ *
+ * Return: true if last WQE event should be generated.
+ * The QP r_lock and s_lock should be held and interrupts disabled.
+ * If we are already in error state, just return.
+ */
+int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err,
+		 enum rvt_qp_lock_state lock_state)
+{
+	int ret;
+
+	switch (lock_state) {
+	case RVT_QP_LOCK_STATE_NONE:
+		unsigned long flags;
+
+		/* only case where caller may not have handled irqs */
+		spin_lock_irqsave(&qp->r_lock, flags);
+		spin_lock(&qp->s_lock);
+		ret = __rvt_error_qp_locked(qp, err);
+		spin_unlock(&qp->s_lock);
+		spin_unlock_irqrestore(&qp->r_lock, flags);
+		break;
+
+	case RVT_QP_LOCK_STATE_S:
+		/* r_lock -> s_lock ordering can be broken here iff
+		 * no one else is using the r_lock at the moment
+		 */
+		if (!spin_trylock(&qp->r_lock)) {
+			/* otherwise we must respect ordering */
+			spin_unlock(&qp->s_lock);
+			spin_lock(&qp->r_lock);
+			spin_lock(&qp->s_lock);
+		}
+		ret = __rvt_error_qp_locked(qp, err);
+		spin_unlock(&qp->r_lock);
+		break;
+
+	case RVT_QP_LOCK_STATE_R:
+		spin_lock(&qp->s_lock);
+		ret = __rvt_error_qp_locked(qp, err);
+		spin_unlock(&qp->s_lock);
+		break;
+
+	case RVT_QP_LOCK_STATE_RS:
+		fallthrough;
+	default:
+		ret = __rvt_error_qp_locked(qp, err);
+	}
+
 	return ret;
 }
 EXPORT_SYMBOL(rvt_error_qp);
@@ -1550,7 +1598,8 @@ int rvt_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		break;
 
 	case IB_QPS_ERR:
-		lastwqe = rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
+		lastwqe = rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR,
+				       RVT_QP_LOCK_STATE_RS);
 		break;
 
 	default:
@@ -2461,15 +2510,13 @@ void rvt_comm_est(struct rvt_qp *qp)
 }
 EXPORT_SYMBOL(rvt_comm_est);
 
+/* assumes r_lock is held */
 void rvt_rc_error(struct rvt_qp *qp, enum ib_wc_status err)
 {
-	unsigned long flags;
 	int lastwqe;
 
-	spin_lock_irqsave(&qp->s_lock, flags);
-	lastwqe = rvt_error_qp(qp, err);
-	spin_unlock_irqrestore(&qp->s_lock, flags);
-
+	lockdep_assert_held(&qp->r_lock);
+	lastwqe = rvt_error_qp(qp, err, RVT_QP_LOCK_STATE_R);
 	if (lastwqe) {
 		struct ib_event ev;
 
@@ -2773,10 +2820,11 @@ void rvt_qp_iter(struct rvt_dev_info *rdi,
 EXPORT_SYMBOL(rvt_qp_iter);
 
 /*
- * This should be called with s_lock and r_lock held.
+ * This should be called with s_lock held.
  */
 void rvt_send_complete(struct rvt_qp *qp, struct rvt_swqe *wqe,
-		       enum ib_wc_status status)
+		       enum ib_wc_status status,
+		       enum rvt_qp_lock_state lock_state)
 {
 	u32 old_last, last;
 	struct rvt_dev_info *rdi;
@@ -2788,7 +2836,7 @@ void rvt_send_complete(struct rvt_qp *qp, struct rvt_swqe *wqe,
 	old_last = qp->s_last;
 	trace_rvt_qp_send_completion(qp, wqe, old_last);
 	last = rvt_qp_complete_swqe(qp, wqe, rdi->wc_opcode[wqe->wr.opcode],
-				    status);
+				    status, lock_state);
 	if (qp->s_acked == old_last)
 		qp->s_acked = last;
 	if (qp->s_cur == old_last)
@@ -3124,7 +3172,8 @@ do_write:
 	wc.sl = rdma_ah_get_sl(&qp->remote_ah_attr);
 	wc.port_num = 1;
 	/* Signal completion event if the solicited bit is set. */
-	rvt_recv_cq(qp, &wc, wqe->wr.send_flags & IB_SEND_SOLICITED);
+	rvt_recv_cq(qp, &wc, wqe->wr.send_flags & IB_SEND_SOLICITED,
+		    RVT_QP_LOCK_STATE_R);
 
 send_comp:
 	spin_unlock_irqrestore(&qp->r_lock, flags);
@@ -3132,9 +3181,7 @@ send_comp:
 	rvp->n_loop_pkts++;
 flush_send:
 	sqp->s_rnr_retry = sqp->s_rnr_retry_cnt;
-	spin_lock(&sqp->r_lock);
-	rvt_send_complete(sqp, wqe, send_status);
-	spin_unlock(&sqp->r_lock);
+	rvt_send_complete(sqp, wqe, send_status, RVT_QP_LOCK_STATE_S);
 	if (local_ops) {
 		atomic_dec(&sqp->local_ops_pending);
 		local_ops = 0;
@@ -3188,18 +3235,15 @@ serr:
 	spin_unlock_irqrestore(&qp->r_lock, flags);
 serr_no_r_lock:
 	spin_lock_irqsave(&sqp->s_lock, flags);
-	spin_lock(&sqp->r_lock);
-	rvt_send_complete(sqp, wqe, send_status);
-	spin_unlock(&sqp->r_lock);
+	rvt_send_complete(sqp, wqe, send_status, RVT_QP_LOCK_STATE_S);
 	if (sqp->ibqp.qp_type == IB_QPT_RC) {
 		int lastwqe;
 
-		spin_lock(&sqp->r_lock);
-		lastwqe = rvt_error_qp(sqp, IB_WC_WR_FLUSH_ERR);
-		spin_unlock(&sqp->r_lock);
-
+		lastwqe = rvt_error_qp(sqp, IB_WC_WR_FLUSH_ERR,
+					RVT_QP_LOCK_STATE_S);
 		sqp->s_flags &= ~RVT_S_BUSY;
 		spin_unlock_irqrestore(&sqp->s_lock, flags);
+
 		if (lastwqe) {
 			struct ib_event ev;
 

@@ -1080,10 +1080,6 @@ struct hfi1_asic_data {
 	struct hfi1_i2c_bus *i2c_bus1;
 };
 
-/* sizes for both the QP and RSM map tables */
-#define NUM_MAP_ENTRIES	 256
-#define NUM_MAP_REGS      32
-
 /* Virtual NIC information */
 struct hfi1_vnic_data {
 	struct kmem_cache *txreq_cache;
@@ -1133,10 +1129,20 @@ struct chip_params {
 	u32 link_speed_active;
 	u32 asic_cclock_ps;
 	u32 rsm_rule_size;
+	u32 rsm_rule_offset_shift; /* RcvRsmCfg.Offset bit shift */
+	u32 rsm_map_table_entries;
+	u32 rsm_map_table_entries_per_csr;
+	u32 rsm_map_table_entry_mask;
+	u32 rsm_map_table_entry_shift;
+	u32 qp_map_table_entries;
+	u32 qp_map_table_entries_per_csr;
+	u32 qp_map_table_entry_mask;
+	u32 qp_map_table_entry_shift;
 	u32 pkey_table_size;
 	const char *generic_boardname;
 	u32 max_eager_entries;
 	u8 pio_base_bits; /* SendCtxtCtrl.CtxtBase bit count */
+	u32 pio_base_shift; /* SendCtxtCtrl.CtxtBase starting bit location */
 	const struct flag_data *egress_err_info_data;
 	u64 send_ctrl_flush; /* set-once flush flag */
 	u64 port_discard_egress_errs;
@@ -1144,6 +1150,7 @@ struct chip_params {
 	/* interrupt sources */
 	u32 num_int_csrs;
 	u32 num_int_map_csrs;
+	u32 is_cport_int;
 	u32 is_rcvavail_start;
 	u32 is_rcvurgent_start;
 	u32 is_sdmaeng_err_start;
@@ -1153,6 +1160,13 @@ struct chip_params {
 	u32 is_last_source;
 	const struct is_table *is_table;
 	const struct gi_enable_entry *gi_enable_table;
+
+	/* cce_interrupt registers */
+	u32 cce_int_status_reg;
+	u32 cce_int_mask_reg;
+	u32 cce_int_clear_reg;
+	u32 cce_int_force_reg;
+	u32 cce_int_blocked_reg;
 
 	/* counters */
 	struct cntr_entry *chip_dev_cntrs;
@@ -1209,6 +1223,12 @@ struct chip_params {
 	u32 rcv_hdr_head_reg;
 	u32 rcv_egr_index_head_reg;
 	u32 rcv_tid_flow_table_reg;
+
+	/* RXE RSM registers */
+	u32 rcv_rsm_cfg_reg;
+	u32 rcv_rsm_select_reg;
+	u32 rcv_rsm_match_reg;
+	u32 rcv_rsm_map_table_reg;
 
 	/* TXE kernel registers */
 	u32 send_contexts_reg;
@@ -1374,12 +1394,27 @@ struct hfi1_cport {
 #ifdef CONFIG_HFI_CPORT_POLLING
 	struct task_struct *poll_th;
 #endif
+	s16 temp;			/* cached temperature in 0.125 degC */
+					/*   increments */
+	unsigned long temp_timeout;	/* jiffies when cache times out */
 	atomic_t nping;			/* CPORT ping counter */
 	struct task_struct *ping_th;	/* kthread currently running ping */
 	struct xarray trap_xa;		/* handlers for MCTXT TRAPs */
 	struct hfi1_psc psc;		/* used only by TRAP128 */
 	cport_handler handlers[256];
 };
+
+struct bar_map {
+	resource_size_t physaddr;	/* BAR base physical address */
+	u8 __iomem *kregbase1;		/* UC register remap, part 1 */
+	u8 __iomem *kregbase2;		/* UC register remap, part 2 */
+	void __iomem *piobase;		/* WC remap of PIO buffer space */
+	void __iomem *rcvarray_wc;	/* WC remap of RcvArray space */
+};
+
+/* helpers to convert a context to a per-bar index or per-bar context */
+#define ctxt_bar_idx(ctxt) (((ctxt) >> 8) & 0x3)
+#define ctxt_bar_ctxt(ctxt) ((ctxt) & 0xff)
 
 typedef int (*send_routine)(struct rvt_qp *, struct hfi1_pkt_state *, u64);
 struct hfi1_netdev_rx;
@@ -1398,12 +1433,8 @@ struct hfi1_devdata {
 	struct hfi1_cport *cport;
 	struct workqueue_struct *hfi1_wq;
 
-	/* first mapping up to RcvArray */
-	u8 __iomem *kregbase1;
-	resource_size_t physaddr;
+	struct bar_map bar_maps[4]; /* use 3, last is mask round-up */
 
-	/* second uncached mapping from RcvArray to pio send buffers */
-	u8 __iomem *kregbase2;
 	/* for detecting offset above kregbase2 address */
 	u32 base2_start;
 
@@ -1444,13 +1475,6 @@ struct hfi1_devdata {
 	/* common data between shared ASIC HFIs in this OS */
 	struct hfi1_asic_data *asic_data;
 
-	/* mem-mapped pointer to base of PIO buffers */
-	void __iomem *piobase;
-	/*
-	 * write-combining mem-mapped pointer to base of RcvArray
-	 * memory.
-	 */
-	void __iomem *rcvarray_wc;
 	/*
 	 * credit return base - a per-NUMA range of DMA address that
 	 * the chip will use to update the per-context free counter
@@ -2629,7 +2653,7 @@ extern struct mutex hfi1_mutex;
 #define PCI_DEVICE_ID_INTEL0 0x24f0
 #define PCI_DEVICE_ID_INTEL1 0x24f1
 #define PCI_VENDOR_ID_CORNELIS 0x434e
-#define PCI_DEVICE_ID_CORNELIS1 0x0001
+#define PCI_DEVICE_ID_CORNELIS_CN5000 0x0001
 #define PCI_SUBDEVICE_CN5000_DUAL_PORT 0x0002
 
 /* create a ULL mask out of the given number of bits */
@@ -3133,8 +3157,8 @@ static inline u64 read_iprc_csr(const struct hfi1_devdata *dd, int pidx,
 	 * IPORT receive context CSRs are separated by rxe_iport_stride and
 	 * rxe_iprc_stride.
 	 */
-	return read_csr(dd, offset + (dd->params->rxe_iport_stride * pidx)
-			+ (dd->params->rxe_iprc_stride * rc));
+	return read_ctxt_csr(dd, offset + (dd->params->rxe_iport_stride * pidx),
+			     rc, dd->params->rxe_iprc_stride);
 }
 
 static inline void write_iprc_csr(struct hfi1_devdata *dd, int pidx,
@@ -3144,92 +3168,92 @@ static inline void write_iprc_csr(struct hfi1_devdata *dd, int pidx,
 	 * IPORT receive context CSRs are separated by rxe_iport_stride and
 	 * rxe_iprc_stride.
 	 */
-	write_csr(dd, offset + (dd->params->rxe_iport_stride * pidx)
-		  + (dd->params->rxe_iprc_stride * rc), value);
+	write_ctxt_csr(dd, offset + (dd->params->rxe_iport_stride * pidx),
+		       rc, dd->params->rxe_iprc_stride, value);
 }
 
 static inline u64 read_rctxt_csr(const struct hfi1_devdata *dd, int ctxt,
 				 u32 offset)
 {
 	/* restricted rcv context CSRs are separated by rxe_rctxt_stride */
-	return read_csr(dd, offset + (dd->params->rxe_rctxt_stride * ctxt));
+	return read_ctxt_csr(dd, offset, ctxt, dd->params->rxe_rctxt_stride);
 }
 
 static inline void write_rctxt_csr(struct hfi1_devdata *dd, int ctxt,
 				   u32 offset, u64 value)
 {
 	/* restricted rcv context CSRs are separated by rxe_rctxt_stride */
-	write_csr(dd, offset + (dd->params->rxe_rctxt_stride * ctxt), value);
+	write_ctxt_csr(dd, offset, ctxt, dd->params->rxe_rctxt_stride, value);
 }
 
 static inline u64 read_kctxt_csr(const struct hfi1_devdata *dd, int ctxt,
 				 u32 offset)
 {
 	/* kernel rcv context CSRs are separated by rxe_kctxt_stride */
-	return read_csr(dd, offset + (dd->params->rxe_kctxt_stride * ctxt));
+	return read_ctxt_csr(dd, offset, ctxt, dd->params->rxe_kctxt_stride);
 }
 
 static inline void write_kctxt_csr(struct hfi1_devdata *dd, int ctxt,
 				   u32 offset, u64 value)
 {
 	/* kernel rcv context CSRs are separated by rxe_kctxt_stride */
-	write_csr(dd, offset + (dd->params->rxe_kctxt_stride * ctxt), value);
+	write_ctxt_csr(dd, offset, ctxt, dd->params->rxe_kctxt_stride, value);
 }
 
 static inline u64 read_ku_csr(const struct hfi1_devdata *dd, int ctxt,
 			      u32 offset)
 {
 	/* kernel/user rcv context CSRs are separated by rxe_ku_stride */
-	return read_csr(dd, offset + (dd->params->rxe_ku_stride * ctxt));
+	return read_ctxt_csr(dd, offset, ctxt, dd->params->rxe_ku_stride);
 }
 
 static inline void write_ku_csr(struct hfi1_devdata *dd, int ctxt,
 				u32 offset, u64 value)
 {
 	/* kernel/user rcv context CSRs are separated by rxe_ku_stride */
-	write_csr(dd, offset + (dd->params->rxe_ku_stride * ctxt), value);
+	write_ctxt_csr(dd, offset, ctxt, dd->params->rxe_ku_stride, value);
 }
 
 static inline u64 read_uctxt_csr(const struct hfi1_devdata *dd, int ctxt,
 				 u32 offset)
 {
 	/* user per-context CSRs are separated by rxe_uctxt_stride */
-	return read_csr(dd, offset + (dd->params->rxe_uctxt_stride * ctxt));
+	return read_ctxt_csr(dd, offset, ctxt, dd->params->rxe_uctxt_stride);
 }
 
 static inline void write_uctxt_csr(struct hfi1_devdata *dd, int ctxt,
 				   u32 offset, u64 value)
 {
 	/* user per-context CSRs are separated by rxe_uctxt_stride */
-	write_csr(dd, offset + (dd->params->rxe_uctxt_stride * ctxt), value);
+	write_ctxt_csr(dd, offset, ctxt, dd->params->rxe_uctxt_stride, value);
 }
 
 static inline u64 read_sctxt_csr(const struct hfi1_devdata *dd, int ctxt,
 				 u32 offset)
 {
 	/* send context CSRs are separated by txe_sctxt_stride */
-	return read_csr(dd, offset + (dd->params->txe_sctxt_stride * ctxt));
+	return read_ctxt_csr(dd, offset, ctxt, dd->params->txe_sctxt_stride);
 }
 
 static inline void write_sctxt_csr(struct hfi1_devdata *dd, int ctxt,
 				   u32 offset, u64 value)
 {
 	/* send context CSRs are separated by txe_sctxt_stride */
-	write_csr(dd, offset + (dd->params->txe_sctxt_stride * ctxt), value);
+	write_ctxt_csr(dd, offset, ctxt, dd->params->txe_sctxt_stride, value);
 }
 
 static inline u64 read_tctxt_csr(const struct hfi1_devdata *dd, int ctxt,
 				 u32 offset)
 {
 	/* TXE send context CSRs are separated by txe_tctxt_stride */
-	return read_csr(dd, offset + (dd->params->txe_tctxt_stride * ctxt));
+	return read_ctxt_csr(dd, offset, ctxt, dd->params->txe_tctxt_stride);
 }
 
 static inline void write_tctxt_csr(struct hfi1_devdata *dd, int ctxt,
 				   u32 offset, u64 value)
 {
 	/* TXE send context CSRs are separated by txe_tctxt_stride */
-	write_csr(dd, offset + (dd->params->txe_tctxt_stride * ctxt), value);
+	write_ctxt_csr(dd, offset, ctxt, dd->params->txe_tctxt_stride, value);
 }
 
 static inline u64 read_sdma_csr(const struct hfi1_devdata *dd, int eng,
@@ -3281,8 +3305,8 @@ static inline u64 read_epsc_csr(const struct hfi1_devdata *dd, int pidx,
 	 * EPORT send context CSRs are separated by txe_eport_stride and
 	 * txe_epsc_stride.
 	 */
-	return read_csr(dd, offset + (dd->params->txe_eport_stride * pidx)
-			+ (dd->params->txe_epsc_stride * sc));
+	return read_ctxt_csr(dd, offset + (dd->params->txe_eport_stride * pidx),
+			     sc, dd->params->txe_epsc_stride);
 }
 
 static inline void write_epsc_csr(struct hfi1_devdata *dd, int pidx,
@@ -3292,8 +3316,30 @@ static inline void write_epsc_csr(struct hfi1_devdata *dd, int pidx,
 	 * EPORT send context CSRs are separated by txe_eport_stride and
 	 * txe_epsc_stride.
 	 */
-	write_csr(dd, offset + (dd->params->txe_eport_stride * pidx)
-		  + (dd->params->txe_epsc_stride * sc), value);
+	write_ctxt_csr(dd, offset + (dd->params->txe_eport_stride * pidx),
+		       sc, dd->params->txe_epsc_stride, value);
+}
+
+static inline u64 read_epscarr_csr(const struct hfi1_devdata *dd, int pidx,
+				   int sc, u32 offset)
+{
+	/*
+	 * EPORT send context array CSRs are separated by txe_eport_stride and
+	 * a per-context stride of 8.
+	 */
+	return read_ctxt_csr(dd, offset + (dd->params->txe_eport_stride * pidx),
+			     sc, 8);
+}
+
+static inline void write_epscarr_csr(struct hfi1_devdata *dd, int pidx,
+				     int sc, u32 offset, u64 value)
+{
+	/*
+	 * EPORT send context array CSRs are separated by txe_eport_stride and
+	 * a per-context stride of 8.
+	 */
+	write_ctxt_csr(dd, offset + (dd->params->txe_eport_stride * pidx),
+		       sc, 8, value);
 }
 
 static inline u32 rhe_rcv_type_err(struct hfi1_packet *packet)
