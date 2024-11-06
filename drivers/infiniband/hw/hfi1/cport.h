@@ -82,14 +82,17 @@ struct cport_who_payload {
 	u16 max_aux;	/* max cport aux length */
 };
 
-/* Fields in 3-qword payload of HOW response */
+/* Fields in 4-qword payload of HOW response */
 struct cport_how_payload {
 	/* qword 1 */
-	u16 pt0_log_st:2;
-	u16 pt1_log_st:2;
-	u16 pt2_log_st:2;
-	u16 pt3_log_st:2;
-	u16 interop:8;
+	u16 pt0_log_st:3;
+	u16 _resv_q1_3:1;
+	u16 pt1_log_st:3;
+	u16 _resv_q1_7:1;
+	u16 pt2_log_st:3;
+	u16 _resv_q1_11:1;
+	u16 pt3_log_st:3;
+	u16 _resv_q1_15:1;
 	struct cport_options opts_ena;
 	u16 pt0_phy_st:8;
 	u16 pt1_phy_st:8;
@@ -99,8 +102,14 @@ struct cport_how_payload {
 	struct cport_trap_status trap_ena;
 	struct cport_trap_status trap_sts;
 	/* qword 3 */
-	u64 started:8;
+	u64 interoperability_level:8;
 	u64 _resv1:56;
+	/* qword 4 */
+	u64 started:8;
+	u64 temp_valid:1;
+	u64 _resv_q4_9:7;
+	u64 temp:16;
+	u64 _resv2:32;
 };
 
 /* Fields in 1-qword payload of START request/response */

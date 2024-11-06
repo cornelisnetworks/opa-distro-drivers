@@ -138,6 +138,16 @@
 	(RVT_PROCESS_SEND_OK | RVT_FLUSH_SEND | RVT_PROCESS_RECV_OK)
 
 /*
+ * Internal relay of held Queue Pair lock state
+ */
+enum rvt_qp_lock_state {
+	RVT_QP_LOCK_STATE_NONE = 0,
+	RVT_QP_LOCK_STATE_S,
+	RVT_QP_LOCK_STATE_R,
+	RVT_QP_LOCK_STATE_RS
+};
+
+/*
  * Internal send flags
  */
 #define RVT_SEND_RESERVE_USED           IB_SEND_RESERVED_START
@@ -767,7 +777,8 @@ rvt_qp_swqe_incr(struct rvt_qp *qp, u32 val)
 	return val;
 }
 
-int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err);
+int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err,
+		 enum rvt_qp_lock_state lock_state);
 
 /**
  * rvt_recv_cq - add a new entry to completion queue
@@ -775,18 +786,20 @@ int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err);
  * @qp: receive queue
  * @wc: work completion entry to add
  * @solicited: true if @entry is solicited
+ * @lock_state: caller ownership representation of r and s lock
  *
  * This is wrapper function for rvt_enter_cq function call by
  * receive queue. If rvt_cq_enter return false, it means cq is
  * full and the qp is put into error state.
  */
 static inline void rvt_recv_cq(struct rvt_qp *qp, struct ib_wc *wc,
-			       bool solicited)
+			       bool solicited,
+			       enum rvt_qp_lock_state lock_state)
 {
 	struct rvt_cq *cq = ibcq_to_rvtcq(qp->ibqp.recv_cq);
 
 	if (unlikely(!rvt_cq_enter(cq, wc, solicited)))
-		rvt_error_qp(qp, IB_WC_LOC_QP_OP_ERR);
+		rvt_error_qp(qp, IB_WC_LOC_QP_OP_ERR, lock_state);
 }
 
 /**
@@ -795,18 +808,20 @@ static inline void rvt_recv_cq(struct rvt_qp *qp, struct ib_wc *wc,
  * @qp: send queue
  * @wc: work completion entry to add
  * @solicited: true if @entry is solicited
+ * @lock_state: caller ownership representation of r and s lock
  *
  * This is wrapper function for rvt_enter_cq function call by
  * send queue. If rvt_cq_enter return false, it means cq is
  * full and the qp is put into error state.
  */
 static inline void rvt_send_cq(struct rvt_qp *qp, struct ib_wc *wc,
-			       bool solicited)
+			       bool solicited,
+			       enum rvt_qp_lock_state lock_state)
 {
 	struct rvt_cq *cq = ibcq_to_rvtcq(qp->ibqp.send_cq);
 
 	if (unlikely(!rvt_cq_enter(cq, wc, solicited)))
-		rvt_error_qp(qp, IB_WC_LOC_QP_OP_ERR);
+		rvt_error_qp(qp, IB_WC_LOC_QP_OP_ERR, lock_state);
 }
 
 /**
@@ -829,13 +844,15 @@ static inline u32
 rvt_qp_complete_swqe(struct rvt_qp *qp,
 		     struct rvt_swqe *wqe,
 		     enum ib_wc_opcode opcode,
-		     enum ib_wc_status status)
+		     enum ib_wc_status status,
+		     enum rvt_qp_lock_state lock_state)
 {
 	bool need_completion;
 	u64 wr_id;
 	u32 byte_len, last;
 	int flags = wqe->wr.send_flags;
 
+	lockdep_assert_held(&qp->s_lock);
 	rvt_qp_wqe_unreserve(qp, flags);
 	rvt_put_qp_swqe(qp, wqe);
 
@@ -860,7 +877,8 @@ rvt_qp_complete_swqe(struct rvt_qp *qp,
 			.qp = &qp->ibqp,
 			.byte_len = byte_len,
 		};
-		rvt_send_cq(qp, &w, status != IB_WC_SUCCESS);
+		rvt_send_cq(qp, &w, status != IB_WC_SUCCESS,
+			    lock_state);
 	}
 	return last;
 }
@@ -886,7 +904,8 @@ void rvt_copy_sge(struct rvt_qp *qp, struct rvt_sge_state *ss,
 		  void *data, u32 length,
 		  bool release, bool copy_last);
 void rvt_send_complete(struct rvt_qp *qp, struct rvt_swqe *wqe,
-		       enum ib_wc_status status);
+		       enum ib_wc_status status,
+		       enum rvt_qp_lock_state lock_state);
 void rvt_ruc_loopback(struct rvt_qp *qp);
 
 /**

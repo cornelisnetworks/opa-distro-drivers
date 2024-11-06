@@ -103,6 +103,21 @@ struct cport_work {
 #define CW_FLAG_RS_ALLOC	0x08	/* response payload was kalloc'ed */
 
 /*
+ * Suspected lost interrupt, try to recover if possible.
+ */
+static void lost_mctxt_intr(struct hfi1_devdata *dd)
+{
+	u64 ints;
+
+	spin_lock(&dd->irq_src_lock); /* a compatible use of the lock */
+	ints = read_csr(dd, JKR_MCTXT_PF0_INT_STATUS_ENABLED);
+	/* if bits set, assume lost interrupt and attempt recovery. */
+	if (ints)
+		force_intr(dd, JKR_MCTXT_CPORT_TO_PCIE_INT);
+	spin_unlock(&dd->irq_src_lock);
+}
+
+/*
  * Acquire a reference to the message structure
  */
 static inline void cwget(struct cport_work *cw)
@@ -283,6 +298,7 @@ int cport_send_req(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, i
 			   msg->req.hdr.qw, ret);
 #endif
 		cport_send_cancel(dd, msg);
+		lost_mctxt_intr(dd); /* attempt recovery */
 		return ret;
 	}
 	return cport_send_comp(dd, msg, rsp_pld, rsp_len);
@@ -350,6 +366,7 @@ static void cport_send(struct cport_work *msg, bool req)
 		dd_dev_err(dd, "CPORT Send OUTBOX_EMPTY killed %016llx (%d)\n",
 			   msg->req.hdr.qw, ret);
 		cwput(msg);
+		lost_mctxt_intr(dd); /* attempt recovery */
 		return;	/* no way to report error to caller */
 	}
 	mc->hdr.seq_no = atomic_fetch_inc(&dd->cport->seqno);
