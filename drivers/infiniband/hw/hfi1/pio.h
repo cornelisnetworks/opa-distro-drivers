@@ -13,7 +13,7 @@
 #define SC_MAX    4	/* count of send context types */
 
 /* invalid send context index */
-#define INVALID_SCI 0xff
+#define INVALID_SCI 0xffff
 
 /* PIO buffer release callback function */
 typedef void (*pio_release_cb)(void *arg, int code);

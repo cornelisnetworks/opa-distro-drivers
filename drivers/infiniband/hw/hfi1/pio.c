@@ -815,14 +815,15 @@ struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 /* PIO Send Memory Address details */
 #define PIO_ADDR_CONTEXT_MASK 0xfful
 #define PIO_ADDR_CONTEXT_SHIFT 16
-	sc->base_addr = dd->piobase + ((hw_context & PIO_ADDR_CONTEXT_MASK)
-					<< PIO_ADDR_CONTEXT_SHIFT);
+	sc->base_addr = dd->bar_maps[ctxt_bar_idx(hw_context)].piobase
+			+ ((ctxt_bar_ctxt(hw_context) & PIO_ADDR_CONTEXT_MASK)
+				<< PIO_ADDR_CONTEXT_SHIFT);
 
 	/* set base and credits */
 	reg = ((sci->credits & SC(CTRL_CTXT_DEPTH_MASK))
 					<< SC(CTRL_CTXT_DEPTH_SHIFT))
 		| ((sci->base & MASK_ULL(dd->params->pio_base_bits))
-					<< SC(CTRL_CTXT_BASE_SHIFT));
+					<< dd->params->pio_base_shift);
 	write_tctxt_csr(dd, hw_context, dd->params->send_ctxt_ctrl_reg, reg);
 
 	dd->params->set_pio_integrity(sc, SPI_DEFAULT);
@@ -851,8 +852,7 @@ struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 		       ((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
 
 	/* set up credit return */
-	reg = dma & SC(CREDIT_RETURN_ADDR_ADDRESS_SMASK);
-	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_return_addr_reg, reg);
+	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_return_addr_reg, dma);
 
 	/*
 	 * Calculate the initial credit return threshold.
@@ -1089,8 +1089,8 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 
 	while (1) {
 		reg_prev = reg;
-		reg = read_eport_csr(dd, ppd->hw_pidx, sc->hw_context * 8 +
-				     dd->params->send_egress_ctxt_status_reg);
+		reg = read_epscarr_csr(dd, ppd->hw_pidx, sc->hw_context,
+				       dd->params->send_egress_ctxt_status_reg);
 		/* done if any halt bits, SW or HW are set */
 		if (sc->flags & SCF_HALTED ||
 		    is_sc_halted(dd, sc->hw_context) || egress_halted(reg))
@@ -1419,9 +1419,8 @@ int sc_enable(struct send_context *sc)
 	 * should not be in use, so we don't have to wait for the
 	 * InProgress bit to go down.
 	 */
-	pio = ((sc->hw_context & SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_MASK) <<
-	       SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_SHIFT) |
-		SEND_PIO_INIT_CTXT_PIO_SINGLE_CTXT_INIT_SMASK;
+	pio = (sc->hw_context << SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_SHIFT) |
+	      SEND_PIO_INIT_CTXT_PIO_SINGLE_CTXT_INIT_SMASK;
 	write_csr(dd, dd->params->send_pio_init_ctxt_reg, pio);
 	/*
 	 * Wait until the engine is done.  Give the chip the required time

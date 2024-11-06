@@ -919,7 +919,8 @@ static void hfi1_qp_iter_cb(struct rvt_qp *qp, u64 v)
 	spin_lock_irq(&qp->r_lock);
 	spin_lock(&qp->s_hlock);
 	spin_lock(&qp->s_lock);
-	lastwqe = rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
+	lastwqe = rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR,
+			       RVT_QP_LOCK_STATE_RS);
 	spin_unlock(&qp->s_lock);
 	spin_unlock(&qp->s_hlock);
 	spin_unlock_irq(&qp->r_lock);

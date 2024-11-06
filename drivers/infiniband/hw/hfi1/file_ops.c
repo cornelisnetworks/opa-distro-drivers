@@ -156,7 +156,7 @@ static int hfi1_file_open(struct inode *inode, struct file *fp)
 					       struct hfi1_devdata,
 					       user_cdev);
 
-	if (!((dd->flags & HFI1_PRESENT) && dd->kregbase1))
+	if (!(dd->flags & HFI1_PRESENT))
 		return -EINVAL;
 
 	if (!refcount_inc_not_zero(&dd->user_refcount))
@@ -368,6 +368,8 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 	u8 mapio = 0, vmf = 0;
 	ssize_t memlen = 0;
 	int ret = 0;
+	u32 cbi;
+	u32 cbc;
 	u16 ctxt;
 	u16 subctxt;
 
@@ -389,9 +391,11 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 	switch (type) {
 	case PIO_BUFS:
 	case PIO_BUFS_SOP:
-		memaddr = ((dd->physaddr + TXE_PIO_SEND) +
+		cbi = ctxt_bar_idx(uctxt->sc->hw_context);
+		cbc = ctxt_bar_ctxt(uctxt->sc->hw_context);
+		memaddr = ((dd->bar_maps[cbi].physaddr + TXE_PIO_SEND) +
 				/* chip pio base */
-			   (uctxt->sc->hw_context * BIT(16))) +
+			   (cbc * BIT(16))) +
 				/* 64K PIO space / ctxt */
 			(type == PIO_BUFS_SOP ?
 				(TXE_PIO_SIZE / 2) : 0); /* sop? */
@@ -509,9 +513,11 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 		 * UCTXT block.  The TidFlow table is contained within this
 		 * memory range.
 		 */
-		memaddr = (unsigned long)dd->physaddr +
+		cbi = ctxt_bar_idx(uctxt->ctxt);
+		cbc = ctxt_bar_ctxt(uctxt->ctxt);
+		memaddr = (unsigned long)dd->bar_maps[cbi].physaddr +
 				dd->params->rcv_hdr_tail_reg +
-				(uctxt->ctxt * dd->params->rxe_uctxt_stride);
+				(cbc * dd->params->rxe_uctxt_stride);
 		memlen = dd->params->rxe_uctxt_stride;
 		// hack: accept a 4K mmap for uregs
 		{

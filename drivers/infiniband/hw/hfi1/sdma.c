@@ -1447,7 +1447,7 @@ int sdma_init(struct hfi1_devdata *dd)
 	struct sdma_engine *sde;
 	struct rhashtable *tmp_sdma_rht;
 	u16 descq_cnt;
-	void *curr_head;
+	u64 offset;
 	struct hfi1_pportdata *ppd;
 	u32 per_sdma_credits;
 	u32 chip_engines;
@@ -1649,18 +1649,13 @@ int sdma_init(struct hfi1_devdata *dd)
 		goto bail;
 	}
 
-	/* assign each engine to different cacheline and init registers */
-	curr_head = (void *)dd->sdma_heads_dma;
+	/* assign each engine to a different cacheline and init registers */
+	offset = 0;
 	for (this_idx = 0; this_idx < num_engines; ++this_idx) {
-		unsigned long phys_offset;
-
 		sde = &dd->per_sdma[this_idx];
-
-		sde->head_dma = curr_head;
-		curr_head += L1_CACHE_BYTES;
-		phys_offset = (unsigned long)sde->head_dma -
-			      (unsigned long)dd->sdma_heads_dma;
-		sde->head_phys = dd->sdma_heads_phys + phys_offset;
+		sde->head_dma = (void *)dd->sdma_heads_dma + offset;
+		sde->head_phys = dd->sdma_heads_phys + offset;
+		offset += L1_CACHE_BYTES;
 		init_sdma_regs(sde, per_sdma_credits, idle_cnt);
 	}
 	dd->flags |= HFI1_HAS_SEND_DMA;
@@ -2284,9 +2279,9 @@ static void sdma_dumpstate_int(struct sdma_engine *sde, u32 is_base,
 	int mask;
 	int blocked;
 
-	status = !!(read_csr(dd, CCE_INT_STATUS + reg_off) & reg_mask);
-	mask = !!(read_csr(dd, CCE_INT_MASK + reg_off) & reg_mask);
-	blocked = !!(read_csr(dd, CCE_INT_BLOCKED + reg_off) & reg_mask);
+	status = !!(read_csr(dd, dd->params->cce_int_status_reg + reg_off) & reg_mask);
+	mask = !!(read_csr(dd, dd->params->cce_int_mask_reg + reg_off) & reg_mask);
+	blocked = !!(read_csr(dd, dd->params->cce_int_blocked_reg + reg_off) & reg_mask);
 
 	dd_dev_err(dd, "%41s[%02u] status:%d mask:%d blocked:%d\n",
 		   what, sde->this_idx, status, mask, blocked);
@@ -3720,7 +3715,7 @@ void _sdma_engine_progress_schedule(struct sdma_engine *sde)
 	trace_hfi1_sdma_engine_progress(sde, sde->progress_mask);
 	/* assume we have selected a good cpu */
 	write_csr(sde->dd,
-		  CCE_INT_FORCE + (8 * (sde->dd->params->is_sdma_start / 64)),
+		  sde->dd->params->cce_int_force_reg + (8 * (sde->dd->params->is_sdma_start / 64)),
 		  sde->progress_mask);
 }
 
