@@ -47,7 +47,8 @@ int hfi1_make_uc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		}
 		clear_ahg(qp);
 		wqe = rvt_get_swqe_ptr(qp, qp->s_last);
-		rvt_send_complete(qp, wqe, IB_WC_WR_FLUSH_ERR);
+		rvt_send_complete(qp, wqe, IB_WC_WR_FLUSH_ERR,
+				  RVT_QP_LOCK_STATE_S);
 		goto done_free_tx;
 	}
 
@@ -100,7 +101,8 @@ int hfi1_make_uc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 				local_ops = 1;
 			}
 			rvt_send_complete(qp, wqe, err ? IB_WC_LOC_PROT_ERR
-							: IB_WC_SUCCESS);
+							: IB_WC_SUCCESS,
+					  RVT_QP_LOCK_STATE_S);
 			if (local_ops)
 				atomic_dec(&qp->local_ops_pending);
 			goto done_free_tx;
@@ -430,7 +432,8 @@ last_imm:
 		wc.dlid_path_bits = 0;
 		wc.port_num = 0;
 		/* Signal completion event if the solicited bit is set. */
-		rvt_recv_cq(qp, &wc, ib_bth_is_solicited(ohdr));
+		rvt_recv_cq(qp, &wc, ib_bth_is_solicited(ohdr),
+			    RVT_QP_LOCK_STATE_R);
 		break;
 
 	case OP(RDMA_WRITE_FIRST):

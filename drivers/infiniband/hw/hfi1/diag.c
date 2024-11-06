@@ -393,7 +393,7 @@ static ssize_t diagpkt_send(struct diag_pkt *dp)
 	int trycount = 0;
 
 	dd = hfi1_lookup(dp->unit);
-	if (!dd || !(dd->flags & HFI1_PRESENT) || !dd->kregbase1) {
+	if (!dd || !(dd->flags & HFI1_PRESENT)) {
 		ret = -ENODEV;
 		goto bail;
 	}
@@ -1985,7 +1985,7 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 				rvt_send_complete(
 					qp,
 					qp->s_wqe,
-					IB_WC_SUCCESS);
+					IB_WC_SUCCESS, RVT_QP_LOCK_STATE_S);
 				spin_unlock_irqrestore(&qp->s_lock, flags);
 			} else if (qp->ibqp.qp_type == IB_QPT_RC) {
 				spin_lock_irqsave(&qp->s_lock, flags);

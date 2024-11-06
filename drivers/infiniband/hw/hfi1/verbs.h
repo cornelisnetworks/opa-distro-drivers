@@ -447,10 +447,11 @@ void hfi1_wait_kmem(struct rvt_qp *qp);
 
 static inline void hfi1_trdma_send_complete(struct rvt_qp *qp,
 					    struct rvt_swqe *wqe,
-					    enum ib_wc_status status)
+					    enum ib_wc_status status,
+					    enum rvt_qp_lock_state lock_state)
 {
 	trdma_clean_swqe(qp, wqe);
-	rvt_send_complete(qp, wqe, status);
+	rvt_send_complete(qp, wqe, status, lock_state);
 }
 
 extern const enum ib_wc_opcode ib_hfi1_wc_opcode[];

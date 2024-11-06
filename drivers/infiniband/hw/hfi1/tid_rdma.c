@@ -2574,7 +2574,7 @@ ack_op_err:
 	 * all remaining requests.
 	 */
 	if (qp->s_last == qp->s_acked)
-		rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
+		rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR, RVT_QP_LOCK_STATE_RS);
 
 ack_done:
 	spin_unlock_irqrestore(&qp->s_lock, flags);
@@ -4200,13 +4200,14 @@ void hfi1_rc_rcv_tid_rdma_write_resp(struct hfi1_packet *packet)
 ack_op_err:
 	status = IB_WC_LOC_QP_OP_ERR;
 ack_err:
-	rvt_error_qp(qp, status);
+	rvt_error_qp(qp, status, RVT_QP_LOCK_STATE_RS);
 ack_done:
 	if (fecn)
 		qp->s_flags |= RVT_S_ECN;
 	spin_unlock_irqrestore(&qp->s_lock, flags);
 }
 
+/* called with s_lock held */
 bool hfi1_build_tid_rdma_packet(struct rvt_swqe *wqe,
 				struct ib_other_headers *ohdr,
 				u32 *bth1, u32 *bth2, u32 *len)
@@ -4223,8 +4224,9 @@ bool hfi1_build_tid_rdma_packet(struct rvt_swqe *wqe,
 	bool last_pkt;
 
 	if (!tidlen) {
-		hfi1_trdma_send_complete(qp, wqe, IB_WC_REM_INV_RD_REQ_ERR);
-		rvt_error_qp(qp, IB_WC_REM_INV_RD_REQ_ERR);
+		hfi1_trdma_send_complete(qp, wqe, IB_WC_REM_INV_RD_REQ_ERR,
+					 RVT_QP_LOCK_STATE_S);
+		rvt_error_qp(qp, IB_WC_REM_INV_RD_REQ_ERR, RVT_QP_LOCK_STATE_S);
 	}
 
 	*len = min_t(u32, qp->pmtu, tidlen - flow->tid_offset);
@@ -4820,8 +4822,10 @@ static void hfi1_tid_retry_timeout(struct timer_list *t)
 				(u64)priv->tid_retry_timeout_jiffies);
 
 			wqe = rvt_get_swqe_ptr(qp, qp->s_acked);
-			hfi1_trdma_send_complete(qp, wqe, IB_WC_RETRY_EXC_ERR);
-			rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
+			hfi1_trdma_send_complete(qp, wqe, IB_WC_RETRY_EXC_ERR,
+						 RVT_QP_LOCK_STATE_RS);
+			rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR,
+				     RVT_QP_LOCK_STATE_RS);
 		} else {
 			wqe = rvt_get_swqe_ptr(qp, qp->s_acked);
 			req = wqe_to_tid_req(wqe);

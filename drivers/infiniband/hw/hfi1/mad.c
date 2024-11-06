@@ -6312,7 +6312,7 @@ static int cport_umad_handler(struct hfi1_devdata *dd, u8 op, u8 sideband,
 #ifdef CPORT_UMAD_TRACE
 	print_hex_dump(KERN_INFO, "MCTXT UMAD ", DUMP_PREFIX_OFFSET, 16, 1, mad, 64, false);
 #endif
-	rvt_recv_cq(qp0, &wc, false);
+	rvt_recv_cq(qp0, &wc, false, RVT_QP_LOCK_STATE_NONE);
 out:
 	rcu_read_unlock();
 	return ret;

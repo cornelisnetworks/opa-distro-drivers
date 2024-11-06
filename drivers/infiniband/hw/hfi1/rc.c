@@ -357,11 +357,7 @@ normal_no_state:
 	return 1;
 error_qp:
 	spin_unlock_irqrestore(&qp->s_lock, ps->flags);
-	spin_lock_irqsave(&qp->r_lock, ps->flags);
-	spin_lock(&qp->s_lock);
-	rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
-	spin_unlock(&qp->s_lock);
-	spin_unlock_irqrestore(&qp->r_lock, ps->flags);
+	rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR, RVT_QP_LOCK_STATE_NONE);
 	spin_lock_irqsave(&qp->s_lock, ps->flags);
 bail:
 	qp->s_ack_state = OP(ACKNOWLEDGE);
@@ -448,7 +444,8 @@ int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		clear_ahg(qp);
 		wqe = rvt_get_swqe_ptr(qp, qp->s_last);
 		hfi1_trdma_send_complete(qp, wqe, qp->s_last != qp->s_acked ?
-					 IB_WC_SUCCESS : IB_WC_WR_FLUSH_ERR);
+					 IB_WC_SUCCESS : IB_WC_WR_FLUSH_ERR,
+					 RVT_QP_LOCK_STATE_S);
 		/* will get called again */
 		goto done_free_tx;
 	}
@@ -523,7 +520,8 @@ check_s_state:
 				}
 				rvt_send_complete(qp, wqe,
 						  err ? IB_WC_LOC_PROT_ERR
-						      : IB_WC_SUCCESS);
+						      : IB_WC_SUCCESS,
+						  RVT_QP_LOCK_STATE_S);
 				if (local_ops)
 					atomic_dec(&qp->local_ops_pending);
 				goto done_free_tx;
@@ -1063,7 +1061,8 @@ no_flow_control:
 			hfi1_kern_exp_rcv_clear_all(req);
 			hfi1_kern_clear_hw_flow(priv->rcd, qp);
 
-			hfi1_trdma_send_complete(qp, wqe, IB_WC_LOC_QP_OP_ERR);
+			hfi1_trdma_send_complete(qp, wqe, IB_WC_LOC_QP_OP_ERR,
+						 RVT_QP_LOCK_STATE_S);
 			goto bail;
 		}
 		req->state = TID_REQUEST_RESEND;
@@ -1612,8 +1611,10 @@ void hfi1_restart_rc(struct rvt_qp *qp, u32 psn, int wait)
 				}
 
 				hfi1_trdma_send_complete(qp, wqe,
-							 IB_WC_RETRY_EXC_ERR);
-				rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
+							 IB_WC_RETRY_EXC_ERR,
+							 RVT_QP_LOCK_STATE_RS);
+				rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR,
+					     RVT_QP_LOCK_STATE_RS);
 			}
 			return;
 		} else { /* need to handle delayed completion */
@@ -1806,7 +1807,7 @@ void hfi1_rc_send_complete(struct rvt_qp *qp, struct hfi1_opa_header *opah)
 		rvt_qp_complete_swqe(qp,
 				     wqe,
 				     ib_hfi1_wc_opcode[wqe->wr.opcode],
-				     IB_WC_SUCCESS);
+				     IB_WC_SUCCESS, RVT_QP_LOCK_STATE_S);
 	}
 	/*
 	 * If we were waiting for sends to complete before re-sending,
@@ -1838,6 +1839,7 @@ struct rvt_swqe *do_rc_completion(struct rvt_qp *qp,
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 
+	lockdep_assert_held(&qp->r_lock);
 	lockdep_assert_held(&qp->s_lock);
 	/*
 	 * Don't decrement refcount and don't generate a
@@ -1849,10 +1851,10 @@ struct rvt_swqe *do_rc_completion(struct rvt_qp *qp,
 	    cmp_psn(qp->s_sending_psn, qp->s_sending_hpsn) > 0) {
 		trdma_clean_swqe(qp, wqe);
 		trace_hfi1_qp_send_completion(qp, wqe, qp->s_last);
-		rvt_qp_complete_swqe(qp,
-				     wqe,
+		rvt_qp_complete_swqe(qp, wqe,
 				     ib_hfi1_wc_opcode[wqe->wr.opcode],
-				     IB_WC_SUCCESS);
+				     IB_WC_SUCCESS,
+				     RVT_QP_LOCK_STATE_RS);
 	} else {
 		struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 
@@ -1969,7 +1971,7 @@ static void update_qp_retry_state(struct rvt_qp *qp, u32 psn, u32 spsn,
  *
  * This is called from rc_rcv_resp() to process an incoming RC ACK
  * for the given QP.
- * May be called at interrupt level, with the QP s_lock held.
+ * May be called at interrupt level. Both r and s lock should be held.
  * Returns 1 if OK, 0 if current operation should be aborted (NAK).
  */
 int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode,
@@ -1984,6 +1986,7 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode,
 	int diff;
 	struct rvt_dev_info *rdi;
 
+	lockdep_assert_held(&qp->r_lock);
 	lockdep_assert_held(&qp->s_lock);
 	/*
 	 * Note that NAKs implicitly ACK outstanding SEND and RDMA write
@@ -2243,8 +2246,10 @@ class_b:
 				if (wqe->wr.opcode == IB_WR_TID_RDMA_READ)
 					hfi1_kern_read_tid_flow_free(qp);
 
-				hfi1_trdma_send_complete(qp, wqe, status);
-				rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
+				hfi1_trdma_send_complete(qp, wqe, status,
+							 RVT_QP_LOCK_STATE_RS);
+				rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR,
+					     RVT_QP_LOCK_STATE_RS);
 			}
 			break;
 
@@ -2276,6 +2281,7 @@ static void rdma_seq_err(struct rvt_qp *qp, struct hfi1_ibport *ibp, u32 psn,
 {
 	struct rvt_swqe *wqe;
 
+	lockdep_assert_held(&qp->r_lock);
 	lockdep_assert_held(&qp->s_lock);
 	/* Remove QP from retry timer */
 	rvt_stop_rc_timers(qp);
@@ -2483,8 +2489,8 @@ ack_len_err:
 	status = IB_WC_LOC_LEN_ERR;
 ack_err:
 	if (qp->s_last == qp->s_acked) {
-		rvt_send_complete(qp, wqe, status);
-		rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
+		rvt_send_complete(qp, wqe, status, RVT_QP_LOCK_STATE_RS);
+		rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR, RVT_QP_LOCK_STATE_RS);
 	}
 ack_done:
 	spin_unlock_irqrestore(&qp->s_lock, flags);
@@ -2978,7 +2984,8 @@ send_last:
 		wc.dlid_path_bits = 0;
 		wc.port_num = 0;
 		/* Signal completion event if the solicited bit is set. */
-		rvt_recv_cq(qp, &wc, ib_bth_is_solicited(ohdr));
+		rvt_recv_cq(qp, &wc, ib_bth_is_solicited(ohdr),
+			    RVT_QP_LOCK_STATE_R);
 		break;
 
 	case OP(RDMA_WRITE_ONLY):
