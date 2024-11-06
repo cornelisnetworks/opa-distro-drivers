@@ -515,3 +515,33 @@ int cport_start_link(struct hfi1_pportdata *ppd, struct opa_port_info *pi)
 
 	return cport_set_link_state(ppd, pi, HLS_DN_POLL);
 }
+
+/* ask cport firmware for the temperature */
+int cport_read_temp(struct hfi1_devdata *dd, s16 *gen_temp)
+{
+	struct cport_how_payload *how = NULL;
+	int resp_len = 0;
+	int ret;
+
+	ret = cport_send_req(dd, CH_OP_HOW, 0, NULL, 0, (void **)&how, &resp_len, HZ);
+	if (ret) {
+		dd_dev_err(dd, "CPORT how failed %d\n", ret);
+		goto done;
+	}
+	if (resp_len != sizeof(*how)) {
+		dd_dev_err(dd, "CPORT how invalid response length %d (expected %ld)\n",
+			   resp_len, sizeof(*how));
+		ret = -EINVAL;
+		goto done;
+	}
+	if (!how->temp_valid) {
+		ret = -EOPNOTSUPP;
+		goto done;
+	}
+
+	*gen_temp = (s16)how->temp;
+
+done:
+	kfree(how);
+	return ret;
+}

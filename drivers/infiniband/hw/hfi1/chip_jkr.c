@@ -29,7 +29,7 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 	dd->first_send_context = 0;
 	dd->first_pio_block = 0;
 	for (i = 0; i < num_send; i++) {
-		val = read_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * i));
+		val = read_ctxt_csr(dd, JKR_SEND_CTXT_SI_IDX, i, 8);
 		if (val == 0) {		/* 0 means pf0 */
 			/* this context is for the driver */
 			if (!found_first_unused) {
@@ -50,7 +50,7 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 			}
 			/* read PIO send resources for this context */
 			val = read_tctxt_csr(dd, i, dd->params->send_ctxt_ctrl_reg);
-			base = (val >> SEND_CTXT_CTRL_CTXT_BASE_SHIFT) &
+			base = (val >> JKR_SEND_CTXT_CTRL_CTXT_BASE_SHIFT) &
 				MASK_ULL(dd->params->pio_base_bits);
 			size = (val >> SEND_CTXT_CTRL_CTXT_DEPTH_SHIFT) &
 				SEND_CTXT_CTRL_CTXT_DEPTH_MASK;
@@ -58,7 +58,7 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 				    i, base, size);
 			/*
 			 * Expect the non-driver contexts to use the blocks in
-			 * increasing groups.  Warn otherise.  This is a simple
+			 * increasing groups.  Warn otherwise.  This is a simple
 			 * attempt to warn if there may be wasted reserved
 			 * blocks.  I.e. no holes.  Doing this right would
 			 * involve much more complicated range lists that are
@@ -128,7 +128,7 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 
 			/*
 			 * Expect the non-driver contexts to use the entries in
-			 * increasing groups.  Warn otherise.  This is a simple
+			 * increasing groups.  Warn otherwise.  This is a simple
 			 * attempt to warn if there may be wasted reserved
 			 * blocks.  I.e. no holes.  Doing this right would
 			 * involve much more complicated range lists that are
@@ -148,7 +148,7 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 	 * Look for RSM rules being used.
 	 */
 	for (i = 0; i < dd->params->rsm_rule_size; i++) {
-		val = read_csr(dd, RCV_RSM_CFG + (8 * i));
+		val = read_csr(dd, JKR_RCV_RSM_CFG + (8 * i));
 		if (val == 0)
 			break;
 	}
@@ -550,8 +550,14 @@ static inline u32 rcvarray_offset(u32 ctxt, u32 index, u32 type)
 #define JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT 17
 #define JKR_RCV_ARRAY_CSR_INDEX_SHIFT 3
 	return (type == PT_EAGER ? 0 : BIT(JKR_RCV_ARRAY_EGR_TID_SELECT_SHIFT))
-	       | (ctxt << JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT)
+	       | (ctxt_bar_ctxt(ctxt) << JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT)
 	       | (index << JKR_RCV_ARRAY_CSR_INDEX_SHIFT);
+}
+
+static inline u8 __iomem *rcvarray_addr(struct hfi1_devdata *dd, u32 ctxt,
+					u32 index, u32 type)
+{
+	return dd->bar_maps[ctxt_bar_idx(ctxt)].rcvarray_wc + rcvarray_offset(ctxt, index, type);
 }
 
 /*
@@ -569,21 +575,21 @@ void jkr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
 {
 	struct hfi1_devdata *dd = rcd->dd;
 	u64 reg;
-	u32 offset;
+	u8 __iomem *addr;
 
 	if (!(dd->flags & HFI1_PRESENT))
 		return;
 
 	trace_hfi1_put_tid(dd, index, type, pa, order);
-	offset = rcvarray_offset(rcd->ctxt, index, type);
+	addr = rcvarray_addr(dd, rcd->ctxt, index, type);
 
 #define RT_ADDR_SHIFT 12	/* 4KB kernel address boundary */
 	/* eager and expected have the same layout */
 	reg =   RCV_ARRAY_RT_WRITE_ENABLE_SMASK
 	      | ((u64)order << JKR_RCV_ARRAY_EGR_RT_BUF_SIZE_SHIFT)
 	      | (pa >> RT_ADDR_SHIFT);
-	trace_hfi1_write_rcvarray(dd->rcvarray_wc + offset, reg);
-	writeq(reg, dd->rcvarray_wc + offset);
+	trace_hfi1_write_rcvarray(addr, reg);
+	writeq(reg, addr);
 
 	if (type == PT_EAGER || flush || (index & 3) == 3)
 		flush_wc();
@@ -598,9 +604,9 @@ void jkr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
  */
 void jkr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type)
 {
-	u32 offset = rcvarray_offset(rcd->ctxt, index, type);
+	u8 __iomem *addr = rcvarray_addr(rcd->dd, rcd->ctxt, index, type);
 
-	writeq(0, rcd->dd->rcvarray_wc + offset);
+	writeq(0, addr);
 	if ((index & 3) == 3)
 		flush_wc();
 }
@@ -619,7 +625,7 @@ void jkr_init_tids(struct hfi1_devdata *dd)
 	u64 temp;
 	u32 loops = chip_rcv_array_count(dd) / step_size;
 	u32 i, j;
-	u32 offset;
+	u8 __iomem *addr;
 
 	save = read_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg);
 	for (i = 0; i < loops; i++) {
@@ -630,8 +636,8 @@ void jkr_init_tids(struct hfi1_devdata *dd)
 		write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, temp);
 		/* write empty entries */
 		for (j = 0; j < step_size; j++) {
-			offset = rcvarray_offset(ctxt, j, PT_EAGER);
-			writeq(value, dd->rcvarray_wc + offset);
+			addr = rcvarray_addr(dd, ctxt, j, PT_EAGER);
+			writeq(value, addr);
 			if ((j & 3) == 3)
 				flush_wc();
 		}

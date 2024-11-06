@@ -107,18 +107,26 @@ void hfi1_pcie_cleanup(struct pci_dev *pdev)
 }
 
 /*
- * Do remaining PCIe setup, once dd is allocated, and save away
- * fields required to re-initialize after a chip reset, or for
- * various other purposes
+ * Map a single 64-bit BAR.  Expect each BAR to have the same ranges.
+ * This will set:
+ *	dd->bar_map[idx]
+ *	dd->revision (BAR 0 only)
+ *	dd->base2_start (BAR 0 only)
  */
-int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
+static int do_bar_map(struct hfi1_devdata *dd, struct pci_dev *pdev, int idx)
 {
 	unsigned long len;
 	resource_size_t addr;
-	int ret = 0;
+	struct bar_map *bm = &dd->bar_maps[idx];
+	int pci_bar_idx = 2 * idx; /* PCIe 64-bit BAR: 0/1, 2/3, or 4/5 */
 
-	addr = pci_resource_start(pdev, 0);
-	len = pci_resource_len(pdev, 0);
+	addr = pci_resource_start(pdev, pci_bar_idx);
+	len = pci_resource_len(pdev, pci_bar_idx);
+
+	if (idx > 0 && len == 0) {
+		/* BAR not used - ignore */
+		return 0;
+	}
 
 	/*
 	 * The TXE PIO buffers are at the tail end of the chip space.
@@ -131,60 +139,102 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 		return -EINVAL;
 	}
 
-	dd->kregbase1 = ioremap(addr, dd->params->kreg1_size);
-	if (!dd->kregbase1) {
-		dd_dev_err(dd, "UC mapping of kregbase1 failed\n");
+	bm->kregbase1 = ioremap(addr, dd->params->kreg1_size);
+	if (!bm->kregbase1) {
+		dd_dev_err(dd, "BAR %d: UC mapping of kregbase1 failed\n", idx);
 		return -ENOMEM;
 	}
-	dd_dev_info(dd, "UC base1: %p for %x\n", dd->kregbase1,
+	dd_dev_info(dd, "BAR %d: UC base1 %p, len %x\n", idx, bm->kregbase1,
 		    dd->params->kreg1_size);
 
-	/* verify that reads actually work, save revision for reset check */
-	dd->revision = readq(dd->kregbase1 + CCE_REVISION);
-	if (dd->revision == ~(u64)0) {
-		dd_dev_err(dd, "Cannot read chip CSRs\n");
-		goto nomem;
+	/* bar 0 only actions */
+	if (idx == 0) {
+		/* verify that reads work, save revision for reset check */
+		dd->revision = readq(bm->kregbase1 + CCE_REVISION);
+		if (dd->revision == ~(u64)0) {
+			dd_dev_err(dd, "Cannot read chip CSRs\n");
+			return -EINVAL;
+		}
+		/* cache base2 offset value */
+		dd->base2_start = dd->params->kreg2_offset;
 	}
 
-	dd->base2_start = dd->params->kreg2_offset;
-
-	dd->kregbase2 = ioremap(addr + dd->base2_start,
+	bm->kregbase2 = ioremap(addr + dd->base2_start,
 				dd->params->kreg2_size);
-	if (!dd->kregbase2) {
-		dd_dev_err(dd, "UC mapping of kregbase2 failed\n");
-		goto nomem;
+	if (!bm->kregbase2) {
+		dd_dev_err(dd, "BAR %d: UC mapping of kregbase2 failed\n", idx);
+		return -ENOMEM;
 	}
-	dd_dev_info(dd, "UC base2: %p for %x\n", dd->kregbase2,
+	dd_dev_info(dd, "BAR %d: UC base2 %p, len %x\n", idx, bm->kregbase2,
 		    dd->params->kreg2_size);
 
-	dd->piobase = ioremap_wc(addr + TXE_PIO_SEND, TXE_PIO_SIZE);
-	if (!dd->piobase) {
-		dd_dev_err(dd, "WC mapping of send buffers failed\n");
-		goto nomem;
+	bm->piobase = ioremap_wc(addr + TXE_PIO_SEND, TXE_PIO_SIZE);
+	if (!bm->piobase) {
+		dd_dev_err(dd, "BAR %d: WC mapping of send buffers failed\n", idx);
+		return -ENOMEM;
 	}
-	dd_dev_info(dd, "WC piobase: %p for %x\n", dd->piobase, TXE_PIO_SIZE);
+	dd_dev_info(dd, "BAR %d: WC piobase %p, len %x\n", idx, bm->piobase, TXE_PIO_SIZE);
 
-	dd->physaddr = addr;        /* used for io_remap, etc. */
+	bm->physaddr = addr;        /* used for io_remap, etc. */
 
 	/*
 	 * Map the chip's RcvArray as write-combining to allow us
 	 * to write an entire cacheline worth of entries in one shot.
 	 */
-	dd->rcvarray_wc = ioremap_wc(addr + dd->params->rcv_array_offset,
+	bm->rcvarray_wc = ioremap_wc(addr + dd->params->rcv_array_offset,
 				     dd->params->rcv_array_size);
-	if (!dd->rcvarray_wc) {
-		dd_dev_err(dd, "WC mapping of receive array failed\n");
-		goto nomem;
+	if (!bm->rcvarray_wc) {
+		dd_dev_err(dd, "BAR %d: WC mapping of receive array failed\n", idx);
+		return -ENOMEM;
 	}
-	dd_dev_info(dd, "WC RcvArray: %p for %x\n",
-		    dd->rcvarray_wc, dd->params->rcv_array_size);
+	dd_dev_info(dd, "BAR %d: WC RcvArray %p, len %x\n", idx,
+		    bm->rcvarray_wc, dd->params->rcv_array_size);
 
-	dd->flags |= HFI1_PRESENT;	/* chip.c CSR routines now work */
 	return 0;
-nomem:
-	ret = -ENOMEM;
+}
+
+/*
+ * Do remaining PCIe setup, once dd is allocated, and save away
+ * fields required to re-initialize after a chip reset, or for
+ * various other purposes
+ */
+int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
+{
+	int ret;
+
+	ret = do_bar_map(dd, pdev, 0);
+	if (ret)
+		goto fail;
+	ret = do_bar_map(dd, pdev, 1);
+	if (ret)
+		goto fail;
+	ret = do_bar_map(dd, pdev, 2);
+	if (ret)
+		goto fail;
+
+	dd->flags |= HFI1_PRESENT;	/* CSR access routines now work */
+	return 0;
+fail:
 	hfi1_pcie_ddcleanup(dd);
 	return ret;
+}
+
+static void do_bar_unmap(struct hfi1_devdata *dd, int idx)
+{
+	struct bar_map *bm = &dd->bar_maps[idx];
+
+	if (bm->kregbase1)
+		iounmap(bm->kregbase1);
+	bm->kregbase1 = NULL;
+	if (bm->kregbase2)
+		iounmap(bm->kregbase2);
+	bm->kregbase2 = NULL;
+	if (bm->rcvarray_wc)
+		iounmap(bm->rcvarray_wc);
+	bm->rcvarray_wc = NULL;
+	if (bm->piobase)
+		iounmap(bm->piobase);
+	bm->piobase = NULL;
 }
 
 /*
@@ -195,18 +245,9 @@ nomem:
 void hfi1_pcie_ddcleanup(struct hfi1_devdata *dd)
 {
 	dd->flags &= ~HFI1_PRESENT;
-	if (dd->kregbase1)
-		iounmap(dd->kregbase1);
-	dd->kregbase1 = NULL;
-	if (dd->kregbase2)
-		iounmap(dd->kregbase2);
-	dd->kregbase2 = NULL;
-	if (dd->rcvarray_wc)
-		iounmap(dd->rcvarray_wc);
-	dd->rcvarray_wc = NULL;
-	if (dd->piobase)
-		iounmap(dd->piobase);
-	dd->piobase = NULL;
+	do_bar_unmap(dd, 0);
+	do_bar_unmap(dd, 1);
+	do_bar_unmap(dd, 2);
 }
 
 /* return the PCIe link speed from the given link status */
