@@ -34,7 +34,7 @@ int msix_initialize(struct hfi1_devdata *dd)
 	 */
 	total = 1 + (dr->last_sdma_engine - dr->first_sdma_engine);
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		total += pr->n_krcv_queues + pr->num_netdev_contexts +
 			 pr->num_bulksvc_contexts;
@@ -322,7 +322,7 @@ int msix_request_irqs(struct hfi1_devdata *dd)
 	}
 
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		for (j = 0; j < pr->n_krcv_queues; j++) {
 			u16 ctxt = pr->rcv_context_base + j;
