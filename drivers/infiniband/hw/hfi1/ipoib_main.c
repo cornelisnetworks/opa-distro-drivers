@@ -253,7 +253,7 @@ int hfi1_ipoib_rn_get_params(struct ib_device *device,
 
 	if (!port_num || port_num > dd->num_pports)
 		return -EINVAL;
-	pr = &dr->ppd[port_num - 1];
+	pr = &dr->ppr[port_num - 1];
 
 	if (!HFI1_CAP_IS_KSET(AIP) || !pr->num_netdev_contexts)
 		return -EOPNOTSUPP;

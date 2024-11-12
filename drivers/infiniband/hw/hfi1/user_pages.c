@@ -65,9 +65,9 @@ bool hfi1_can_pin_pages(struct hfi1_devdata *dd, struct mm_struct *mm,
 		 */
 		usr_ctxts = 0;
 		for (pidx = 0; pidx < dd->num_pports; pidx++)
-			usr_ctxts += (dd->rsrcs.ppd[pidx].num_rcv_contexts -
-				      dd->rsrcs.ppd[pidx].n_krcv_queues -
-				      dd->rsrcs.ppd[pidx].num_bulksvc_contexts);
+			usr_ctxts += (dd->rsrcs.ppr[pidx].num_rcv_contexts -
+				      dd->rsrcs.ppr[pidx].n_krcv_queues -
+				      dd->rsrcs.ppr[pidx].num_bulksvc_contexts);
 		if (nlocked + npages > (ulimit_pages / usr_ctxts / 4))
 			return false;
 	}

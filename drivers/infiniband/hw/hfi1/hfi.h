@@ -1469,7 +1469,7 @@ struct hfi1_devrsrcs {
 	/*
 	 * The rest are not valid until driver runs set_up_context_variables()
 	 */
-	struct hfi1_portrsrcs ppd[LARGEST_NUM_PORTS];
+	struct hfi1_portrsrcs ppr[LARGEST_NUM_PORTS];
 };
 
 typedef int (*send_routine)(struct rvt_qp *, struct hfi1_pkt_state *, u64);
@@ -1911,7 +1911,7 @@ void hfi1_make_ud_req_16B(struct rvt_qp *qp,
 /* return true if the port is available for use */
 static inline bool port_available_ppd(struct hfi1_pportdata *ppd)
 {
-	struct hfi1_portrsrcs *pr = &ppd->dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &ppd->dd->rsrcs.ppr[ppd->hw_pidx];
 
 	/* check is only valid after set_up_context_variables() is called */
 	return pr->n_krcv_queues != 0;
@@ -2036,7 +2036,7 @@ static inline u8 kctxt_hdrqentsize(struct hfi1_pportdata *ppd)
 {
 	struct hfi1_ctxtdata *rcd;
 	struct hfi1_devrsrcs *dr = &ppd->dd->rsrcs;
-	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dr->ppr[ppd->hw_pidx];
 
 	/* use default if port not available */
 	if (!port_available_ppd(ppd))
