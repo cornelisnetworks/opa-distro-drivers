@@ -197,7 +197,7 @@ static int hfi1_netdev_rxq_init(struct hfi1_netdev_rx *rx)
 	struct hfi1_pportdata *ppd = rx->ppd;
 	struct net_device *dev = rx->rx_napi;
 
-	rx->num_rx_q = dd->rsrcs.ppd[rx->ppd->hw_pidx].num_netdev_contexts;
+	rx->num_rx_q = dd->rsrcs.ppr[rx->ppd->hw_pidx].num_netdev_contexts;
 	rx->rxq = kcalloc_node(rx->num_rx_q, sizeof(*rx->rxq),
 			       GFP_KERNEL, dd->node);
 

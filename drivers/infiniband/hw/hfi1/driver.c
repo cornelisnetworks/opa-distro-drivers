@@ -939,7 +939,7 @@ static void set_all_fastpath(struct hfi1_ctxtdata *rcd)
 {
 	struct hfi1_devdata *dd = rcd->dd;
 	struct hfi1_pportdata *ppd = rcd->ppd;
-	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[ppd->hw_pidx];
 	u16 i;
 
 // FIXME: This comment is incorrect about vnic.  Talk to Denny.
@@ -969,7 +969,7 @@ static void set_all_fastpath(struct hfi1_ctxtdata *rcd)
 void set_all_slowpath(struct hfi1_pportdata *ppd)
 {
 	struct hfi1_devdata *dd = ppd->dd;
-	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[ppd->hw_pidx];
 	struct hfi1_ctxtdata *rcd;
 	u16 i;
 
@@ -1217,7 +1217,7 @@ void receive_interrupt_work(struct work_struct *work)
 	struct hfi1_pportdata *ppd = container_of(work, struct hfi1_pportdata,
 						  linkstate_active_work);
 	struct hfi1_devdata *dd = ppd->dd;
-	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[ppd->hw_pidx];
 	struct hfi1_ctxtdata *rcd;
 	u16 i;
 
