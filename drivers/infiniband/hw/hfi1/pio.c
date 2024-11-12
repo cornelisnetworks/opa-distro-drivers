@@ -311,7 +311,7 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 		}
 		newcnt = 0;
 		for (pidx = 0; pidx < dd->num_pports; ++pidx) {
-			struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+			struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 			if (!port_available_pidx(dd, pidx))
 				continue;
 
@@ -1281,7 +1281,7 @@ void pio_kernel_unfreeze(struct hfi1_devdata *dd)
 
 	/* bulksvc contexts are SC_USER send contexts */
 	for (p = 0; p < dd->num_pports; p++) {
-		pr = &dd->rsrcs.ppd[p];
+		pr = &dd->rsrcs.ppr[p];
 		for (i = pr->first_bulksvc_alloc_ctxt;
 		     i < pr->first_dyn_alloc_ctxt; i++) {
 			rcd = hfi1_rcd_get_by_index(dd, i);
@@ -1329,7 +1329,7 @@ void pio_kernel_linkup(struct hfi1_pportdata *ppd)
 	if (!dd->bulksvc)
 		return;
 
-	pr = &dd->rsrcs.ppd[ppd->port - 1];
+	pr = &dd->rsrcs.ppr[ppd->port - 1];
 	/* bulksvc contexts are SC_USER send contexts */
 	for (i = pr->first_bulksvc_alloc_ctxt;
 	     i < pr->first_dyn_alloc_ctxt; i++) {

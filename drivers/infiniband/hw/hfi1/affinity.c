@@ -603,7 +603,7 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 
 	max_krcvq = 0;
 	for (i = 0; i < dd->num_pports; ++i) {
-		struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[i];
+		struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[i];
 
 		if (pr->n_krcv_queues > max_krcvq)
 			max_krcvq = pr->n_krcv_queues;
@@ -664,7 +664,7 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 			 */
 			count = 0;
 			for (i = 0; i < dd->num_pports; i++) {
-				struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[i];
+				struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[i];
 
 				if (pr->n_krcv_queues)
 					count += pr->n_krcv_queues - 1;

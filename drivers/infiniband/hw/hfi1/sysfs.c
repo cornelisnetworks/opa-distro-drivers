@@ -406,7 +406,7 @@ static ssize_t num_ctxts_show(struct ib_device *ibdev, u32 port_num,
 			      struct ib_port_attribute *attr, char *buf)
 {
 	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
-	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[port_num - 1];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[port_num - 1];
 
 	return sysfs_emit(buf, "%u\n", pr->num_user_contexts);
 }
@@ -487,7 +487,7 @@ static ssize_t nctxts_show(struct device *device,
 
 	total = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++)
-		total += dd->rsrcs.ppd[pidx].num_user_contexts;
+		total += dd->rsrcs.ppr[pidx].num_user_contexts;
 
 	return sysfs_emit(buf, "%u\n", total);
 }
@@ -661,7 +661,7 @@ static ssize_t hw_resources_show(struct device *device,
 			     dr->c.first_pio_block, dr->c.last_pio_block - 1);
 
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		if (!pr->num_rcv_contexts) {
 			off += sysfs_emit_at(buf, off, "p%d not used\n", pidx);
