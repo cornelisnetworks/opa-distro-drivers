@@ -874,7 +874,7 @@ int hfi1_create_kctxts(struct hfi1_devdata *dd)
 
 	for (i = 0; i < dd->num_pports; i++) {
 		struct hfi1_pportdata *ppd = dd->pport + i;
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		for (j = 0; j < pr->n_krcv_queues; j++) {
 			u16 ctxt = pr->rcv_context_base + j;
@@ -888,7 +888,7 @@ int hfi1_create_kctxts(struct hfi1_devdata *dd)
 	return 0;
 bail:
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		for (j = 0; j < pr->n_krcv_queues; j++) {
 			u16 ctxt = pr->rcv_context_base + j;
@@ -974,7 +974,7 @@ static int allocate_rcd_index(struct hfi1_pportdata *ppd,
 			      struct hfi1_ctxtdata *rcd, u16 *index)
 {
 	struct hfi1_devdata *dd = ppd->dd;
-	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[ppd->hw_pidx];
 	unsigned long flags;
 	u16 ctxt = *index;
 	bool found;
@@ -1048,7 +1048,7 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa, u16 ctxt,
 {
 	struct hfi1_devdata *dd = ppd->dd;
 	struct hfi1_devrsrcs *dr = &dd->rsrcs;
-	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dr->ppr[ppd->hw_pidx];
 	struct hfi1_ctxtdata *rcd;
 
 	rcd = kzalloc_node(sizeof(*rcd), GFP_KERNEL, numa);
@@ -1399,7 +1399,7 @@ static int init_after_reset(struct hfi1_devdata *dd)
 	 * for the driver data structures, not chip registers.
 	 */
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		for (j = 0; j < pr->num_rcv_contexts; j++) {
 			u16 ctxt = pr->rcv_context_base + j;
@@ -1457,7 +1457,7 @@ static void enable_chip(struct hfi1_devdata *dd)
 	 * Other ctxts done as user opens and initializes them.
 	 */
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		for (j = 0; j < pr->n_krcv_queues; j++) {
 			u16 ctxt = pr->rcv_context_base + j;
@@ -1632,7 +1632,7 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 
 	/* dd->rcd can be NULL if early initialization failed */
 	for (pidx = 0; dd->rcd && pidx < dd->num_pports; pidx++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		for (i = 0; i < pr->n_krcv_queues; ++i) {
 			u16 ctxt = pr->rcv_context_base + i;
@@ -1797,7 +1797,7 @@ static void shutdown_device(struct hfi1_devdata *dd)
 	}
 
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		ppd = dd->pport + pidx;
 		for (i = 0; i < pr->num_rcv_contexts; i++) {

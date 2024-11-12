@@ -111,7 +111,7 @@ static int _opcode_stats_seq_show(struct seq_file *s, void *v)
 	int pidx;
 
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		for (j = 0; j < pr->n_krcv_queues; j++) {
 			u16 ctxt = pr->rcv_context_base + j;

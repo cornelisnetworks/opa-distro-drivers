@@ -332,7 +332,7 @@ struct hfi1_ctxtdata *qp_to_rcd(struct rvt_qp *qp)
 	ppd = &dd->pport[qp->port_num - 1];
 
 	if (qp->ibqp.qp_num == 0)
-		ctxt = dd->rsrcs.ppd[ppd->hw_pidx].rcv_context_base + HFI1_CTRL_CTXT;
+		ctxt = dd->rsrcs.ppr[ppd->hw_pidx].rcv_context_base + HFI1_CTRL_CTXT;
 	else
 		ctxt = hfi1_get_qp_map(ppd, qp->ibqp.qp_num >> ppd->qos_shift);
 	return dd->rcd[ctxt];

@@ -581,7 +581,7 @@ struct net_device *hfi1_vnic_alloc_rn(struct ib_device *device,
 
 	if (!port_num || (port_num > dd->num_pports))
 		return ERR_PTR(-EINVAL);
-	pr = &dr->ppd[port_num - 1];
+	pr = &dr->ppr[port_num - 1];
 
 	if (!pr->num_netdev_contexts)
 		return ERR_PTR(-EOPNOTSUPP);
