@@ -1248,7 +1248,7 @@ static int find_sub_ctxt(struct hfi1_filedata *fd,
 	struct hfi1_ctxtdata *uctxt;
 	struct hfi1_devdata *dd = fd->dd;
 	struct hfi1_pportdata *ppd = fd->ppd;
-	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[ppd->hw_pidx];
 	u16 i;
 	int ret;
 
@@ -1278,7 +1278,7 @@ static bool any_user_allocated_contexts(struct hfi1_devdata *dd)
 	int i;
 
 	for (i = 0; i < dd->num_pports; i++) {
-		if (dd->pport[i].freectxts != dr->ppd[i].num_user_contexts)
+		if (dd->pport[i].freectxts != dr->ppr[i].num_user_contexts)
 			return true;
 	}
 	return false;
@@ -1920,7 +1920,7 @@ int hfi1_set_uevent_bits(struct hfi1_pportdata *ppd, const int evtbit)
 {
 	struct hfi1_ctxtdata *uctxt;
 	struct hfi1_devdata *dd = ppd->dd;
-	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[ppd->hw_pidx];
 	u16 ctxt;
 
 	if (!dd->events)

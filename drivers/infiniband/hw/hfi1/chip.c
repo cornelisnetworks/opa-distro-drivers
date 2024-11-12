@@ -6869,7 +6869,7 @@ static void rxe_freeze(struct hfi1_devdata *dd)
 
 	/* disable all receive contexts */
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		/* disable port */
 		clear_rcvctrl(&dd->pport[i], RCV_CTRL_RCV_PORT_ENABLE_SMASK);
@@ -6900,7 +6900,7 @@ static void rxe_kernel_unfreeze(struct hfi1_devdata *dd)
 	/* enable all kernel contexts */
 	for (i = 0; i < dd->num_pports; i++) {
 		struct hfi1_pportdata *ppd = dd->pport + i;
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		for (j = 0; j < pr->num_rcv_contexts; j++) {
 			u16 ctxt = pr->rcv_context_base + j;
@@ -12252,20 +12252,16 @@ void set_hdrq_regs(struct hfi1_pportdata *ppd, u16 ctxt, u8 entsize, u16 hdrcnt,
 /* this is a type of kernel context */
 bool is_control_context(struct hfi1_ctxtdata *rcd)
 {
-	return rcd->ctxt == rcd->ppd->dd->rsrcs.ppd[rcd->ppd->hw_pidx].rcv_context_base +
+	return rcd->ctxt == rcd->ppd->dd->rsrcs.ppr[rcd->ppd->hw_pidx].rcv_context_base +
 			    HFI1_CTRL_CTXT;
 }
 
 /* includes control context */
 bool is_kernel_context(struct hfi1_ctxtdata *rcd)
 {
-	struct hfi1_pportdata *ppd = rcd->ppd;
-	struct hfi1_devrsrcs *dr = &ppd->dd->rsrcs;
-	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
 
 	/* assumes in sequential order from base */
-	return rcd->ctxt >= pr->rcv_context_base &&
-	       rcd->ctxt < pr->first_bulksvc_alloc_ctxt;
+	return rcd->ctxt < rcd->ppd->dd->rsrcs.ppr[rcd->ppd->hw_pidx].first_dyn_alloc_ctxt;
 }
 
 /* includes user and vnic contexts */
@@ -12273,7 +12269,7 @@ bool is_dynamic_context(struct hfi1_ctxtdata *rcd)
 {
 	struct hfi1_pportdata *ppd = rcd->ppd;
 	struct hfi1_devrsrcs *dr = &ppd->dd->rsrcs;
-	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dr->ppr[ppd->hw_pidx];
 
 	return rcd->ctxt >= pr->first_dyn_alloc_ctxt &&
 	       rcd->ctxt < (pr->rcv_context_base + pr->num_rcv_contexts);
@@ -13205,7 +13201,7 @@ static int init_cntrs(struct hfi1_devdata *dd)
 	 */
 	bitmap_fill(dd->ovf_disabled, MAX_CTXTS);
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+		struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 		for (j = 0; j < pr->num_rcv_contexts; j++) {
 			u16 ctxt = pr->rcv_context_base + j;
@@ -13867,7 +13863,7 @@ static bool hardware_pidx_available(struct hfi1_devdata *dd, int pidx)
  *
  * These fields are set:
  *
- * dd->rsrcs.ppd[*]:
+ * dd->rsrcs.ppr[*]:
  *   num_rcv_contexts	  - number of contexts being used for this port
  *   n_krcv_queues	  - number of kernel contexts for each port
  *			      (includes control context)
@@ -14047,7 +14043,7 @@ do_recalc:
 	total_rcv = 0; /* recalculate */
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		struct hfi1_pportdata *ppd = &dd->pport[pidx];
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		pr->n_krcv_queues = num_kernel_contexts[pidx];
 		pr->num_netdev_contexts = num_netdev_contexts[pidx];
@@ -14109,7 +14105,7 @@ do_recalc:
 
 	base = dr->c.first_rcvarray_entry;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		pr->rcv_array_base = base;
 		base += pr->num_rcv_contexts *
@@ -14140,7 +14136,7 @@ do_recalc:
 	rcv_pool_count = 0;
 	total_netdev = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
 		rcv_pool_count += pr->num_netdev_contexts + pr->num_user_contexts;
 		total_netdev += pr->num_netdev_contexts;
@@ -15160,7 +15156,7 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 {
 	struct hfi1_devdata *dd = ppd->dd;
 	struct hfi1_devrsrcs *dr = &dd->rsrcs;
-	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dr->ppr[ppd->hw_pidx];
 	unsigned int rcb = pr->rcv_context_base;
 	struct rsm_rule_data rrd;
 	unsigned int qpns_per_vl, extended_vl, ctxt, i, qpn, n, m;
@@ -15282,7 +15278,7 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 {
 	struct hfi1_devdata *dd = ppd->dd;
 	struct hfi1_devrsrcs *dr = &dd->rsrcs;
-	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &dr->ppr[ppd->hw_pidx];
 	struct rsm_rule_data rrd;
 	int i, idx, start, end;
 	u16 offset;
@@ -15666,7 +15662,7 @@ static int do_port_mapping(struct hfi1_pportdata *ppd,
 static int init_port_mapping(struct hfi1_pportdata *ppd,
 			     struct rsm_map_table *rmt)
 {
-	struct hfi1_portrsrcs *pr = &ppd->dd->rsrcs.ppd[ppd->hw_pidx];
+	struct hfi1_portrsrcs *pr = &ppd->dd->rsrcs.ppr[ppd->hw_pidx];
 	int ret;
 
 	/* no port mapping for WFR */
@@ -15741,7 +15737,7 @@ static int init_rxe(struct hfi1_devdata *dd)
 	 */
 
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[i];
+		struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[i];
 
 		u64 control = pr->rcv_context_base + HFI1_CTRL_CTXT;
 

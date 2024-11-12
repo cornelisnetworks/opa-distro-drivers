@@ -129,7 +129,7 @@ static int bulksvc_loan_rctxts(struct hfi1_devdata *dd,
 	/* store ctxdata pointer for dd->rcd[bulkvc_ctxts] */
 	for (i = 0; i < dd->num_pports; i++) {
 		ppd = dd->pport + i;
-		pr = &dr->ppd[i];
+		pr = &dr->ppr[i];
 		pp_rsrc = &pp_loan[i];
 		cnt = 0;
 
@@ -212,7 +212,7 @@ bail:
 		ret = -1;
 	for (; i >= 0; i--) {
 		ppd = dd->pport + i;
-		pr = &dr->ppd[i];
+		pr = &dr->ppr[i];
 		pp_rsrc = &pp_loan[i];
 		if (!pp_rsrc->rcd)
 			continue;
@@ -531,7 +531,7 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 	if (svc->rsrc.pp) {
 		/* free any bulksvc rctxts */
 		for (u32 i = 0; i < dd->num_pports; i++) {
-			struct hfi1_portrsrcs *pr = &dr->ppd[i];
+			struct hfi1_portrsrcs *pr = &dr->ppr[i];
 
 			for (u32 ctxt = pr->first_bulksvc_alloc_ctxt;
 			     ctxt < pr->first_dyn_alloc_ctxt; ctxt++) {
