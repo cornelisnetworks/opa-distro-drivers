@@ -146,20 +146,7 @@ int vf2pf_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si)
 		dd->irev = pdd->irev;
 		return 0;
 	}
-	/* TODO:
-	 * copy 'out' structure to message buffer, send to PF0 and get
-	 * response, copy results from message buffer to 'out'.
-	msg = kzalloc(...);
-	msg->op = GET_CONFIG;
-	memcpy(&msg->buf, out, sizeof(*out)); << TODO: anything to copyin?
-	ret = vf2pf_send_recv(dd, msg);
-	memcpy(out, &msg->buf, sizeof(*out));
-	dd->base_guid = msg->base_guid;
-	dd->revision = msg->revision;
-	dd->hfi1_id = msg->hfi1_id;
-	dd->icode = msg->icode;
-	dd->irev = msg->irev;
-	 */
+	/* TODO: send message to PF0 */
 	return -EINVAL;
 }
 
@@ -176,14 +163,7 @@ int vf2pf_assign_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
 
 		return hfi1_sriov_assign_rsrcs(pdd, vfr);
 	}
-	/* TODO:
-	 * copy 'vfr' structure to message buffer, send to PF0 and get
-	 * response.
-	msg = kzalloc(...);
-	msg->op = ASGN_RSRCS;
-	memcpy(&msg->buf, vfr, sizeof(*vfr));
-	ret = vf2pf_send_recv(dd, msg);
-	 */
+	/* TODO: send message to PF0 */
 	return -EINVAL;
 }
 
@@ -201,14 +181,7 @@ int vf2pf_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
 		hfi1_sriov_free_rsrcs(pdd, vfr);
 		return 0;
 	}
-	/* TODO:
-	 * copy 'vfr' structure to message buffer, send to PF0 and get
-	 * response.
-	msg = kzalloc(...);
-	msg->op = FREE_RSRCS;
-	memcpy(&msg->buf, vfr, sizeof(*vfr));
-	ret = vf2pf_send_recv(dd, msg);
-	 */
+	/* TODO: send message to PF0 */
 	return -EINVAL;
 }
 
@@ -222,15 +195,7 @@ int vf2pf_priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
 
 		return priv_reg_op(pdd, pidx, ctxt, type, op, arg);
 	}
-	/* TODO:
-	 * copy 'vfr' structure to message buffer, send to PF0 and get
-	 * response.
-	msg = kzalloc(...);
-	msg->op = SC_OP;
-	msg->... = ...;
-	ret = vf2pf_send_recv(dd, msg);
-	 * need return value... response status...
-	 */
+	/* TODO: send message to PF0 */
 	return -EINVAL;
 }
 
@@ -245,14 +210,7 @@ u64 pf0_read_csr(struct hfi1_devdata *dd, enum csr_type type, u32 off,
 
 		return read_csr_type(pdd, type, off, ctxt, pidx_eng);
 	}
-	/* TODO:
-	 * send 'off' to PF0 and get response.
-	msg = kzalloc(...);
-	msg->op = READ_CSR;
-	msg->off = off;
-	ret = vf2pf_send_recv(dd, msg);
-	return msg->reg;
-	 */
+	/* TODO: send message to PF0 */
 	return ~(u64)0; /* error */
 }
 
@@ -264,15 +222,7 @@ u64 pf0_rctxt_ctrl_op(struct hfi1_devdata *dd, u16 ctxt, unsigned int op)
 
 		return rctxt_ctrl_op(pdd, ctxt, op);
 	}
-	/* TODO:
-	 * send 'off' to PF0 and get response.
-	msg = kzalloc(...);
-	msg->op = RCTXT_CTRL;
-	msg->ctxt = ctxt;
-	msg->ctrl_op = op;
-	ret = vf2pf_send_recv(dd, msg);
-	return msg->reg;
-	 */
+	/* TODO: send message to PF0 */
 	return ~(u64)0; /* error */
 }
 
@@ -311,16 +261,8 @@ u16 vf2pf_get_qp_map(struct hfi1_devdata *dd, int pidx, u16 idx)
 
 		return hfi1_get_qp_map(pdd->pport + pidx, idx);
 	}
-	/* TODO:
-	 * send to PF0 and get response.
-	msg = kzalloc(...);
-	msg->op = GET_QP_MAP;
-	msg->pidx = pidx;
-	msg->idx = idx;
-	ret = vf2pf_send_recv(dd, msg);
-	return msg->reg;
-	 */
-	return 0xff; /* error(?) */
+	/* TODO: send message to PF0 */
+	return 0; /* guaranteed to error(?) */
 }
 
 /* TODO:
@@ -525,13 +467,13 @@ static ssize_t vf2pf_sync_store(struct device *device,
 
 static DEVICE_ATTR_WO(vf2pf_sync);
 
-void vf2pf_set_si_enables(struct hfi1_devdata *dd, int si,
+void vf2pf_set_si_enables(struct hfi1_devdata *dd, int si, u64 *csrs,
 			  void (*si_enables)(struct hfi1_devdata *dd,
-					     u64 base, u32 start, u32 end))
+					     u64 *csrs, u32 start, u32 end))
 {
 	if (!vf2pf_dev->set_si_enables)
 		return;
-	vf2pf_dev->set_si_enables(dd, si, si_enables);
+	vf2pf_dev->set_si_enables(dd, si, csrs, si_enables);
 }
 
 void vf2pf_ready(struct hfi1_devdata *dd)

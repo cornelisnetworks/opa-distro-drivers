@@ -228,11 +228,11 @@ int hfi1_sriov_assign_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *dr)
 		return 0;
 
 	for (x = dr->c.first_send_context; x < dr->c.last_send_context; ++x)
-		write_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * x), dr->si_idx);
+		write_tctxt_csr(dd, x, JKR_SEND_CTXT_SI_IDX, dr->si_idx);
 	for (x = dr->c.first_rcv_context; x < dr->c.last_rcv_context; ++x)
 		write_rctxt_csr(dd, x, JKR_RCV_SI_IDX, dr->si_idx);
 	for (x = dr->first_sdma_engine; x < dr->last_sdma_engine; ++x)
-		write_csr(dd, JKR_SEND_DMA_CFG_SI_IDX + (8 * x), dr->si_idx);
+		write_sdmacfg_csr(dd, x, JKR_SEND_DMA_CFG_SI_IDX, dr->si_idx);
 	return 0;
 }
 
@@ -265,11 +265,11 @@ void hfi1_sriov_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *dr)
 		return;
 
 	for (x = dr->c.first_send_context; x < dr->c.last_send_context; ++x)
-		write_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * x), 0);
+		write_tctxt_csr(dd, x, JKR_SEND_CTXT_SI_IDX, 0);
 	for (x = dr->c.first_rcv_context; x < dr->c.last_rcv_context; ++x)
 		write_rctxt_csr(dd, x, JKR_RCV_SI_IDX, 0);
 	for (x = dr->first_sdma_engine; x < dr->last_sdma_engine; ++x)
-		write_csr(dd, JKR_SEND_DMA_CFG_SI_IDX + (8 * x), 0);
+		write_sdmacfg_csr(dd, x, JKR_SEND_DMA_CFG_SI_IDX, 0);
 }
 
 /*
