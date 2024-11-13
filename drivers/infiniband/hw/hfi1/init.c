@@ -2546,10 +2546,6 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (ret)
 		goto free_dd;
 
-	/* TEMP: skip rest of init if SRIOV VF */
-	if (dd->is_vf)
-		goto sriov_skip;
-
 	ret = create_workqueues(dd);
 	if (ret)
 		goto pcie_cleanup;
@@ -2642,7 +2638,6 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	hfi1_sriov_auto_conf(dd);
 	vf2pf_ready(dd);
-sriov_skip:
 	return 0;
 
 destroy_wqs:
