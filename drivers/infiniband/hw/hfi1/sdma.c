@@ -239,7 +239,7 @@ static void sdma_set_state(struct sdma_engine *, enum sdma_states);
 static void sdma_start_hw_clean_up(struct sdma_engine *);
 static void sdma_sw_clean_up_worker(struct work_struct *);
 static void sdma_sendctrl(struct sdma_engine *, unsigned);
-static void init_sdma_regs(struct sdma_engine *, u32, uint);
+static void init_sdma_regs(struct sdma_engine *sde, u32 credit_offset, uint idle_cnt);
 static void sdma_process_event(
 	struct sdma_engine *sde,
 	enum sdma_events event);
@@ -1480,7 +1480,7 @@ int sdma_init(struct hfi1_devdata *dd)
 	u16 descq_cnt;
 	void *curr_head;
 	struct hfi1_pportdata *ppd;
-	u32 per_sdma_credits;
+	u32 per_sdma_credits = 0; /* not used on VFs */
 	u32 bulksvc_num_sdma;
 	u32 blk_start, blk_end;
 	u32 bulksvc_per_sdma_credits;
@@ -1498,10 +1498,14 @@ int sdma_init(struct hfi1_devdata *dd)
 	if (num_engines == 0)
 		return 0;
 
-	dd_dev_info(dd, "SDMA mod_num_sdma: %u\n", mod_num_sdma);
-	dd_dev_info(dd, "SDMA chip_sdma_engines: %u\n", chip_sdma_engines(dd));
-	dd_dev_info(dd, "SDMA chip_sdma_mem_size: %u\n",
-		    chip_sdma_mem_size(dd));
+	if (!dd->is_vf) {
+		dd_dev_info(dd, "SDMA mod_num_sdma: %u\n", mod_num_sdma);
+		dd_dev_info(dd, "SDMA chip_sdma_engines: %u\n", chip_sdma_engines(dd));
+		dd_dev_info(dd, "SDMA chip_sdma_mem_size: %u\n",
+			    chip_sdma_mem_size(dd));
+
+		per_sdma_credits = sdma_per_engine_credits(dd, num_engines);
+	}
 
 	dd->sdma_threshold = sdma_threshold;
 	dd->pad_sdma_desc = pad_sdma_desc;
@@ -1689,11 +1693,13 @@ int sdma_init(struct hfi1_devdata *dd)
 		if (!sde->tx_ring)
 			goto bail;
 	}
-	/* Clear SendDmaCfgMemory on disabled engines */
-	chip_engines = chip_sdma_engines(dd);
-	for (this_idx = num_engines; this_idx < chip_engines; ++this_idx)
-		write_sdmacfg_csr(dd, this_idx, dd->params->send_dma_cfg_memory_reg, 0);
-
+	if (!dd->is_vf) {
+		/* Clear SendDmaCfgMemory on disabled engines */
+		chip_engines = chip_sdma_engines(dd);
+		for (this_idx = num_engines; this_idx < chip_engines; ++this_idx)
+			write_sdmacfg_csr(dd, this_idx,
+					  dd->params->send_dma_cfg_memory_reg, 0);
+	}
 
 	dd->sdma_heads_size = L1_CACHE_BYTES *
 			      (dr->last_sdma_engine - dr->first_sdma_engine);
@@ -1717,6 +1723,18 @@ int sdma_init(struct hfi1_devdata *dd)
 
 	/* assign each engine to different cacheline and init registers */
 	curr_head = (void *)dd->sdma_heads_dma;
+	/* setup credits for all SDMA engines, only on PF0 (before SiIdx is set) */
+	if (!dd->is_vf) {
+		for (this_idx = 0; this_idx < dd->num_sdma; ++this_idx) {
+			/* dd->per_sdma[this_idx] are not initialized for all engines */
+			write_sdmacfg_csr(dd, this_idx, dd->params->send_dma_cfg_memory_reg,
+					  ((u64)per_sdma_credits <<
+					   SD(MEMORY_SDMA_MEMORY_CNT_SHIFT)) |
+					  ((u64)(per_sdma_credits * this_idx) <<
+					   SD(MEMORY_SDMA_MEMORY_INDEX_SHIFT)));
+		}
+	}
+
 	for (this_idx = dr->first_sdma_engine; this_idx < dr->last_sdma_engine; ++this_idx) {
 		unsigned long phys_offset;
 
@@ -1860,6 +1878,10 @@ void sdma_exit(struct hfi1_devdata *dd)
 	unsigned this_idx;
 	struct sdma_engine *sde;
 
+	/*
+	 * TODO: de-init any SRIOV usage. Handle VF callers.
+	 * In the mean time, can only exit engines known to us.
+	 */
 	for (this_idx = dr->first_sdma_engine;
 	     dd->per_sdma && this_idx < dr->last_sdma_engine;
 	     ++this_idx) {
@@ -2340,10 +2362,6 @@ static void init_sdma_regs(struct sdma_engine *sde, u32 credit_offset, uint idle
 	write_sde_csr(sde, dd->params->send_dma_reload_cnt_reg, idle_cnt);
 	write_sde_csr(sde, dd->params->send_dma_desc_cnt_reg, 0);
 	write_sde_csr(sde, dd->params->send_dma_head_addr_reg, sde->head_phys);
-	write_sdecfg_csr(sde, dd->params->send_dma_cfg_memory_reg,
-			 ((u64)credits << SD(MEMORY_SDMA_MEMORY_CNT_SHIFT)) |
-			 ((u64)(credit_offset) <<
-			  SD(MEMORY_SDMA_MEMORY_INDEX_SHIFT)));
 	write_sde_csr(sde, dd->params->send_dma_eng_err_mask_reg, ~0ull);
 	if (dd->params->chip_type == CHIP_WFR) {
 		/* SEND_DMA_CHECK_* are WFR only */
