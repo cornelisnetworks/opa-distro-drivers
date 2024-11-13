@@ -940,7 +940,8 @@ void hfi1_dealloc_filedata(struct hfi1_filedata *fdata)
 	 */
 	if (uctxt->sc) {
 		sc_disable(uctxt->sc);
-		dd->params->set_pio_integrity(uctxt->sc, SPI_DEFAULT);
+		priv_reg_op(dd, uctxt->sc->ppd->hw_pidx, uctxt->sc->hw_context,
+			    uctxt->sc->type, SC_CHK_ADJ_OP, 0);
 	}
 
 	hfi1_free_ctxt_rcv_groups(uctxt);
