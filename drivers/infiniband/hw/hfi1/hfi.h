@@ -688,7 +688,6 @@ struct rvt_sge_state;
 #define HFI1_RCVCTRL_NO_EGR_DROP_DIS 0x20000
 #define HFI1_RCVCTRL_URGENT_ENB 0x40000
 #define HFI1_RCVCTRL_URGENT_DIS 0x80000
-#define HFI1_RCVCTRL_TID_CONFIG 0x100000
 
 /* partition enforcement flags */
 #define HFI1_PART_ENFORCE_IN	0x1
@@ -1354,7 +1353,9 @@ struct chip_params {
 			u32 type, unsigned long pa, u16 order, bool flush);
 	void (*rcv_array_wc_fill)(struct hfi1_ctxtdata *rcd, u32 index,
 				  u32 type);
-	void (*set_port_tid_count)(struct hfi1_ctxtdata *rcd);
+	void (*set_port_tid_config)(struct hfi1_devdata *dd, int pidx, u16 ctxt,
+				    u32 eager_base, u16 alloced,
+				    u32 expected_base, u32 expected_count);
 	void (*set_port_max_mtu)(struct hfi1_pportdata *ppd, u32 maxvlmtu);
 	void (*update_rcv_hdr_size)(struct hfi1_pportdata *ppd, u16 ctxt,
 				    u32 size);
@@ -1362,7 +1363,8 @@ struct chip_params {
 	void (*update_synth_status)(struct hfi1_devdata *dd);
 	u64 (*create_pbc)(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs,
 			  u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
-	void (*set_pio_integrity)(struct send_context *sc, enum spi_cmds cmd);
+	void (*set_pio_integrity)(struct hfi1_devdata *dd, u32 pidx, u32 ctxt, int type,
+				  enum spi_cmds cmd);
 	int (*find_used_resources)(struct hfi1_devdata *dd);
 	void (*read_link_quality)(struct hfi1_pportdata *ppd, u8 *link_quality);
 	void (*set_rheq_addr)(struct hfi1_devdata *dd, u16 ctxt, u64 dma_addr);
@@ -3467,5 +3469,43 @@ static inline bool rhe_icrc_err(struct hfi1_packet *packet)
 	/* same bit location on WFR, JKR; different u64 */
 	return !!(packet->err_flags & RHF_ICRC_ERR);
 }
+
+enum preg_op {
+	SC_CHK_ALLOC_OP = 1,
+	SC_CHK_FREE_OP,
+	SC_CHK_VL_MASK_OP,
+	SC_CHK_SLID_OP,
+	SC_CHK_JKEY_OP,
+	SC_CHK_PKEY_OP,
+	SC_CHK_ADJ_OP,
+	SC_CHK_INIT_OP,
+	SC_ENABLE_OP,
+	SC_DISABLE_OP,
+	RC_ENABLE_OP,
+	RC_HEADER_OP,
+	LINK_BOUNCE_OP,
+};
+
+int priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
+		enum preg_op op, u64 arg);
+
+enum csr_type {
+	CSR_TYPE_IPORT = 1,
+	CSR_TYPE_IPRC,
+	CSR_TYPE_RCTXT,
+	CSR_TYPE_KCTXT,
+	CSR_TYPE_KU,
+	CSR_TYPE_UCTXT,
+	CSR_TYPE_SCTXT,
+	CSR_TYPE_TCTXT,
+	CSR_TYPE_SDMA,
+	CSR_TYPE_SDMACFG,
+	CSR_TYPE_EPORT,
+	CSR_TYPE_EPSC,
+	CSR_TYPE_EPSCARR,
+};
+
+u64 read_csr_type(struct hfi1_devdata *dd, enum csr_type type, u32 off,
+		  u16 ctxt, u8 pidx_eng);
 
 #endif                          /* _HFI1_KERNEL_H */

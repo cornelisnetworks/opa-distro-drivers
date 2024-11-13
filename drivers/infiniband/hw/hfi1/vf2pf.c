@@ -6,6 +6,7 @@
  */
 
 #include "hfi.h"
+#include "chip.h"
 #include "chip_gen.h"
 #include "sriov.h"
 #include "vf2pf_int.h"
@@ -16,12 +17,6 @@ MODULE_PARM_DESC(vf2pf_to, "Timeout for vf2pf responses, seconds, default 1");
 
 #define IS_LOCAL_VF(dd)		(!(dd)->is_vm)
 #define IS_LOCAL_VDD(vdd)	(vdd)
-
-/*
- * Add externs here for special access to hfi1 internals
- *
- * extern int something(struct hfi1_devdata *dd, ...);
- */
 
 static struct vf2pf_devops vf2pf_nodev = { };
 
@@ -217,6 +212,117 @@ int vf2pf_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
 	return -EINVAL;
 }
 
+int vf2pf_priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
+		      enum preg_op op, u64 arg)
+{
+	if (!dd->is_vf)
+		return -EINVAL;
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		return priv_reg_op(pdd, pidx, ctxt, type, op, arg);
+	}
+	/* TODO:
+	 * copy 'vfr' structure to message buffer, send to PF0 and get
+	 * response.
+	msg = kzalloc(...);
+	msg->op = SC_OP;
+	msg->... = ...;
+	ret = vf2pf_send_recv(dd, msg);
+	 * need return value... response status...
+	 */
+	return -EINVAL;
+}
+
+/* Called for PF0 and VFs */
+u64 pf0_read_csr(struct hfi1_devdata *dd, enum csr_type type, u32 off,
+		 u16 ctxt, u8 pidx_eng)
+{
+	if (!dd->is_vf)
+		return read_csr(dd, off);
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		return read_csr_type(pdd, type, off, ctxt, pidx_eng);
+	}
+	/* TODO:
+	 * send 'off' to PF0 and get response.
+	msg = kzalloc(...);
+	msg->op = READ_CSR;
+	msg->off = off;
+	ret = vf2pf_send_recv(dd, msg);
+	return msg->reg;
+	 */
+	return ~(u64)0; /* error */
+}
+
+/* Only called for VFs */
+u64 pf0_rctxt_ctrl_op(struct hfi1_devdata *dd, u16 ctxt, unsigned int op)
+{
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		return rctxt_ctrl_op(pdd, ctxt, op);
+	}
+	/* TODO:
+	 * send 'off' to PF0 and get response.
+	msg = kzalloc(...);
+	msg->op = RCTXT_CTRL;
+	msg->ctxt = ctxt;
+	msg->ctrl_op = op;
+	ret = vf2pf_send_recv(dd, msg);
+	return msg->reg;
+	 */
+	return ~(u64)0; /* error */
+}
+
+void vf2pf_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
+		      u32 eager_base, u16 alloced,
+		      u32 expected_base, u32 expected_count)
+{
+	if (!dd->is_vf)
+		return; /*should never happen */
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		pdd->params->set_port_tid_config(pdd, pidx, ctxt, eager_base, alloced,
+						 expected_base, expected_count);
+		return;
+	}
+	/* TODO:
+	 * send 'off' to PF0 and get response.
+	msg = kzalloc(...);
+	msg->op = TID_CONFIG;
+	msg->pidx = pidx;
+	msg->ctxt = ctxt;
+	msg->eager_base = eager_base;
+	msg->alloced = alloced;
+	msg->expected_base = expected_base;
+	msg->expected_count = expected_count;
+	ret = vf2pf_send_recv(dd, msg);
+	 */
+	dd_dev_err(dd, "%s not implemented\n", __func__);
+}
+
+u16 vf2pf_get_qp_map(struct hfi1_devdata *dd, int pidx, u16 idx)
+{
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		return hfi1_get_qp_map(pdd->pport + pidx, idx);
+	}
+	/* TODO:
+	 * send to PF0 and get response.
+	msg = kzalloc(...);
+	msg->op = GET_QP_MAP;
+	msg->pidx = pidx;
+	msg->idx = idx;
+	ret = vf2pf_send_recv(dd, msg);
+	return msg->reg;
+	 */
+	return 0xff; /* error(?) */
+}
+
 /* TODO:
  * Need a message handler for PF0 here. Receive a message from a VF,
  * determine 'si', make appropriate call, return results.
@@ -230,6 +336,9 @@ int vf2pf_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
 		break;
 	case FREE_RSRCS:
 		ret = hfi1_sriov_free_rsrcs(dd, &msg->buf);
+		break;
+	case SC_OP:
+		ret = priv_reg_op(dd, ...);
 		break;
 	...
 	}
