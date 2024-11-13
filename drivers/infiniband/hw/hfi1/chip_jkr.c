@@ -247,33 +247,106 @@ skip_guid:
 	return ret;
 }
 
-static void clear_si_int_enable(struct hfi1_devdata *dd, u32 src)
+static void set_si_int_enable_range(struct hfi1_devdata *dd, u64 *csrs, u32 start, u32 end)
 {
-	u32 idx = src / 8;
-	u32 bit = src % 8;
-	u64 val;
+	int i;
+	u32 idx;
+	u32 bit;
 
-	val = read_csr(dd, JKR_CCE_SI_INT_ENABLES + (8 * idx));
-	val &= ~(1ull << bit);
-	write_csr(dd, JKR_CCE_SI_INT_ENABLES + (8 * idx), val);
+	for (i = start; i < end; ++i) {
+		idx = i / 64;
+		bit = i % 64;
+		csrs[idx] |= (1ull << bit);
+	}
+}
+
+static void write_si_int_enable(struct hfi1_devdata *dd, int si, u64 *csrs)
+{
+	int i;
+	u32 base;
+
+	base = JKR_CCE_SI_INT_ENABLES + JKR_C_CCE_SI_INT_ENABLES_STRIDE * si;
+	for (i = 0; i < dd->params->num_int_csrs; ++i) {
+		write_csr(dd, base + (i * 8), csrs[i]);
+	}
 }
 
 /* non-RXE, non-TXE, csr init */
 void jkr_init_other(struct hfi1_devdata *dd)
 {
-	int i;
+	struct hfi1_devrsrcs dr;
+	int si, nsi;
+	u64 csrs[LARGEST_NUM_INT_CSRS];
+	u32 is_base;
 
 	if (dd->is_vf)
 		return; /* VFs can't access these CSRs */
 
-	/* enable all pf0 SI interrupts */
-	for (i = 0; i < dd->params->num_int_csrs; i++)
-		write_csr(dd, JKR_CCE_SI_INT_ENABLES + (8 * i), ~0ull);
-	/* .. remove a few */
-	for (i = JKR_ASIC_ERR_INT + 1; i <= JKR_IS_GENERAL_ERR_END; i++) {
-		if (i == JKR_MCTXT_CPORT_TO_PCIE_INT) /* keep enabled */
-			continue;
-		clear_si_int_enable(dd, i);
+	nsi = dd->rsrcs.num_vfs + 1; /* #VFs + PF0 */
+
+	/* Enable interrupts for each SI according to allocated resources */
+	for (si = 0; si < nsi; ++si) {
+		if (si)
+			sriov_get_config(dd, &dr, si);
+		else
+			dr = dd->rsrcs; /* TODO: avoid this copy? */
+		memset(csrs, 0, sizeof(csrs));
+		if (!si) {
+			set_si_int_enable_range(dd, csrs, JKR_IS_GENERAL_ERR_START,
+						JKR_ASIC_ERR_INT + 1);
+			set_si_int_enable_range(dd, csrs, JKR_MCTXT_CPORT_TO_PCIE_INT,
+						JKR_MCTXT_CPORT_TO_PCIE_INT + 1);
+		}
+		is_base = dd->params->is_sdmaeng_err_start;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.first_sdma_engine,
+					is_base + dr.last_sdma_engine);
+		is_base = JKR_IS_SENDCTXT_ERR_START;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.c.first_send_context,
+					is_base + dr.c.last_send_context);
+		is_base = dd->params->is_sdma_start;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.first_sdma_engine,
+					is_base + dr.last_sdma_engine);
+		is_base = dd->params->is_sdma_progress_start;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.first_sdma_engine,
+					is_base + dr.last_sdma_engine);
+		is_base = dd->params->is_sdma_idle_start;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.first_sdma_engine,
+					is_base + dr.last_sdma_engine);
+		is_base = dd->params->is_rcvavail_start;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.c.first_rcv_context,
+					is_base + dr.c.last_rcv_context);
+		is_base = dd->params->is_rcvurgent_start;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.c.first_rcv_context,
+					is_base + dr.c.last_rcv_context);
+		is_base = JKR_IS_SENDCREDIT_START;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.c.first_send_context,
+					is_base + dr.c.last_send_context);
+		is_base = JKR_IS_PBC_START;
+		set_si_int_enable_range(dd, csrs,
+					is_base + dr.c.first_send_context,
+					is_base + dr.c.last_send_context);
+		is_base = JKR_IS_PIO_ERR_START;
+		set_si_int_enable_range(dd, csrs,
+					is_base + si,
+					is_base + si + 1);
+		is_base = JKR_IS_SDMA_ERR_SI_START;
+		set_si_int_enable_range(dd, csrs,
+					is_base + si,
+					is_base + si + 1);
+		is_base = JKR_IS_CSR_ERR_START;
+		set_si_int_enable_range(dd, csrs,
+					is_base + si,
+					is_base + si + 1);
+		vf2pf_set_si_enables(dd, si, csrs, set_si_int_enable_range);
+		write_si_int_enable(dd, si, csrs);
 	}
 }
 

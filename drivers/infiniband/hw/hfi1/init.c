@@ -2473,12 +2473,10 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 #endif
 	/* VF in host driver - leave for KVM */
 	if (pdev->is_virtfn) {
-		/* It is theoretically possible for the host driver to claim
-		 * a VF, so there may need to be some decision made whether
-		 * to claim the device or leave it for KVM.
-		 */
-		/* TODO: how do we avoid claiming the device without
-		 * producing errors and possible SRIOV-enable failure.
+		/*
+		 * It is theoretically possible for the host driver to claim
+		 * a VF, so the decision whether to claim or not is made by
+		 * hfi1_sriov_init(). Returning ENODEV does not fail SRIOV init.
 		 */
 		ret = hfi1_sriov_init(pdev); /* may do nothing */
 		if (ret)
