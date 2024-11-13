@@ -22,9 +22,9 @@ int vf2pf_num_irq(struct hfi1_devdata *dd);
 int vf2pf_probe_si(struct hfi1_devdata *dd);
 void vf2pf_init_sysfs(struct hfi1_devdata *dd, struct device *class_dev);
 int vf2pf_sysfs_emit_at(struct hfi1_devdata *dd, char *buf, int at);
-void vf2pf_set_si_enables(struct hfi1_devdata *dd, int si,
+void vf2pf_set_si_enables(struct hfi1_devdata *dd, int si, u64 *csrs,
 			  void (*si_enables)(struct hfi1_devdata *dd,
-					     u64 base, u32 start, u32 end));
+					     u64 *csrs, u32 start, u32 end));
 
 /*
  * Add vf2pf_* methods here, to request actions from PF0
