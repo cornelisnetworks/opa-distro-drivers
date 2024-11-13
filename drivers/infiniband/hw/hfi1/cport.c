@@ -934,7 +934,7 @@ int cport_init(struct hfi1_devdata *dd)
 {
 	struct hfi1_cport *cport;
 
-	if (dd->params->chip_type == CHIP_WFR)
+	if (dd->params->chip_type == CHIP_WFR || dd->is_vf)
 		return 0;
 
 	cport = kzalloc(sizeof(*cport), GFP_KERNEL);

@@ -201,7 +201,10 @@ int jkr_mid_per_chip_init(struct hfi1_devdata *dd)
 {
 	struct cport_who_payload *who = NULL;
 	int resp_len = 0;
-	int ret;
+	int ret = 0;
+
+	if (dd->is_vf)
+		goto skip_guid; /* VFs can't access CPORT */
 
 	dd->base_guid = 0xabcd;	/* on success, a valid value is set */
 	ret = cport_send_req(dd, CH_OP_WHO, 0, NULL, 0, (void **)&who, &resp_len,
@@ -225,6 +228,8 @@ int jkr_mid_per_chip_init(struct hfi1_devdata *dd)
 		dd_dev_err(dd, "CPORT who invalid resp %d\n", resp_len);
 
 	kfree(who);
+skip_guid:
+	/* additional mid-init here */
 	return ret;
 }
 
@@ -243,6 +248,9 @@ static void clear_si_int_enable(struct hfi1_devdata *dd, u32 src)
 void jkr_init_other(struct hfi1_devdata *dd)
 {
 	int i;
+
+	if (dd->is_vf)
+		return; /* VFs can't access these CSRs */
 
 	/* enable all pf0 SI interrupts */
 	for (i = 0; i < dd->params->num_int_csrs; i++)

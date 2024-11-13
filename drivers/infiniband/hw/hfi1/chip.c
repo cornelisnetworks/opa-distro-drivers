@@ -1463,6 +1463,8 @@ static u64 port_access_txe32_csr(const struct cntr_entry *entry, void *context,
 	u32 csr = entry->csr + dd->params->send_counter_array32_reg +
 		  (dd->params->txe_eport_stride * ppd->hw_pidx);
 
+	if (dd->is_vf)
+		return 0;
 	return read_write_csr(dd, csr, mode, data);
 }
 
@@ -1474,6 +1476,8 @@ static u64 port_access_txe64_csr(const struct cntr_entry *entry, void *context,
 	u32 csr = entry->csr + dd->params->send_counter_array64_reg +
 		  (dd->params->txe_eport_stride * ppd->hw_pidx);
 
+	if (dd->is_vf)
+		return 0;
 	if (entry->flags & CNTR_VL) {
 		if (vl == CNTR_INVALID_VL)
 			return 0;
@@ -1494,6 +1498,8 @@ static u64 port_access_rxe32_csr(const struct cntr_entry *entry,
 	u32 csr = entry->csr + dd->params->rcv_counter_array32_reg +
 		  (dd->params->rxe_iport_stride * ppd->hw_pidx);
 
+	if (dd->is_vf)
+		return 0;
 	return read_write_csr(dd, csr, mode, data);
 }
 
@@ -1505,6 +1511,8 @@ static u64 port_access_rxe64_csr(const struct cntr_entry *entry,
 	u64 csr = entry->csr + dd->params->rcv_counter_array64_reg +
 		  (dd->params->rxe_iport_stride * ppd->hw_pidx);
 
+	if (dd->is_vf)
+		return 0;
 	return read_write_csr(dd, csr, mode, data);
 }
 
@@ -12500,9 +12508,9 @@ static void read_counters(struct hfi1_devdata *dd,
 			  void *context,
 			  u64 *results)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	const struct cntr_entry *entry;
 	u64 val;
-	u32 num_sdma = chip_sdma_engines(dd);
 	int i, j;
 
 	/* fill in each counter from the table */
@@ -12526,7 +12534,7 @@ static void read_counters(struct hfi1_devdata *dd,
 			}
 		} else if (entry->flags & CNTR_SDMA) {
 			hfi1_cdbg(CNTR, "\tPer SDMA Engine");
-			for (j = 0; j < num_sdma; j++) {
+			for (j = dr->first_sdma_engine; j < dr->last_sdma_engine; j++) {
 				val = entry->rw_cntr(entry, context, j,
 						     CNTR_MODE_R, 0);
 				hfi1_cdbg(CNTR, "\t\tRead 0x%llx for %d",
@@ -12564,12 +12572,20 @@ u32 hfi1_read_cntrs(struct hfi1_devdata *dd, char **namep, u64 **cntrp)
 		*namep = dd->cntrnames;
 		return dd->cntrnameslen;
 	}
+	if (dd->is_vf) {
+		/* TODO:
+		 * Which ocunters can be read on VF, what to do about others.
+		 * Cce*IntCnt's are all per-SI, others are only accessible by PF0.
+		 */
+		goto skip;
+	}
 
 	read_counters(dd, shared_dev_cntrs, SHARED_DEV_CNTR_LAST,
 		      dd, dd->cntrs);
 	read_counters(dd, dd->params->chip_dev_cntrs,
 		      dd->params->chip_num_dev_cntrs,
 		      dd, dd->cntrs);
+skip:
 	*cntrp = dd->cntrs;
 	return dd->ndevcntrs * sizeof(u64);
 }
@@ -14682,6 +14698,9 @@ static void init_sc2vl_tables(struct hfi1_devdata *dd)
 	/* init per architecture spec, constrained by hardware capability */
 
 	if (dd->params->chip_type != CHIP_WFR) {
+		/* TODO: how does a VF get initial sc2vlt? */
+		if (dd->is_vf)
+			return;
 		/* cport is active - read the current sc2vlt */
 		for (i = 0; i < dd->num_pports; i++) {
 			struct hfi1_pportdata *ppd = &dd->pport[i];
@@ -14881,6 +14900,9 @@ void init_kdeth_qp(struct hfi1_devdata *dd)
 {
 	u64 val;
 	int i;
+
+	if (dd->is_vf)
+		return; /* Only PF0 does this */
 
 	for (i = 0; i < dd->num_pports; i++) {
 		val = (RVT_KDETH_QP_PREFIX & SEND_BTH_QP_KDETH_QP_MASK) <<
@@ -15423,6 +15445,11 @@ static void hfi1_enable_rsm_rule(struct hfi1_pportdata *ppd,
 	struct hfi1_devdata *dd = ppd->dd;
 	int rule_index;
 
+	if (dd->is_vf) {
+		/* TODO: how does a VF get an RSM rule... can't access CSRs */
+		ppd_dev_err(ppd, "VFs can't yet setup RSM rules\n");
+		return;
+	}
 	/* lock is for setting netdev_rsm_rule */
 	mutex_lock(&hfi1_mutex);
 	if (ppd->netdev_rsm_rule >= 0) {
@@ -15699,6 +15726,10 @@ static int init_rxe(struct hfi1_devdata *dd)
 	int i;
 	int ret;
 
+	if (dd->is_vf) {
+		/* TODO: does any of this need to be done by PF0? */
+		return 0;
+	}
 	/* enable all receive errors */
 	for (i = 0; i < dd->num_pports; i++)
 		write_iport_csr(dd, i, dd->params->rcv_err_mask_reg, ~0ull);
@@ -15817,10 +15848,11 @@ static void init_txe(struct hfi1_devdata *dd)
 	write_csr(dd, dd->params->send_pio_err_mask_reg, ~0ull);
 	write_csr(dd, dd->params->send_dma_err_mask_reg, ~0ull);
 	write_csr(dd, dd->params->csr_err_mask_reg, ~0ull);
-	for (i = 0; i < dd->num_pports; i++) {
-		write_eport_csr(dd, i, dd->params->send_egress_err_mask_reg,
-				~0ull);
-	}
+	if (!dd->is_vf)
+		for (i = 0; i < dd->num_pports; i++) {
+			write_eport_csr(dd, i, dd->params->send_egress_err_mask_reg,
+					~0ull);
+		}
 
 	/* enable all per-context and per-SDMA engine errors */
 	for (i = dr->c.first_send_context; i < dr->c.last_send_context; i++)
@@ -16311,15 +16343,17 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	}
 
 	/*
-	 * obtain the hardware ID - NOT related to unit, which is a
-	 * software enumeration
+	 * Obtain the hardware ID - NOT related to unit, which is a
+	 * software enumeration. VFs can't access CSR directly.
 	 */
-	reg = read_csr(dd, CCE_REVISION2);
-	dd->hfi1_id = (reg >> CCE_REVISION2_HFI_ID_SHIFT)
-					& CCE_REVISION2_HFI_ID_MASK;
-	/* the variable size will remove unwanted bits */
-	dd->icode = reg >> CCE_REVISION2_IMPL_CODE_SHIFT;
-	dd->irev = reg >> CCE_REVISION2_IMPL_REVISION_SHIFT;
+	if (!dd->is_vf) {
+		reg = read_csr(dd, CCE_REVISION2);
+		dd->hfi1_id = (reg >> CCE_REVISION2_HFI_ID_SHIFT) &
+			      CCE_REVISION2_HFI_ID_MASK;
+		/* the variable size will remove unwanted bits */
+		dd->icode = reg >> CCE_REVISION2_IMPL_CODE_SHIFT;
+		dd->irev = reg >> CCE_REVISION2_IMPL_REVISION_SHIFT;
+	}
 	dd_dev_info(dd, "Implementation: %s, revision 0x%x\n",
 		    dd->icode < ARRAY_SIZE(inames) ?
 		    inames[dd->icode] : "unknown", (int)dd->irev);
@@ -16563,6 +16597,8 @@ static int thermal_init(struct hfi1_devdata *dd)
 {
 	int ret = 0;
 
+	if (dd->params->chip_type != CHIP_WFR)
+		return ret;
 	if (dd->icode != ICODE_RTL_SILICON ||
 	    dd->params->chip_type != CHIP_WFR ||
 	    check_chip_resource(dd, CR_THERM_INIT, NULL))
