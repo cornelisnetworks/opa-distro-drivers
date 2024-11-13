@@ -6,10 +6,14 @@
  */
 
 #include "hfi.h"
-#include "cport_traps.h"
 #include "chip_gen.h"
+#include "cport_traps.h"
+#include "vf2pf.h"
 
 #undef DEBUG_CPORT_TRAP
+
+/* TODO: this should not be defined in C files - needs common header */
+#define SC(name) SEND_CTXT_##name
 
 /*
  * Control the port LED state.  Cancel with gen_shutdown_led_override().
@@ -611,5 +615,203 @@ int cport_read_temp(struct hfi1_devdata *dd, struct cport_temp *gen_temp)
 		gen_temp->qsfp2 = (s16)how->qsfp2_temp;
 done:
 	kfree(how);
+	return ret;
+}
+
+/*
+ * Read a CSR based on type
+ *
+ * type - CSR_TYPE_*
+ * off - base offset of CSR
+ * ctxt - conext number, if type requires one
+ * pidx_eng - port index or SDMA engine number, depending on type
+ */
+u64 read_csr_type(struct hfi1_devdata *dd, enum csr_type type, u32 off,
+		  u16 ctxt, u8 pidx_eng)
+{
+	u64 reg = ~0ull;
+	switch (type) {
+	case CSR_TYPE_IPORT:
+		reg = read_iport_csr(dd, pidx_eng, off);
+		break;
+	case CSR_TYPE_IPRC:
+		reg = read_iprc_csr(dd, pidx_eng, ctxt, off);
+		break;
+	case CSR_TYPE_RCTXT:
+		reg = read_rctxt_csr(dd, ctxt, off);
+		break;
+	case CSR_TYPE_KCTXT:
+		reg = read_kctxt_csr(dd, ctxt, off);
+		break;
+	case CSR_TYPE_KU:
+		reg = read_ku_csr(dd, ctxt, off);
+		break;
+	case CSR_TYPE_UCTXT:
+		reg = read_uctxt_csr(dd, ctxt, off);
+		break;
+	case CSR_TYPE_SCTXT:
+		reg = read_sctxt_csr(dd, ctxt, off);
+		break;
+	case CSR_TYPE_TCTXT:
+		reg = read_tctxt_csr(dd, ctxt, off);
+		break;
+	case CSR_TYPE_SDMA:
+		reg = read_sdma_csr(dd, pidx_eng, off);
+		break;
+	case CSR_TYPE_SDMACFG:
+		reg = read_sdmacfg_csr(dd, pidx_eng, off);
+		break;
+	case CSR_TYPE_EPORT:
+		reg = read_eport_csr(dd, pidx_eng, off);
+		break;
+	case CSR_TYPE_EPSC:
+		reg = read_epsc_csr(dd, pidx_eng, ctxt, off);
+		break;
+	case CSR_TYPE_EPSCARR:
+		reg = read_epsc_csr(dd, pidx_eng, ctxt, off);
+		break;
+	}
+	return reg;
+}
+
+int priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
+		enum preg_op op, u64 arg)
+{
+	u8 opval, opmask;
+	u16 rctxt;
+	u64 reg;
+	int ret = 0;
+
+	rctxt = ctxt >> 16;
+	ctxt &= 0xffff;
+
+	if (dd->is_vf) {
+		ret = vf2pf_priv_reg_op(dd, pidx, ctxt, type, op, arg);
+		if (ret)
+			dd_dev_err(dd, "vf2pf_priv_reg_op(%d) failed %d\n", op, ret);
+		return ret;
+	}
+
+	/* Only PF0 has access to these CSRs */
+	switch (op) {
+	case SC_CHK_ALLOC_OP: /* 'arg' is send_ctxt_ctrl_reg value */
+		write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, arg);
+		dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_DEFAULT);
+		/* set the default partition key */
+		write_epsc_csr(dd, pidx, ctxt,
+			       dd->params->send_ctxt_check_partition_key_reg,
+			       (SC(CHECK_PARTITION_KEY_VALUE_MASK) &
+			       DEFAULT_PKEY) <<
+			       SC(CHECK_PARTITION_KEY_VALUE_SHIFT));
+		/* per context type checks */
+		if (type == SC_USER) {
+			opval = USER_OPCODE_CHECK_VAL;
+			opmask = USER_OPCODE_CHECK_MASK;
+		} else {
+			opval = OPCODE_CHECK_VAL_DISABLED;
+			opmask = OPCODE_CHECK_MASK_DISABLED;
+		}
+		/* set the send context check opcode mask and value */
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_opcode_reg,
+			       ((u64)opmask << SC(CHECK_OPCODE_MASK_SHIFT)) |
+			       ((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
+		/* User send contexts should not allow sending on VL15 */
+		if (type == SC_USER) {
+			write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_vl_reg,
+				       1ULL << 15);
+		}
+		break;
+	case SC_CHK_FREE_OP: /* 'arg' not used */
+		write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, 0);
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_enable_reg, 0);
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_partition_key_reg, 0);
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_opcode_reg, 0);
+		break;
+	case SC_CHK_VL_MASK_OP: /* 'arg' is send_ctxt_check_vl_reg value */
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_vl_reg, arg);
+		break;
+	case SC_CHK_SLID_OP: /* 'arg' is send_ctxt_check_slid_reg value */
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_slid_reg, arg);
+		break;
+	case SC_CHK_JKEY_OP: /* 'arg' is send_ctxt_check_job_key_reg val, 'ctxt' incl rcv */
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_job_key_reg, arg);
+		if (!is_ax(dd)) {
+			dd->params->set_pio_integrity(dd, pidx, ctxt, type,
+				arg ? SPI_SET_JKEY : SPI_CLEAR_JKEY);
+		}
+		/* Enable/clear J_KEY check on receive context. */
+		if (arg) {
+			/* convert sctxt jkey to rctxt */
+			arg = (arg >> SEND_CTXT_CHECK_JOB_KEY_VALUE_SHIFT) &
+				SEND_CTXT_CHECK_JOB_KEY_VALUE_MASK;
+			arg = RCV_KEY_CTRL_JOB_KEY_ENABLE_SMASK |
+				((arg & RCV_KEY_CTRL_JOB_KEY_VALUE_MASK) <<
+				 RCV_KEY_CTRL_JOB_KEY_VALUE_SHIFT);
+		}
+		write_iprc_csr(dd, pidx, rctxt, dd->params->rcv_jkey_ctrl_reg, arg);
+		break;
+	case SC_CHK_PKEY_OP: /* 'arg' is send_ctxt_check_partition_key_reg value */
+		if (!arg)
+			dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_CLEAR_PKEY);
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_partition_key_reg, arg);
+		if (arg)
+			dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_SET_PKEY);
+		break;
+	case SC_CHK_ADJ_OP: /* 'arg' is enable flag (do SC_CHK_INIT_OP also) */
+		dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_DEFAULT);
+		if (!arg)
+			break;
+		fallthrough;
+	case SC_CHK_INIT_OP: /* 'arg' not used */
+		dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_INIT);
+		break;
+	case SC_ENABLE_OP: /* 'arg' not used as input, 'pidx' not used */
+		ret = pio_reset_one(dd, ctxt);
+		if (ret)
+			break;
+
+		/*
+		 * All is well. Enable the context.
+		 */
+		arg = read_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg);
+		arg |= SC(CTRL_CTXT_ENABLE_SMASK);
+		write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, arg);
+		/*
+		 * Read SendCtxtCtrl to force the write out and prevent a timing
+		 * hazard where a PIO write may reach the context before the enable.
+		 */
+		read_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg);
+		break;
+	case SC_DISABLE_OP: /* 'arg' not used as input, 'pidx' not used */
+		arg = read_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg);
+		arg &= ~SC(CTRL_CTXT_ENABLE_SMASK);
+		write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, arg);
+		break;
+	case RC_ENABLE_OP: /* 'arg' is enable flag */
+		opval = arg; /* 'enable' */
+		arg = JKR_RCV_PKT_CTRL_RCV_PORT_ENABLE_SMASK |
+		      JKR_RCV_PKT_CTRL_CONTEXT_ENABLED_SMASK;
+		reg = read_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL);
+		/* always clear the L2TypeEnable field */
+		reg &= ~JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SMASK;
+		if (opval) {
+			/* allow 16B and 9B L2 */
+			reg |= arg |
+			       (0xcull << JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SHIFT);
+		} else {
+			reg &= ~arg;
+		}
+		write_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
+		break;
+	case RC_HEADER_OP: /* 'arg' is size */
+		reg = read_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL);
+		reg &= ~JKR_RCV_PKT_CTRL_HDR_SIZE_SMASK;
+		reg |= arg << JKR_RCV_PKT_CTRL_HDR_SIZE_SHIFT;
+		write_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
+		break;
+	case LINK_BOUNCE_OP: /* 'arg' is not used */
+		queue_work(dd->pport[pidx].link_wq, &dd->pport[pidx].link_bounce_work);
+		break;
+	}
 	return ret;
 }

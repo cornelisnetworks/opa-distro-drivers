@@ -679,10 +679,8 @@ static void adjust_integrity_checks(struct hfi1_pportdata *ppd)
 		enable = likely(!HFI1_CAP_IS_KSET(NO_INTEGRITY)) &&
 			 ppd->hfi1_snoop.mode_flag != HFI1_PORT_SNOOP_MODE;
 
-		dd->params->set_pio_integrity(sc, SPI_DEFAULT);
-
-		if (enable) /* take HFI_CAP_* flags into account */
-			hfi1_init_ctxt(sc);
+		priv_reg_op(dd, sc->ppd->hw_pidx, sc->hw_context, sc->type,
+			    SC_CHK_ADJ_OP, enable);
 	}
 	spin_unlock_irqrestore(&dd->sc_lock, sc_flags);
 }

@@ -105,11 +105,14 @@ void jkr_init_tids(struct hfi1_devdata *dd);
 void jkr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
 		 u32 type, unsigned long pa, u16 order, bool flush);
 void jkr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type);
-void jkr_set_port_tid_count(struct hfi1_ctxtdata *rcd);
+void jkr_set_port_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
+			     u32 eager_base, u16 alloced,
+			     u32 expected_base, u32 expected_count);
 void jkr_update_rcv_hdr_size(struct hfi1_pportdata *ppd, u16 ctxt, u32 size);
 bool jkr_check_synth_status(struct hfi1_devdata *dd);
 void jkr_update_synth_status(struct hfi1_devdata *dd);
-void jkr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd);
+void jkr_set_pio_integrity(struct hfi1_devdata *dd, u32 pidx, u32 ctxt, int type,
+			   enum spi_cmds cmd);
 void jkr_read_link_quality(struct hfi1_pportdata *ppd, u8 *link_quality);
 void jkr_set_rheq_addr(struct hfi1_devdata *dd, u16 ctxt, u64 dma_addr);
 void jkr_handle_link_bounce(struct work_struct *work);
