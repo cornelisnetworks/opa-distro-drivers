@@ -1249,8 +1249,11 @@ void wfr_init_tids(struct hfi1_devdata *dd);
 void wfr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
 		 u32 type, unsigned long pa, u16 order, bool flush);
 void wfr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type);
-void wfr_set_port_tid_count(struct hfi1_ctxtdata *rcd);
+void wfr_set_port_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
+			     u32 eager_base, u16 alloced,
+			     u32 expected_base, u32 expected_count);
 void hfi1_quiet_serdes(struct hfi1_pportdata *ppd);
+u64 rctxt_ctrl_op(struct hfi1_devdata *dd, u16 ctxt, unsigned int op);
 void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 		  struct hfi1_ctxtdata *rcd);
 bool is_control_context(struct hfi1_ctxtdata *rcd);

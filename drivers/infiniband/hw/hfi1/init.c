@@ -290,7 +290,7 @@ static const struct chip_params wfr_params = {
 	.init_tids = wfr_init_tids,
 	.put_tid = wfr_put_tid,
 	.rcv_array_wc_fill = wfr_rcv_array_wc_fill,
-	.set_port_tid_count = wfr_set_port_tid_count,
+	.set_port_tid_config = wfr_set_port_tid_config,
 	.set_port_max_mtu = wfr_set_port_max_mtu,
 	.update_rcv_hdr_size = wfr_update_rcv_hdr_size,
 	.check_synth_status = wfr_check_synth_status,
@@ -535,7 +535,7 @@ static const struct chip_params jkr_params = {
 	.init_tids = jkr_init_tids,
 	.put_tid = jkr_put_tid,
 	.rcv_array_wc_fill = jkr_rcv_array_wc_fill,
-	.set_port_tid_count = jkr_set_port_tid_count,
+	.set_port_tid_config = jkr_set_port_tid_config,
 	.set_port_max_mtu = gen_set_port_max_mtu,
 	.update_rcv_hdr_size = jkr_update_rcv_hdr_size,
 	.check_synth_status = jkr_check_synth_status,
@@ -2981,11 +2981,13 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 	 * Enable RcvArray access on JKR and later by configuring RcvEgrCtrl and
 	 * RcvTidCtrl before writing TIDs to the RcvArray.
 	 *
-	 * Call HFI1_RCVCTRL_TID_CONFIG only after eager_base, egrbufs.alloced,
+	 * Call set_port_tid_config only after eager_base, egrbufs.alloced,
 	 * expected_count, and expected_base are initialized in rcd.  The last
 	 * 3 of the 4 are initialized above in this function.
 	 */
-	hfi1_rcvctrl(dd, HFI1_RCVCTRL_TID_CONFIG, rcd);
+	dd->params->set_port_tid_config(dd, rcd->ppd->hw_pidx, rcd->ctxt,
+			rcd->eager_base, rcd->egrbufs.alloced,
+			rcd->expected_base, rcd->expected_count);
 
 	for (idx = 0; idx < rcd->egrbufs.alloced; idx++) {
 		dd->params->put_tid(rcd, idx, PT_EAGER,

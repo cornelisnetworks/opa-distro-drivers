@@ -10097,9 +10097,27 @@ static inline int init_cpu_counters(struct hfi1_devdata *dd)
 	return 0;
 }
 
-/* WFR does not have a port tid count */
-void wfr_set_port_tid_count(struct hfi1_ctxtdata *rcd)
+void wfr_set_port_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
+			     u32 eager_base, u16 alloced,
+			     u32 expected_base, u32 expected_count)
 {
+	u64 reg;
+
+	/* set eager count and base index */
+	reg = ((u64)(alloced >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_CNT_SHIFT) |
+	      ((eager_base >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_BASE_INDEX_SHIFT);
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, reg);
+
+	/*
+	 * Set TID (expected) count and base index.
+	 * rcd->expected_count is set to individual RcvArray entries,
+	 * not pairs, and the CSR takes a pair-count in groups of
+	 * four, so divide by 8.
+	 */
+	reg = ((u64)(expected_count >> RCV_SHIFT) << RCV_TID_CTRL_TID_PAIR_CNT_SHIFT) |
+	      ((expected_base >> RCV_SHIFT) << RCV_TID_CTRL_TID_BASE_INDEX_SHIFT);
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_tid_ctrl_reg, reg);
+	/* WFR does not have a port tid count */
 }
 
 /* RcvArray base address */
@@ -10461,8 +10479,8 @@ static void set_lidlmc(struct hfi1_pportdata *ppd)
 
 		hfi1_cdbg(LINKVERB, "SendContext[%d].SLID_CHECK = 0x%x",
 			  i, (u32)sreg);
-		write_epsc_csr(dd, ppd->hw_pidx, sc->hw_context,
-			       dd->params->send_ctxt_check_slid_reg, sreg);
+		priv_reg_op(dd, ppd->hw_pidx, sc->hw_context, sc->type,
+			    SC_CHK_SLID_OP, sreg);
 	}
 
 	/* Now we have to do the same thing for the sdma engines */
@@ -12298,6 +12316,34 @@ void wfr_enable_rcv_context(struct hfi1_pportdata *ppd, u16 ctxt,
 	/* nothing special needs to be done */
 }
 
+u64 rctxt_ctrl_op(struct hfi1_devdata *dd, u16 ctxt, unsigned int op)
+{
+	u64 rctxt_ctrl;
+
+	if (dd->is_vf)
+		return pf0_rctxt_ctrl_op(dd, ctxt, op);
+
+	rctxt_ctrl = read_rctxt_csr(dd, ctxt, dd->params->rcv_rctxt_ctrl_reg);
+	if (op & HFI1_RCVCTRL_INTRAVAIL_ENB)
+		rctxt_ctrl |= RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
+	if (op & HFI1_RCVCTRL_INTRAVAIL_DIS)
+		rctxt_ctrl &= ~RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
+	if (op & HFI1_RCVCTRL_TIDFLOW_ENB)
+		rctxt_ctrl |= RCV_CTXT_CTRL_TID_FLOW_ENABLE_SMASK;
+	if (op & HFI1_RCVCTRL_TIDFLOW_DIS)
+		rctxt_ctrl &= ~RCV_CTXT_CTRL_TID_FLOW_ENABLE_SMASK;
+	if (op & HFI1_RCVCTRL_NO_RHQ_DROP_ENB)
+		rctxt_ctrl |= RCV_CTXT_CTRL_DONT_DROP_RHQ_FULL_SMASK;
+	if (op & HFI1_RCVCTRL_NO_RHQ_DROP_DIS)
+		rctxt_ctrl &= ~RCV_CTXT_CTRL_DONT_DROP_RHQ_FULL_SMASK;
+	if (op & HFI1_RCVCTRL_NO_EGR_DROP_ENB)
+		rctxt_ctrl |= RCV_CTXT_CTRL_DONT_DROP_EGR_FULL_SMASK;
+	if (op & HFI1_RCVCTRL_NO_EGR_DROP_DIS)
+		rctxt_ctrl &= ~RCV_CTXT_CTRL_DONT_DROP_EGR_FULL_SMASK;
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_rctxt_ctrl_reg, rctxt_ctrl);
+	return rctxt_ctrl;
+}
+
 void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 		  struct hfi1_ctxtdata *rcd)
 {
@@ -12384,27 +12430,6 @@ void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 		/* per-chip disable */
 		dd->params->enable_rcv_context(rcd->ppd, ctxt, &rcvctrl, false);
 	}
-	if (op & HFI1_RCVCTRL_TID_CONFIG) {
-		/* set eager count and base index */
-		reg = ((u64)(rcd->egrbufs.alloced >> RCV_SHIFT)
-				<< RCV_EGR_CTRL_EGR_CNT_SHIFT) |
-		      ((rcd->eager_base >> RCV_SHIFT)
-				<< RCV_EGR_CTRL_EGR_BASE_INDEX_SHIFT);
-		write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, reg);
-
-		/*
-		 * Set TID (expected) count and base index.
-		 * rcd->expected_count is set to individual RcvArray entries,
-		 * not pairs, and the CSR takes a pair-count in groups of
-		 * four, so divide by 8.
-		 */
-		reg = ((u64)(rcd->expected_count >> RCV_SHIFT)
-				<< RCV_TID_CTRL_TID_PAIR_CNT_SHIFT) |
-		      ((rcd->expected_base >> RCV_SHIFT)
-				<< RCV_TID_CTRL_TID_BASE_INDEX_SHIFT);
-		write_rctxt_csr(dd, ctxt, dd->params->rcv_tid_ctrl_reg, reg);
-		dd->params->set_port_tid_count(rcd);
-	}
 	if ((op & HFI1_RCVCTRL_TAILUPD_ENB) && hfi1_rcvhdrtail_kvaddr(rcd))
 		rcvctrl |= RCV_CTXT_CTRL_TAIL_UPD_SMASK;
 	if (op & HFI1_RCVCTRL_TAILUPD_DIS) {
@@ -12423,40 +12448,22 @@ void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 	if (op & HFI1_RCVCTRL_ONE_PKT_EGR_DIS)
 		rcvctrl &= ~RCV_CTXT_CTRL_ONE_PACKET_PER_EGR_BUFFER_SMASK;
 	if (op & HFI1_RCVCTRL_URGENT_ENB)
-		set_intr_bits(dd, dd->params->is_rcvurgent_start + rcd->ctxt,
-			      dd->params->is_rcvurgent_start + rcd->ctxt, true);
+		set_intr_bits(dd, dd->params->is_rcvurgent_start + ctxt,
+			      dd->params->is_rcvurgent_start + ctxt, true);
 	if (op & HFI1_RCVCTRL_URGENT_DIS)
-		set_intr_bits(dd, dd->params->is_rcvurgent_start + rcd->ctxt,
-			      dd->params->is_rcvurgent_start + rcd->ctxt, false);
+		set_intr_bits(dd, dd->params->is_rcvurgent_start + ctxt,
+			      dd->params->is_rcvurgent_start + ctxt, false);
 
 	write_kctxt_csr(dd, ctxt, dd->params->rcv_kctxt_ctrl_reg, rcvctrl);
 
-	rctxt_ctrl = read_rctxt_csr(dd, ctxt, dd->params->rcv_rctxt_ctrl_reg);
-	if (op & HFI1_RCVCTRL_INTRAVAIL_ENB) {
-		set_intr_bits(dd, dd->params->is_rcvavail_start + rcd->ctxt,
-			      dd->params->is_rcvavail_start + rcd->ctxt, true);
-		rctxt_ctrl |= RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
-	}
-	if (op & HFI1_RCVCTRL_INTRAVAIL_DIS) {
-		set_intr_bits(dd, dd->params->is_rcvavail_start + rcd->ctxt,
-			      dd->params->is_rcvavail_start + rcd->ctxt, false);
-		rctxt_ctrl &= ~RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
-	}
-	if (op & HFI1_RCVCTRL_TIDFLOW_ENB)
-		rctxt_ctrl |= RCV_CTXT_CTRL_TID_FLOW_ENABLE_SMASK;
-	if (op & HFI1_RCVCTRL_TIDFLOW_DIS)
-		rctxt_ctrl &= ~RCV_CTXT_CTRL_TID_FLOW_ENABLE_SMASK;
-	if (op & HFI1_RCVCTRL_NO_RHQ_DROP_ENB)
-		rctxt_ctrl |= RCV_CTXT_CTRL_DONT_DROP_RHQ_FULL_SMASK;
-	if (op & HFI1_RCVCTRL_NO_RHQ_DROP_DIS)
-		rctxt_ctrl &= ~RCV_CTXT_CTRL_DONT_DROP_RHQ_FULL_SMASK;
-	if (op & HFI1_RCVCTRL_NO_EGR_DROP_ENB)
-		rctxt_ctrl |= RCV_CTXT_CTRL_DONT_DROP_EGR_FULL_SMASK;
-	if (op & HFI1_RCVCTRL_NO_EGR_DROP_DIS)
-		rctxt_ctrl &= ~RCV_CTXT_CTRL_DONT_DROP_EGR_FULL_SMASK;
-
+	if (op & HFI1_RCVCTRL_INTRAVAIL_ENB)
+		set_intr_bits(dd, dd->params->is_rcvavail_start + ctxt,
+			      dd->params->is_rcvavail_start + ctxt, true);
+	if (op & HFI1_RCVCTRL_INTRAVAIL_DIS)
+		set_intr_bits(dd, dd->params->is_rcvavail_start + ctxt,
+			      dd->params->is_rcvavail_start + ctxt, false);
+	rctxt_ctrl = rctxt_ctrl_op(dd, ctxt, op);
 	hfi1_cdbg(RCVCTRL, "ctxt %d kctrl 0x%llx rctrl 0x%llx", ctxt, rcvctrl, rctxt_ctrl);
-	write_rctxt_csr(dd, ctxt, dd->params->rcv_rctxt_ctrl_reg, rctxt_ctrl);
 
 	/* work around sticky RcvCtxtStatus.BlockedRHQFull */
 	if (did_enable &&
@@ -13563,7 +13570,8 @@ static int wait_phys_link_out_of_offline(struct hfi1_pportdata *ppd,
 void hfi1_init_ctxt(struct send_context *sc)
 {
 	if (sc) {
-		sc->dd->params->set_pio_integrity(sc, SPI_INIT);
+		priv_reg_op(sc->dd, sc->ppd->hw_pidx, sc->hw_context, sc->type,
+			    SC_CHK_INIT_OP, 0);
 	}
 }
 
@@ -14930,6 +14938,9 @@ u16 hfi1_get_qp_map(struct hfi1_pportdata *ppd, u16 idx)
 	u32 off;
 	u64 reg;
 
+	if (dd->is_vf)
+		return vf2pf_get_qp_map(dd, ppd->hw_pidx, idx);
+
 	tbl_idx = idx & (dd->params->qp_map_table_entries - 1);
 	reg_idx = tbl_idx / dd->params->qp_map_table_entries_per_csr;
 	entry_idx = tbl_idx % dd->params->qp_map_table_entries_per_csr;
@@ -15895,19 +15906,8 @@ int hfi1_set_ctxt_jkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd,
 	/* JOB_KEY_ALLOW_PERMISSIVE is not allowed by default */
 	if (HFI1_CAP_KGET_MASK(rcd->flags, ALLOW_PERM_JKEY))
 		reg |= SEND_CTXT_CHECK_JOB_KEY_ALLOW_PERMISSIVE_SMASK;
-	write_epsc_csr(dd, pidx, hw_ctxt, dd->params->send_ctxt_check_job_key_reg, reg);
-	/*
-	 * Enable send-side J_KEY integrity check, unless this is A0 h/w
-	 */
-	if (!is_ax(dd)) {
-		dd->params->set_pio_integrity(rcd->sc, SPI_SET_JKEY);
-	}
-
-	/* Enable J_KEY check on receive context. */
-	reg = RCV_KEY_CTRL_JOB_KEY_ENABLE_SMASK |
-		((jkey & RCV_KEY_CTRL_JOB_KEY_VALUE_MASK) <<
-		 RCV_KEY_CTRL_JOB_KEY_VALUE_SHIFT);
-	write_iprc_csr(dd, pidx, rcd->ctxt, dd->params->rcv_jkey_ctrl_reg, reg);
+	priv_reg_op(dd, pidx, hw_ctxt | (rcd->ctxt << 16), rcd->sc->type,
+		    SC_CHK_JKEY_OP, reg);
 
 	return 0;
 }
@@ -15922,17 +15922,8 @@ int hfi1_clear_ctxt_jkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 
 	pidx = rcd->ppd->hw_pidx;
 	hw_ctxt = rcd->sc->hw_context;
-	write_epsc_csr(dd, pidx, hw_ctxt, dd->params->send_ctxt_check_job_key_reg, 0);
-	/*
-	 * Disable send-side J_KEY integrity check, unless this is A0 h/w.
-	 * This check would not have been enabled for A0 h/w, see
-	 * set_ctxt_jkey().
-	 */
-	if (!is_ax(dd)) {
-		dd->params->set_pio_integrity(rcd->sc, SPI_CLEAR_JKEY);
-	}
-	/* Turn off the J_KEY on the receive side */
-	write_iprc_csr(dd, pidx, rcd->ctxt, dd->params->rcv_jkey_ctrl_reg, 0);
+	priv_reg_op(dd, pidx, hw_ctxt | (rcd->ctxt << 16), rcd->sc->type,
+		    SC_CHK_JKEY_OP, 0);
 
 	return 0;
 }
@@ -15951,8 +15942,7 @@ int hfi1_set_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd,
 	hw_ctxt = rcd->sc->hw_context;
 	reg = ((u64)pkey & SEND_CTXT_CHECK_PARTITION_KEY_VALUE_MASK) <<
 		SEND_CTXT_CHECK_PARTITION_KEY_VALUE_SHIFT;
-	write_epsc_csr(dd, pidx, hw_ctxt, dd->params->send_ctxt_check_partition_key_reg, reg);
-	dd->params->set_pio_integrity(rcd->sc, SPI_SET_PKEY);
+	priv_reg_op(dd, pidx, hw_ctxt, rcd->sc->type, SC_CHK_PKEY_OP, reg);
 
 	return 0;
 }
@@ -15967,8 +15957,7 @@ int hfi1_clear_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt)
 
 	pidx = ctxt->ppd->hw_pidx;
 	hw_ctxt = ctxt->sc->hw_context;
-	dd->params->set_pio_integrity(ctxt->sc, SPI_CLEAR_PKEY);
-	write_epsc_csr(dd, pidx, hw_ctxt, dd->params->send_ctxt_check_partition_key_reg, 0);
+	priv_reg_op(dd, pidx, hw_ctxt, ctxt->sc->type, SC_CHK_PKEY_OP, 0);
 
 	return 0;
 }

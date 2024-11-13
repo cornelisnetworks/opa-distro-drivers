@@ -577,17 +577,38 @@ const struct gi_enable_entry jkr_gi_enable_table[] = {
 	{ 1, 0 } /* terminator */
 };
 
-void jkr_set_port_tid_count(struct hfi1_ctxtdata *rcd)
+void jkr_set_port_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
+			     u32 eager_base, u16 alloced,
+			     u32 expected_base, u32 expected_count)
 {
+	u64 reg;
+
+	if (dd->is_vf) {
+		vf2pf_tid_config(dd, pidx, ctxt, eager_base, alloced,
+				 expected_base, expected_count);
+		return;
+	}
+	/* set eager count and base index */
+	reg = ((u64)(alloced >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_CNT_SHIFT) |
+	      ((eager_base >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_BASE_INDEX_SHIFT);
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, reg);
+
+	/*
+	 * Set TID (expected) count and base index.
+	 * rcd->expected_count is set to individual RcvArray entries,
+	 * not pairs, and the CSR takes a pair-count in groups of
+	 * four, so divide by 8.
+	 */
+	reg = ((u64)(expected_count >> RCV_SHIFT) << RCV_TID_CTRL_TID_PAIR_CNT_SHIFT) |
+	      ((expected_base >> RCV_SHIFT) << RCV_TID_CTRL_TID_BASE_INDEX_SHIFT);
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_tid_ctrl_reg, reg);
+
 	/*
 	 * Value must match value written into RcvTidCtrl.TidPairCnt.  See
 	 * hfi1_rcvctrl() write to rcv_tid_ctrl_reg.
 	 */
-	u64 count = rcd->expected_count >> RCV_SHIFT;
-	struct hfi1_devdata *dd = rcd->ppd->dd;
-	u8 pidx = rcd->ppd->hw_pidx;
-
-	write_iprc_csr(dd, pidx, rcd->ctxt, JKR_RCV_TID_PAIR_COUNT, count);
+	reg = (u64)(expected_count >> RCV_SHIFT);
+	write_iprc_csr(dd, pidx, ctxt, JKR_RCV_TID_PAIR_COUNT, reg);
 }
 
 static inline u32 rcvarray_offset(u32 ctxt, u32 index, u32 type)
@@ -697,21 +718,8 @@ void jkr_enable_rcv_context(struct hfi1_pportdata *ppd, u16 ctxt,
 			    u64 *kctxt_ctrl, bool enable)
 {
 	struct hfi1_devdata *dd = ppd->dd;
-	u64 bits = JKR_RCV_PKT_CTRL_RCV_PORT_ENABLE_SMASK |
-		   JKR_RCV_PKT_CTRL_CONTEXT_ENABLED_SMASK;
-	u64 reg;
 
-	reg = read_iprc_csr(dd, ppd->hw_pidx, ctxt, JKR_RCV_PKT_CTRL);
-	/* always clear the L2TypeEnable field */
-	reg &= ~JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SMASK;
-	if (enable) {
-		/* allow 16B and 9B L2 */
-		reg |= bits |
-		       (0xcull << JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SHIFT);
-	} else {
-		reg &= ~bits;
-	}
-	write_iprc_csr(dd, ppd->hw_pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
+	priv_reg_op(dd, ppd->hw_pidx, ctxt, 0, RC_ENABLE_OP, enable);
 
 	/* adjustments to KctxtCtrl */
 	if (enable)
@@ -721,12 +729,8 @@ void jkr_enable_rcv_context(struct hfi1_pportdata *ppd, u16 ctxt,
 void jkr_update_rcv_hdr_size(struct hfi1_pportdata *ppd, u16 ctxt, u32 size)
 {
 	struct hfi1_devdata *dd = ppd->dd;
-	u64 reg;
 
-	reg = read_iprc_csr(dd, ppd->hw_pidx, ctxt, JKR_RCV_PKT_CTRL);
-	reg &= ~JKR_RCV_PKT_CTRL_HDR_SIZE_SMASK;
-	reg |= (u64)size << JKR_RCV_PKT_CTRL_HDR_SIZE_SHIFT;
-	write_iprc_csr(dd, ppd->hw_pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
+	priv_reg_op(dd, ppd->hw_pidx, ctxt, 0, RC_HEADER_OP, size);
 }
 
 void jkr_set_rheq_addr(struct hfi1_devdata *dd, u16 ctxt, u64 dma_addr)
@@ -862,12 +866,9 @@ const struct flag_data jkr_egress_err_info_data = {
 	| JKR_SEND_CTXT_CHECK_ENABLE_DISALLOW16BKDETH_PACKETS_SMASK \
 	)
 
-void jkr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd)
+void jkr_set_pio_integrity(struct hfi1_devdata *dd, u32 pidx, u32 hw_context, int type,
+			   enum spi_cmds cmd)
 {
-	struct hfi1_devdata *dd = sc->dd;
-	u32 hw_context = sc->hw_context;
-	u32 pidx = sc->ppd->hw_pidx;
-	int type = sc->type;
 	u64 val;
 
 	/* DEFAULT does not do a read-modify-write */
@@ -884,7 +885,7 @@ void jkr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd)
 	case SPI_DEFAULT:
 		/* No integrity checks if HFI1_CAP_NO_INTEGRITY is set */
 		if (HFI1_CAP_IS_KSET(NO_INTEGRITY) ||
-		    (sc->ppd->hfi1_snoop.mode_flag & HFI1_PORT_SNOOP_MODE))
+		    (dd->pport[pidx].hfi1_snoop.mode_flag & HFI1_PORT_SNOOP_MODE))
 			break;
 		val |= SC_BASE_CHECKS;
 		if (type == SC_USER)
