@@ -5410,6 +5410,23 @@ done:
 	return mad_result;
 }
 
+int vf_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
+		   const struct ib_wc *in_wc, const struct ib_grh *in_grh,
+		   const struct ib_mad *in_mad, struct ib_mad *out_mad,
+		   size_t *out_mad_size, u16 *out_mad_pkey_index)
+{
+	int mad_result;
+
+	/*
+	 * TODO: implement VF MAD processing...
+	 *
+	 * May require forwarding to PF0 for CPORT processing.
+	 */
+	mad_result = IB_MAD_RESULT_FAILURE;
+
+	return mad_result;
+}
+
 /**
  * hfi1_process_mad - process an incoming MAD packet
  * @ibdev: the infiniband device this packet came in on
@@ -6432,6 +6449,9 @@ static int cport_mad_handler(struct hfi1_devdata *dd, u8 op, u8 sideband,
 		dd_dev_info(dd, "%s\n", buf);
 	}
 #endif
+	/*
+	 * TODO: determine if MAD needs processing in VF?
+	 */
 	mad_offset = get_mad_offset(payload, op == CH_OP_MAD_16B);
 	if (mad_offset < 0)
 		goto done;
