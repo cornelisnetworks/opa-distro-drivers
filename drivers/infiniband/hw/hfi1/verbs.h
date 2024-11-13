@@ -298,6 +298,10 @@ int cport_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 		      const struct ib_wc *in_wc, const struct ib_grh *in_grh,
 		      const struct ib_mad *in_mad, struct ib_mad *out_mad,
 		      size_t *out_mad_size, u16 *out_mad_pkey_index);
+int vf_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
+		   const struct ib_wc *in_wc, const struct ib_grh *in_grh,
+		   const struct ib_mad *in_mad, struct ib_mad *out_mad,
+		   size_t *out_mad_size, u16 *out_mad_pkey_index);
 
 /*
  * The PSN_MASK and PSN_SHIFT allow for
