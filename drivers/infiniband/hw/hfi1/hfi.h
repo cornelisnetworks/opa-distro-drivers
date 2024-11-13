@@ -32,6 +32,7 @@
 #include <rdma/rdma_vt.h>
 
 #include "chip_registers.h"
+#include "chip_registers_jkr.h"
 #include "common.h"
 #include "opfn.h"
 #include "verbs.h"
@@ -3186,22 +3187,44 @@ static inline void hfi1_make_16b_hdr(struct hfi1_16b_header *hdr,
 
 static inline u32 chip_send_contexts(struct hfi1_devdata *dd)
 {
+	if (unlikely(dd->is_vf))
+		return JKR_C_TXE_NUM_CONTEXTS;
 	return read_csr(dd, dd->params->send_contexts_reg);
 }
 
 static inline u32 chip_sdma_engines(struct hfi1_devdata *dd)
 {
+	if (unlikely(dd->is_vf))
+		return JKR_C_TXE_NUM_SDMA_ENGINES;
 	return read_csr(dd, dd->params->send_dma_engines_reg);
 }
 
 static inline u32 chip_pio_mem_size(struct hfi1_devdata *dd)
 {
+	if (unlikely(dd->is_vf))
+		return JKR_C_TXE_PIO_MEMORY_BYTES;
 	return read_csr(dd, dd->params->send_pio_mem_size_reg);
 }
 
 static inline u32 chip_sdma_mem_size(struct hfi1_devdata *dd)
 {
+	if (unlikely(dd->is_vf))
+		return JKR_C_TXE_SDMA_MEMORY_BYTES;
 	return read_csr(dd, dd->params->send_dma_mem_size_reg);
+}
+
+static inline u32 chip_rcv_contexts(struct hfi1_devdata *dd)
+{
+	if (unlikely(dd->is_vf))
+		return JKR_C_RXE_NUM_CONTEXTS;
+	return read_csr(dd, RCV_CONTEXTS);
+}
+
+static inline u32 chip_rcv_array_count(struct hfi1_devdata *dd)
+{
+	if (unlikely(dd->is_vf))
+		return JKR_C_RXE_NUM_RECEIVE_ARRAY_ENTRIES;
+	return read_csr(dd, RCV_ARRAY_CNT);
 }
 
 static inline u64 read_iport_csr(const struct hfi1_devdata *dd, int pidx,
