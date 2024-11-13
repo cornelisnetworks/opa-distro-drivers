@@ -614,16 +614,6 @@ void __iomem *get_csr_addr(
 	const struct hfi1_devdata *dd,
 	u32 offset);
 
-static inline u32 chip_rcv_contexts(struct hfi1_devdata *dd)
-{
-	return read_csr(dd, RCV_CONTEXTS);
-}
-
-static inline u32 chip_rcv_array_count(struct hfi1_devdata *dd)
-{
-	return read_csr(dd, RCV_ARRAY_CNT);
-}
-
 bool wfr_check_synth_status(struct hfi1_devdata *dd);
 void wfr_update_synth_status(struct hfi1_devdata *dd);
 
