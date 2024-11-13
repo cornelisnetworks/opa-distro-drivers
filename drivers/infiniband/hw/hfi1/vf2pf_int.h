@@ -67,9 +67,9 @@ struct vf2pf_devops {
 	int (*init_irq)(struct hfi1_devdata *dd);
 	void (*deinit_irq)(struct hfi1_devdata *dd);
 	int (*rcv_wait)(struct hfi1_devdata *dd, void *buf, long timeout);
-	void (*set_si_enables)(struct hfi1_devdata *dd, int si,
+	void (*set_si_enables)(struct hfi1_devdata *dd, int si, u64 *csrs,
 			       void (*si_enables)(struct hfi1_devdata *dd,
-						  u64 base, u32 start, u32 end));
+						  u64 *csrs, u32 start, u32 end));
 };
 
 #define VF2PF_INIT_ALL	((u8)-1)
