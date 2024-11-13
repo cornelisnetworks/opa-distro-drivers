@@ -1903,6 +1903,24 @@ static const struct ib_device_ops cport_dev_ops = {
 	.rdma_netdev_get_params = hfi1_ipoib_rn_get_params,
 };
 
+static const struct ib_device_ops vf_dev_ops = {
+	.owner = THIS_MODULE,
+	.driver_id = RDMA_DRIVER_HFI1,
+
+	/* XXX - some more of these probably need to change */
+	.alloc_hw_device_stats = hfi1_alloc_hw_device_stats,
+	.alloc_hw_port_stats = hfi_alloc_hw_port_stats,
+	.alloc_rdma_netdev = hfi1_vnic_alloc_rn,
+	.device_group = &ib_hfi1_attr_group,
+	.get_dev_fw_str = cport_get_dev_fw_str,
+	.get_hw_stats = get_hw_stats,
+	.modify_device = modify_device,
+	.port_groups = cport_attr_port_groups, /* TODO: different for VFs? */
+	/* keep process mad in the driver */
+	.process_mad = vf_process_mad,
+	.rdma_netdev_get_params = hfi1_ipoib_rn_get_params,
+};
+
 /**
  * hfi1_register_ib_device - register our device with the infiniband core
  * @dd: the device data structure
@@ -1953,6 +1971,8 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 
 	if (dd->cport)
 		ib_set_device_ops(ibdev, &cport_dev_ops);
+	else if (dd->is_vf)
+		ib_set_device_ops(ibdev, &vf_dev_ops);
 	else
 		ib_set_device_ops(ibdev, &hfi1_dev_ops);
 
