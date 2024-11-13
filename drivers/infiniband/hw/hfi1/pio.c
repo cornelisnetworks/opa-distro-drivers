@@ -7,12 +7,14 @@
 #include "hfi.h"
 #include "qp.h"
 #include "trace.h"
+#include "vf2pf.h"
 
 #define SC(name) SEND_CTXT_##name
 /*
  * Send Context functions
  */
 static void sc_wait_for_packet_egress(struct send_context *sc, int pause);
+static int pio_init_wait_progress(struct hfi1_devdata *dd);
 
 /*
  * Set the CM reset bit and wait for it to clear.  Use the provided
@@ -674,12 +676,9 @@ void sc_set_cr_threshold(struct send_context *sc, u32 new_threshold)
  *
  * Set the CHECK_ENABLE register for the send context 'sc'.
  */
-void wfr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd)
+void wfr_set_pio_integrity(struct hfi1_devdata *dd, u32 pidx, u32 hw_context, int type,
+			   enum spi_cmds cmd)
 {
-	struct hfi1_devdata *dd = sc->dd;
-	u32 hw_context = sc->hw_context;
-	u32 pidx = sc->ppd->hw_pidx;
-	int type = sc->type;
 	u64 val;
 	int set;
 
@@ -693,7 +692,7 @@ void wfr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd)
 
 	switch (cmd) {
 	case SPI_DEFAULT:
-		val = hfi1_pkt_default_send_ctxt_mask(sc->ppd, type);
+		val = hfi1_pkt_default_send_ctxt_mask(&dd->pport[pidx], type);
 		break;
 	case SPI_INIT:
 		set = type == SC_USER ?
@@ -758,7 +757,6 @@ struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 	u32 sw_index;
 	u32 hw_context;
 	int ret;
-	u8 opval, opmask;
 
 	/* do not allocate while frozen */
 	if (dd->flags & HFI1_FROZEN)
@@ -826,32 +824,11 @@ struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 					<< SC(CTRL_CTXT_DEPTH_SHIFT))
 		| ((sci->base & MASK_ULL(dd->params->pio_base_bits))
 					<< dd->params->pio_base_shift);
-	write_tctxt_csr(dd, hw_context, dd->params->send_ctxt_ctrl_reg, reg);
-
-	dd->params->set_pio_integrity(sc, SPI_DEFAULT);
 
 	/* unmask all errors */
 	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_err_mask_reg, (u64)-1);
 
-	/* set the default partition key */
-	write_epsc_csr(dd, ppd->hw_pidx, hw_context, dd->params->send_ctxt_check_partition_key_reg,
-		       (SC(CHECK_PARTITION_KEY_VALUE_MASK) &
-		       DEFAULT_PKEY) <<
-		       SC(CHECK_PARTITION_KEY_VALUE_SHIFT));
-
-	/* per context type checks */
-	if (type == SC_USER) {
-		opval = USER_OPCODE_CHECK_VAL;
-		opmask = USER_OPCODE_CHECK_MASK;
-	} else {
-		opval = OPCODE_CHECK_VAL_DISABLED;
-		opmask = OPCODE_CHECK_MASK_DISABLED;
-	}
-
-	/* set the send context check opcode mask and value */
-	write_epsc_csr(dd, ppd->hw_pidx, hw_context, dd->params->send_ctxt_check_opcode_reg,
-		       ((u64)opmask << SC(CHECK_OPCODE_MASK_SHIFT)) |
-		       ((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
+	priv_reg_op(dd, ppd->hw_pidx, hw_context, type, SC_CHK_ALLOC_OP, reg);
 
 	/* set up credit return */
 	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_return_addr_reg, dma);
@@ -895,13 +872,6 @@ struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 	sc->credit_ctrl = reg;
 	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_ctrl_reg,
 			reg);
-
-	/* User send contexts should not allow sending on VL15 */
-	if (type == SC_USER) {
-		reg = 1ULL << 15;
-		write_epsc_csr(dd, ppd->hw_pidx, hw_context,
-			       dd->params->send_ctxt_check_vl_reg, reg);
-	}
 
 	spin_unlock_irqrestore(&dd->sc_lock, flags);
 
@@ -967,11 +937,8 @@ void sc_free(struct send_context *sc)
 	dd->send_contexts[sw_index].sc = NULL;
 
 	/* clear/disable all registers set in sc_alloc */
-	write_tctxt_csr(dd, hw_context, dd->params->send_ctxt_ctrl_reg, 0);
-	write_epsc_csr(dd, pidx, hw_context, dd->params->send_ctxt_check_enable_reg, 0);
+	priv_reg_op(dd, pidx, hw_context, sc->type, SC_CHK_FREE_OP, 0);
 	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_err_mask_reg, 0);
-	write_epsc_csr(dd, pidx, hw_context, dd->params->send_ctxt_check_partition_key_reg, 0);
-	write_epsc_csr(dd, pidx, hw_context, dd->params->send_ctxt_check_opcode_reg, 0);
 	write_sctxt_csr(dd, hw_context,
 			dd->params->send_ctxt_credit_return_addr_reg, 0);
 	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_ctrl_reg,
@@ -989,7 +956,6 @@ void sc_free(struct send_context *sc)
 /* disable the context */
 void sc_disable(struct send_context *sc)
 {
-	u64 reg;
 	struct pio_buf *pbuf;
 	LIST_HEAD(wake_list);
 
@@ -998,13 +964,9 @@ void sc_disable(struct send_context *sc)
 
 	/* do all steps, even if already disabled */
 	spin_lock_irq(&sc->alloc_lock);
-	reg = read_tctxt_csr(sc->dd, sc->hw_context,
-			     sc->dd->params->send_ctxt_ctrl_reg);
-	reg &= ~SC(CTRL_CTXT_ENABLE_SMASK);
 	sc->flags &= ~SCF_ENABLED;
 	sc_wait_for_packet_egress(sc, 1);
-	write_tctxt_csr(sc->dd, sc->hw_context,
-			sc->dd->params->send_ctxt_ctrl_reg, reg);
+	priv_reg_op(sc->dd, 0, sc->hw_context, sc->type, SC_DISABLE_OP, 0);
 
 	/*
 	 * Flush any waiters.  Once the context is disabled,
@@ -1091,8 +1053,9 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 
 	while (1) {
 		reg_prev = reg;
-		reg = read_epscarr_csr(dd, ppd->hw_pidx, sc->hw_context,
-				       dd->params->send_egress_ctxt_status_reg);
+		reg = pf0_read_csr(dd, CSR_TYPE_EPSCARR,
+				   dd->params->send_egress_ctxt_status_reg,
+				   sc->hw_context, ppd->hw_pidx);
 		/* done if any halt bits, SW or HW are set */
 		if (sc->flags & (SCF_HALTED | SCF_LINK_DOWN) ||
 		    is_sc_halted(dd, sc->hw_context) || egress_halted(reg))
@@ -1109,7 +1072,7 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 				   "%s: context %u(%u) timeout waiting for packets to egress, remaining count %u, bouncing link\n",
 				   __func__, sc->sw_index,
 				   sc->hw_context, (u32)reg);
-			queue_work(ppd->link_wq, &ppd->link_bounce_work);
+			priv_reg_op(dd, ppd->hw_pidx, 0, 0, LINK_BOUNCE_OP, 0);
 			break;
 		}
 		loop++;
@@ -1370,6 +1333,17 @@ static int pio_init_wait_progress(struct hfi1_devdata *dd)
 	return reg & SEND_PIO_INIT_CTXT_PIO_INIT_ERR_SMASK ? -EIO : 0;
 }
 
+static int __pio_reset(struct hfi1_devdata *dd, u64 reg)
+{
+	write_csr(dd, dd->params->send_pio_init_ctxt_reg, reg);
+	/*
+	 * Wait until the engine is done.  Give the chip the required time
+	 * so, hopefully, we read the register just once.
+	 */
+	udelay(2);
+	return pio_init_wait_progress(dd);
+}
+
 /*
  * Reset all of the send contexts to their power-on state.  Used
  * only during manual init - no lock against sc_enable needed.
@@ -1388,10 +1362,7 @@ void pio_reset_all(struct hfi1_devdata *dd)
 	}
 
 	/* reset init all */
-	write_csr(dd, dd->params->send_pio_init_ctxt_reg,
-		  SEND_PIO_INIT_CTXT_PIO_ALL_CTXT_INIT_SMASK);
-	udelay(2);
-	ret = pio_init_wait_progress(dd);
+	ret = __pio_reset(dd, SEND_PIO_INIT_CTXT_PIO_ALL_CTXT_INIT_SMASK);
 	if (ret < 0) {
 		dd_dev_err(dd,
 			   "PIO send context init %s while initializing all PIO blocks\n",
@@ -1399,10 +1370,39 @@ void pio_reset_all(struct hfi1_devdata *dd)
 	}
 }
 
+int pio_reset_one(struct hfi1_devdata *dd, u16 ctxt)
+{
+	u64 reg;
+	int ret;
+
+	/*
+	 * The HW PIO initialization engine can handle only one init
+	 * request at a time. Serialize access to each device's engine.
+	 */
+	spin_lock(&dd->sc_init_lock);
+	/*
+	 * Since access to this code block is serialized and
+	 * each access waits for the initialization to complete
+	 * before releasing the lock, the PIO initialization engine
+	 * should not be in use, so we don't have to wait for the
+	 * InProgress bit to go down.
+	 */
+	reg = ((ctxt & SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_MASK) <<
+	       SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_SHIFT) |
+	      SEND_PIO_INIT_CTXT_PIO_SINGLE_CTXT_INIT_SMASK;
+	ret = __pio_reset(dd, reg);
+	spin_unlock(&dd->sc_init_lock);
+	if (ret) {
+		dd_dev_err(dd, "sctxt(%u): Context not enabled due to init failure %d\n",
+			   ctxt, ret);
+	}
+	return ret;
+}
+
 /* enable the context */
 int sc_enable(struct send_context *sc)
 {
-	u64 sc_ctrl, reg, pio;
+	u64 reg;
 	struct hfi1_devdata *dd;
 	unsigned long flags;
 	int ret = 0;
@@ -1419,9 +1419,7 @@ int sc_enable(struct send_context *sc)
 	 * if the context accounting values have not changed.
 	 */
 	spin_lock_irqsave(&sc->alloc_lock, flags);
-	sc_ctrl = read_tctxt_csr(dd, sc->hw_context,
-				 dd->params->send_ctxt_ctrl_reg);
-	if ((sc_ctrl & SC(CTRL_CTXT_ENABLE_SMASK)))
+	if (sc->flags & SCF_ENABLED)
 		goto unlock; /* already enabled */
 
 	/* IMPORTANT: only clear free and fill if transitioning 0 -> 1 */
@@ -1447,46 +1445,10 @@ int sc_enable(struct send_context *sc)
 	if (reg)
 		write_sctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_err_clear_reg, reg);
 
-	/*
-	 * The HW PIO initialization engine can handle only one init
-	 * request at a time. Serialize access to each device's engine.
-	 */
-	spin_lock(&dd->sc_init_lock);
-	/*
-	 * Since access to this code block is serialized and
-	 * each access waits for the initialization to complete
-	 * before releasing the lock, the PIO initialization engine
-	 * should not be in use, so we don't have to wait for the
-	 * InProgress bit to go down.
-	 */
-	pio = (sc->hw_context << SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_SHIFT) |
-	      SEND_PIO_INIT_CTXT_PIO_SINGLE_CTXT_INIT_SMASK;
-	write_csr(dd, dd->params->send_pio_init_ctxt_reg, pio);
-	/*
-	 * Wait until the engine is done.  Give the chip the required time
-	 * so, hopefully, we read the register just once.
-	 */
-	udelay(2);
-	ret = pio_init_wait_progress(dd);
-	spin_unlock(&dd->sc_init_lock);
-	if (ret) {
-		dd_dev_err(dd,
-			   "sctxt%u(%u): Context not enabled due to init failure %d\n",
-			   sc->sw_index, sc->hw_context, ret);
+	ret = priv_reg_op(dd, 0, sc->hw_context, sc->type, SC_ENABLE_OP, 0);
+	if (ret)
 		goto unlock;
-	}
 
-	/*
-	 * All is well. Enable the context.
-	 */
-	sc_ctrl |= SC(CTRL_CTXT_ENABLE_SMASK);
-	write_tctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_ctrl_reg,
-			sc_ctrl);
-	/*
-	 * Read SendCtxtCtrl to force the write out and prevent a timing
-	 * hazard where a PIO write may reach the context before the enable.
-	 */
-	read_tctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_ctrl_reg);
 	sc->flags |= SCF_ENABLED;
 
 unlock:
@@ -2190,7 +2152,7 @@ int init_pervl_scs(struct hfi1_pportdata *ppd)
 	sc_enable(ppd->vld[15].sc);
 	ctxt = ppd->vld[15].sc->hw_context;
 	mask = all_vl_mask & ~(1LL << 15);
-	write_epsc_csr(dd, ppd->hw_pidx, ctxt, dd->params->send_ctxt_check_vl_reg, mask);
+	priv_reg_op(dd, ppd->hw_pidx, ctxt, ppd->vld[15].sc->type, SC_CHK_VL_MASK_OP, mask);
 	dd_dev_info(dd,
 		    "pidx %d: Using send context %u(%u) for VL15\n",
 		    ppd->hw_pidx, ppd->vld[15].sc->sw_index, ctxt);
@@ -2199,13 +2161,14 @@ int init_pervl_scs(struct hfi1_pportdata *ppd)
 		sc_enable(ppd->vld[i].sc);
 		ctxt = ppd->vld[i].sc->hw_context;
 		mask = all_vl_mask & ~(data_vls_mask);
-		write_epsc_csr(dd, ppd->hw_pidx, ctxt, dd->params->send_ctxt_check_vl_reg, mask);
+		priv_reg_op(dd, ppd->hw_pidx, ctxt, ppd->vld[i].sc->type, SC_CHK_VL_MASK_OP, mask);
 	}
 	for (i = num_vls; i < INIT_SC_PER_VL * num_vls; i++) {
 		sc_enable(ppd->kernel_send_context[i + 1]);
 		ctxt = ppd->kernel_send_context[i + 1]->hw_context;
 		mask = all_vl_mask & ~(data_vls_mask);
-		write_epsc_csr(dd, ppd->hw_pidx, ctxt, dd->params->send_ctxt_check_vl_reg, mask);
+		priv_reg_op(dd, ppd->hw_pidx, ctxt, ppd->kernel_send_context[i + 1]->type,
+			    SC_CHK_VL_MASK_OP, mask);
 	}
 
 	if (pio_map_init(ppd, num_vls))

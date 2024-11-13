@@ -271,10 +271,12 @@ enum spi_cmds {
 	SPI_SET_PKEY,
 	SPI_CLEAR_PKEY,
 };
-void wfr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd);
+void wfr_set_pio_integrity(struct hfi1_devdata *dd, u32 pidx, u32 ctxt, int type,
+			   enum spi_cmds cmd);
 
 /* support functions */
 void pio_reset_all(struct hfi1_devdata *dd);
+int pio_reset_one(struct hfi1_devdata *dd, u16 ctxt);
 void pio_freeze(struct hfi1_devdata *dd);
 void pio_kernel_unfreeze(struct hfi1_devdata *dd);
 void pio_kernel_linkup(struct hfi1_pportdata *ppd);
