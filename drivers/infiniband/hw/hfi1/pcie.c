@@ -147,11 +147,16 @@ static int do_bar_map(struct hfi1_devdata *dd, struct pci_dev *pdev, int idx)
 
 	/* bar 0 only actions */
 	if (idx == 0) {
-		/* verify that reads work, save revision for reset check */
-		dd->revision = readq(bm->kregbase1 + CCE_REVISION);
-		if (dd->revision == ~(u64)0) {
-			dd_dev_err(dd, "Cannot read chip CSRs\n");
-			return -EINVAL;
+		/* verify that reads actually work, save revision for reset check */
+		/*
+		 * VFs don't have a CCE_REVISION, so need to avoid access violation.
+		 */
+		if (!dd->is_vf) {
+			dd->revision = readq(bm->kregbase1 + CCE_REVISION);
+			if (dd->revision == ~(u64)0) {
+				dd_dev_err(dd, "Cannot read chip CSRs\n");
+				return -EINVAL;
+			}
 		}
 		/* cache base2 offset value */
 		dd->base2_start = dd->params->kreg2_offset;
