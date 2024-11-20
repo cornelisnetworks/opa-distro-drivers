@@ -15731,24 +15731,33 @@ static int init_port_mapping(struct hfi1_pportdata *ppd,
 	return ret;
 }
 
-static int init_rxe(struct hfi1_devdata *dd)
+/*
+ * In the future, this will be called on behalf of a VF to setup
+ * RSM rules and any associated RMT entries. This means it is no
+ * longer called only once at driver load.
+ */
+static int init_rxe_rsm(struct hfi1_devdata *dd)
 {
 	struct rsm_map_table *rmt;
-	u64 val;
 	int i;
 	int ret;
 
-	if (dd->is_vf) {
-		/* TODO: does any of this need to be done by PF0? */
-		return 0;
-	}
-	/* enable all receive errors */
-	for (i = 0; i < dd->num_pports; i++)
-		write_iport_csr(dd, i, dd->params->rcv_err_mask_reg, ~0ull);
-
+	/*
+	 * TODO: either keep this cached on 'dd' or else load existing
+	 * CSRs and determine rmt->used. After chip reset, CSRs are all
+	 * zero (a valid ctxt number) but we use 0xff to mark unused
+	 * entries after first pass (complete_rsm_map_table()).
+	 */
 	rmt = alloc_rsm_map_table(dd);
 	if (!rmt)
 		return -ENOMEM;
+
+	/*
+	 * TODO: not all of these are required for VFs, and others
+	 * need to be done differently. For example, MAD responses
+	 * will probably require an array of target contexts indexed
+	 * by something like QPN.
+	 */
 
 	/* set up QOS, including the QPN map table */
 	init_qos(dd, rmt);
@@ -15767,6 +15776,30 @@ static int init_rxe(struct hfi1_devdata *dd)
 		if (ret < 0)
 			goto done;
 	}
+	ret = 0;
+done:
+	kfree(rmt);
+	return ret;
+}
+
+static int init_rxe(struct hfi1_devdata *dd)
+{
+	u64 val;
+	int i;
+	int ret;
+
+	if (dd->is_vf) {
+		dd_dev_warn(dd, "SRIOV TODO: RSM rules and RMT entries for VFs\n");
+		/* return vf2pf_init_rxe_rsm(...); */
+		return 0;
+	}
+	/* enable all receive errors */
+	for (i = 0; i < dd->num_pports; i++)
+		write_iport_csr(dd, i, dd->params->rcv_err_mask_reg, ~0ull);
+
+	ret = init_rxe_rsm(dd);
+	if (ret)
+		goto done;
 
 	/*
 	 * make sure RcvCtrl.RcvWcb <= PCIe Device Control
@@ -15795,7 +15828,6 @@ static int init_rxe(struct hfi1_devdata *dd)
 	ret = 0;
 
 done:
-	kfree(rmt);
 	return ret;
 }
 
