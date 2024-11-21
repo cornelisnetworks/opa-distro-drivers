@@ -1689,6 +1689,10 @@ struct hfi1_devdata {
 	/*
 	 * device counters
 	 */
+	struct rdma_stat_desc *dev_cntr_descs;
+	struct rdma_stat_desc *port_cntr_descs;
+	int num_dev_cntrs;
+	int num_port_cntrs;
 	char *cntrnames;
 	size_t cntrnameslen;
 	size_t ndevcntrs;
