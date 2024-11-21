@@ -78,6 +78,7 @@ MODULE_PARM_DESC(jkr_sdma_credits_limit, "Limit JKR per-SDMA engine buffer credi
 #define SDMA_WAIT_BATCH_SIZE 20
 /* max wait time for a SDMA engine to indicate it has halted */
 #define SDMA_ERR_HALT_TIMEOUT 10 /* ms */
+#define SIM_SDMA_ERR_HALT_TIMEOUT 1000 /* ms */
 /* all SDMA engine errors that cause a halt */
 
 #define SD(name) SEND_DMA_##name
@@ -498,7 +499,10 @@ static void sdma_err_halt_wait(struct work_struct *work)
 	u64 statuscsr;
 	unsigned long timeout;
 
-	timeout = jiffies + msecs_to_jiffies(SDMA_ERR_HALT_TIMEOUT);
+	if (unlikely(sde->dd->icode == ICODE_FUNCTIONAL_SIMULATOR))
+		timeout = jiffies + msecs_to_jiffies(SIM_SDMA_ERR_HALT_TIMEOUT);
+	else
+		timeout = jiffies + msecs_to_jiffies(SDMA_ERR_HALT_TIMEOUT);
 	while (1) {
 		statuscsr = read_sde_csr(sde, sde->dd->params->send_dma_status_reg);
 		statuscsr &= SD(STATUS_ENG_HALTED_SMASK);
