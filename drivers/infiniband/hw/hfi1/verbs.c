@@ -1743,11 +1743,7 @@ static const char * const driver_cntr_names[] = {
 	"DRIVER_EgrHdrFull"
 };
 
-static struct rdma_stat_desc *dev_cntr_descs;
-static struct rdma_stat_desc *port_cntr_descs;
 int num_driver_cntrs = ARRAY_SIZE(driver_cntr_names);
-static int num_dev_cntrs;
-static int num_port_cntrs;
 
 /*
  * Convert a list of names separated by '\n' into an array of NULL terminated
@@ -1792,39 +1788,19 @@ static int init_cntr_names(const char *names_in, const size_t names_len,
 
 static struct rdma_hw_stats *hfi1_alloc_hw_device_stats(struct ib_device *ibdev)
 {
-	if (!dev_cntr_descs) {
-		struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
-		int i, err;
+	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
 
-		err = init_cntr_names(dd->cntrnames, dd->cntrnameslen,
-				      num_driver_cntrs,
-				      &num_dev_cntrs, &dev_cntr_descs);
-		if (err)
-			return NULL;
-
-		for (i = 0; i < num_driver_cntrs; i++)
-			dev_cntr_descs[num_dev_cntrs + i].name =
-							driver_cntr_names[i];
-	}
-	return rdma_alloc_hw_stats_struct(dev_cntr_descs,
-					  num_dev_cntrs + num_driver_cntrs,
+	return rdma_alloc_hw_stats_struct(dd->dev_cntr_descs,
+					  dd->num_dev_cntrs + num_driver_cntrs,
 					  RDMA_HW_STATS_DEFAULT_LIFESPAN);
 }
 
 static struct rdma_hw_stats *hfi_alloc_hw_port_stats(struct ib_device *ibdev,
 						     u32 port_num)
 {
-	if (!port_cntr_descs) {
-		struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
-		int err;
+	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
 
-		err = init_cntr_names(dd->portcntrnames, dd->portcntrnameslen,
-				      0,
-				      &num_port_cntrs, &port_cntr_descs);
-		if (err)
-			return NULL;
-	}
-	return rdma_alloc_hw_stats_struct(port_cntr_descs, num_port_cntrs,
+	return rdma_alloc_hw_stats_struct(dd->port_cntr_descs, dd->num_port_cntrs,
 					  RDMA_HW_STATS_DEFAULT_LIFESPAN);
 }
 
@@ -1845,6 +1821,7 @@ static u64 hfi1_sps_ints(void)
 static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats,
 			u32 port, int index)
 {
+	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
 	u64 *values;
 	int count;
 
@@ -1852,16 +1829,16 @@ static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats,
 		u64 *stats = (u64 *)&hfi1_stats;
 		int i;
 
-		hfi1_read_cntrs(dd_from_ibdev(ibdev), NULL, &values);
-		values[num_dev_cntrs] = hfi1_sps_ints();
+		hfi1_read_cntrs(dd, NULL, &values);
+		values[dd->num_dev_cntrs] = hfi1_sps_ints();
 		for (i = 1; i < num_driver_cntrs; i++)
-			values[num_dev_cntrs + i] = stats[i];
-		count = num_dev_cntrs + num_driver_cntrs;
+			values[dd->num_dev_cntrs + i] = stats[i];
+		count = dd->num_dev_cntrs + num_driver_cntrs;
 	} else {
 		struct hfi1_ibport *ibp = to_iport(ibdev, port);
 
 		hfi1_read_portcntrs(ppd_from_ibp(ibp), NULL, &values);
-		count = num_port_cntrs;
+		count = dd->num_port_cntrs;
 	}
 
 	memcpy(stats->value, values, count * sizeof(u64));
@@ -1934,6 +1911,18 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	unsigned int i;
 	int ret;
 	u8 max_qos_shift;
+
+	ret = init_cntr_names(dd->cntrnames, dd->cntrnameslen,
+			      num_driver_cntrs,
+			      &dd->num_dev_cntrs, &dd->dev_cntr_descs);
+	if (ret)
+		goto err_cntr_descs;
+	for (i = 0; i < num_driver_cntrs; i++)
+		dd->dev_cntr_descs[dd->num_dev_cntrs + i].name = driver_cntr_names[i];
+	ret = init_cntr_names(dd->portcntrnames, dd->portcntrnameslen, 0,
+			      &dd->num_port_cntrs, &dd->port_cntr_descs);
+	if (ret)
+		goto err_cntr_descs;
 
 	/* rdmavt has only a single QPN space - use the largest QOS shift */
 	max_qos_shift = 1; /* always shift by at least 1 */
@@ -2081,6 +2070,9 @@ err_class:
 	rvt_unregister_device(&dd->verbs_dev.rdi);
 err_verbs_txreq:
 	verbs_txreq_exit(dev);
+err_cntr_descs:
+	kfree(dd->port_cntr_descs);
+	kfree(dd->dev_cntr_descs);
 	dd_dev_err(dd, "cannot register verbs: %d!\n", -ret);
 	return ret;
 }
@@ -2101,10 +2093,8 @@ void hfi1_unregister_ib_device(struct hfi1_devdata *dd)
 	del_timer_sync(&dev->mem_timer);
 	verbs_txreq_exit(dev);
 
-	kfree(dev_cntr_descs);
-	kfree(port_cntr_descs);
-	dev_cntr_descs = NULL;
-	port_cntr_descs = NULL;
+	kfree(dd->dev_cntr_descs);
+	kfree(dd->port_cntr_descs);
 }
 
 void hfi1_cnp_rcv(struct hfi1_packet *packet)
