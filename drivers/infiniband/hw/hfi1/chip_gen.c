@@ -208,10 +208,25 @@ static struct opa_smp *cport_get_portinfo(struct hfi1_devdata *dd, int port)
  */
 int hfi1_sriov_sync_ports(struct hfi1_devdata *dd, int si_mask)
 {
+	struct opa_smp *mad;
+	struct opa_port_info *pi;
+	int pidx;
 	int ret = 0;
 
 	if (dd->is_vf)
 		return -EINVAL;
+	for (pidx = 0; pidx < dd->params->num_ports; ++pidx) {
+		mad = cport_get_portinfo(dd, pidx + 1);
+		if (IS_ERR(mad)) {
+			ret = PTR_ERR(mad);
+		} else {
+			pi = (struct opa_port_info *)opa_get_smp_data(mad);
+			ret = pf2vf_push_portinfo(&dd->pport[pidx], mad, pi, si_mask);
+			kfree(mad);
+		}
+		if (!ret)
+			ret = pf2vf_push_sc2vlt(&dd->pport[pidx], si_mask);
+	}
 	return ret;
 }
 
@@ -417,10 +432,10 @@ int cport_set_link_state(struct hfi1_pportdata *ppd, struct opa_port_info *pi, u
 		      state == HLS_DN_POLL;
 
 	ppd_dev_info(ppd, "%s: current %s, new %s %s%s\n", __func__,
-		    link_state_name(ppd->host_link_state),
-		    link_state_name(orig_new_state),
-		    poll_bounce ? "(bounce) " : "",
-		    link_state_reason_name(ppd, state));
+		     link_state_name(ppd->host_link_state),
+		     link_state_name(orig_new_state),
+		     poll_bounce ? "(bounce) " : "",
+		     link_state_reason_name(ppd, state));
 
 	/*
 	 * If we're going to a (HLS_*) link state that implies the logical
