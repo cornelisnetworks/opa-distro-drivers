@@ -8,6 +8,7 @@
 #include "hfi.h"
 #include "chip.h"
 #include "chip_gen.h"
+#include "mad.h"
 #include "sriov.h"
 #include "vf2pf_int.h"
 
@@ -265,28 +266,100 @@ u16 vf2pf_get_qp_map(struct hfi1_devdata *dd, int pidx, u16 idx)
 	return 0; /* guaranteed to error(?) */
 }
 
-/* TODO:
- * Need a message handler for PF0 here. Receive a message from a VF,
- * determine 'si', make appropriate call, return results.
-	switch (op) {
-	...
-	case GET_CONFIG:
-		ret = sriov_get_config(dd, &msg->buf, si);
-		break;
-	case ASGN_RSRCS:
-		ret = hfi1_sriov_assign_rsrcs(dd, &msg->buf);
-		break;
-	case FREE_RSRCS:
-		ret = hfi1_sriov_free_rsrcs(dd, &msg->buf);
-		break;
-	case SC_OP:
-		ret = priv_reg_op(dd, ...);
-		break;
-	...
-	}
-	msg->ret = ret;
-	vf2pf_send_resp(dd, msg...);
+/*
+ * called on PF0 to distribute port_info to all VFs.
  */
+int pf2vf_push_portinfo(struct hfi1_pportdata *ppd, struct opa_smp *smp,
+			struct opa_port_info *pi, int si_mask)
+{
+	struct hfi1_devdata *dd = ppd->dd, *vdd;
+	struct pci_dev *pdev, *vpdev;
+	int id;
+	int ret;
+
+	if (dd->is_vf)
+		return -EINVAL;
+
+	if (si_mask == VF2PF_SI_ALL)
+		si_mask = dd->rsrcs.sync_done;
+	if (!si_mask)
+		return 0;
+
+	pdev = dd->pcidev;
+	/* TODO: use some common broadcast code... */
+	for (id = 0; id < dd->rsrcs.num_vfs; ++id) {
+		if (!(si_mask & (1 << (id + 1))))
+			continue;
+		/*
+		 * pci/iov.c uses pci_iov_virtfn_bus(pdev, id) but we don't have that,
+		 * will pdev->bus->number work?
+		 */
+		vpdev = pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus),
+						    pdev->bus->number,
+						    pci_iov_virtfn_devfn(pdev, id));
+		if (!vpdev)
+			continue; /* error or just skip? */
+		vdd = pci_get_drvdata(vpdev);
+		if (IS_LOCAL_VDD(vdd)) { /* must not be in VM... */
+			ret = update_from_opa_portinfo(&vdd->pport[ppd->hw_pidx], smp, pi);
+		} else {
+			/*
+			 * 'pi' is always opa_get_smp_data(smp) so we only
+			 * need to send 'smp' (the whole MAD).
+			 */
+			/* TODO: send message to PF0 */
+			ret = -EINVAL;
+		}
+		if (ret)
+			break;
+	}
+	return ret;
+}
+
+/*
+ * called on PF0 to distribute sc2vlt to all VFs.
+ */
+int pf2vf_push_sc2vlt(struct hfi1_pportdata *ppd, int si_mask)
+{
+	struct hfi1_devdata *dd = ppd->dd, *vdd;
+	struct pci_dev *pdev, *vpdev;
+	int id;
+	int ret = 0;
+
+	if (dd->is_vf)
+		return -EINVAL;
+
+	if (si_mask == VF2PF_SI_ALL)
+		si_mask = dd->rsrcs.sync_done;
+	if (!si_mask)
+		return 0;
+
+	pdev = dd->pcidev;
+	/* TODO: use some common broadcast code... */
+	for (id = 0; id < dd->rsrcs.num_vfs; ++id) {
+		if (!(si_mask & (1 << (id + 1))))
+			continue;
+		/*
+		 * pci/iov.c uses pci_iov_virtfn_bus(pdev, id) but we don't have that,
+		 * will pdev->bus->number work?
+		 */
+		vpdev = pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus),
+						    pdev->bus->number,
+						    pci_iov_virtfn_devfn(pdev, id));
+		if (!vpdev)
+			continue; /* error or just skip? */
+		vdd = pci_get_drvdata(vpdev);
+		if (IS_LOCAL_VDD(vdd)) { /* must not be in VM... */
+			hfi1_update_sc2vlt(&vdd->pport[ppd->hw_pidx], ppd->sc2vl, false);
+		} else {
+			/* TODO: send message to PF0 */
+			ret = -EINVAL;
+		}
+		if (ret)
+			break;
+	}
+	return ret;
+}
 
 static void vf2pf_syncup(struct hfi1_devdata *dd, int si)
 {
