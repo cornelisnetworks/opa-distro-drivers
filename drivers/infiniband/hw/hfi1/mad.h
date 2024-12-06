@@ -400,6 +400,7 @@ void hfi1_handle_trap_timer(struct timer_list *t);
 u16 tx_link_width(u16 link_width);
 u64 get_xmit_wait_counters(struct hfi1_pportdata *ppd, u16 link_width,
 			   u16 link_speed, int vl);
+void hfi1_update_sc2vlt(struct hfi1_pportdata *ppd, void *data, bool filter);
 int hfi1_mad_init(struct hfi1_devdata *dd);
 int hfi1_mad_deinit(struct hfi1_devdata *dd);
 int get_sc2vlt_tables(struct hfi1_pportdata *ppd, void *data);
