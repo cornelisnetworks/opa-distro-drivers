@@ -699,6 +699,7 @@ static ssize_t hw_resources_show(struct device *device,
 	}
 
 	/* add more resource printing here (SRIOV) */
+	off += vf2pf_sysfs_emit_at(dd, buf, off);
 	if (off >= PAGE_SIZE) {
 		dd_dev_warn(dd, "hw_resources exceeds PAGE_SIZE.\n");
 		return -EFBIG;

@@ -58,9 +58,6 @@ MODULE_PARM_DESC(pio_per_vf, "Number of PIO blocks (credits) per VF");
 
 #define HFI_MIN_PF0_CONTEXTS	32	/* includes max used by CPORT */
 #define HFI_MIN_PF0_SDE		2
-/* TODO: how many required? */
-#define HFI_MIN_PF0_RCVARY(c)	(512 * (c))	/* includes max used by CPORT */
-#define HFI_MIN_PF0_PIO(c)	(256 * (c))	/* includes max used by CPORT */
 
 /*
  * Only called on PF0, but possibly on behalf of VF.
