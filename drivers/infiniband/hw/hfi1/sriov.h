@@ -11,6 +11,10 @@
 #include <linux/pci.h>
 #include "hfi.h"
 
+/* These describe how SRIOV allocates these resources to contexts */
+#define HFI_MIN_PF0_RCVARY(c)	(512 * (c))
+#define HFI_MIN_PF0_PIO(c)	(256 * (c))
+
 int hfi1_sriov_set_si(struct hfi1_devdata *dd);
 int hfi1_sriov_set_cfg(struct hfi1_devdata *dd);
 void hfi1_sriov_free_cfg(struct hfi1_devdata *dd);
