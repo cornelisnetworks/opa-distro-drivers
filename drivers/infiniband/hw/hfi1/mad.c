@@ -16,6 +16,7 @@
 #include "qp.h"
 #include "vnic.h"
 #include "rdma/ib_sa.h"
+#include "vf2pf.h"
 
 #undef CPORT_MAD_TRACE	/* lots of messages for every local MAD */
 #undef CPORT_UMAD_TRACE	/* lots of messages for every user MAD */
@@ -5770,6 +5771,16 @@ int update_from_opa_portinfo(struct hfi1_pportdata *ppd,
 
 	/* Finally, perform "safe" version of set_port_states() */
 	cport_set_port_states(ppd, pi, ls_new, ps_new);
+	if (dd->is_sriov && !dd->is_vf) {
+		/*
+		 * TODO: does this need to be spawned off to a WQ?
+		 * That requires making a copy of 'smp' since caller
+		 * may destroy that on return from here.
+		 */
+		i = pf2vf_push_portinfo(ppd, smp, pi, VF2PF_SI_ALL);
+		if (i)
+			ppd_dev_err(ppd, "pf2vf_push_portinfo failed %d\n", i);
+	}
 
 	return 0;
 }
@@ -5972,6 +5983,15 @@ static int cport_set_opa_scvlr(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 	return sts;
 }
 
+void hfi1_update_sc2vlt(struct hfi1_pportdata *ppd, void *data, bool filter)
+{
+	write_seqlock_irq(&ppd->sc2vl_lock);
+	memcpy(ppd->sc2vl, data, sizeof(ppd->sc2vl));
+	if (filter)
+		filter_sc2vlt(ppd->sc2vl, true);
+	write_sequnlock_irq(&ppd->sc2vl_lock);
+}
+
 static int cport_set_opa_scvlt(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 			       u8 *data)
 {
@@ -5982,6 +6002,7 @@ static int cport_set_opa_scvlt(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 	size_t size = 4 * sizeof(u64);	/* see __subn_set_opa_sc_to_vlt() */
 	u32 max_len = (u32)opa_get_smp_data_size(smp);
 	int sts = MSG_RSP_STATUS_INVALID_STATE;
+	int res;
 
 	if (n_blocks != 1 || async_update || smp_length_check(size, max_len))
 		goto out;
@@ -5995,11 +6016,18 @@ static int cport_set_opa_scvlt(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 	 * Also, need to avoid altering (filter_sc2vlt()) the MAD data since
 	 * it needs to be sent back to requesting node.
 	 */
-	write_seqlock_irq(&ppd->sc2vl_lock);
-	memcpy(ppd->sc2vl, data, sizeof(ppd->sc2vl));
-	filter_sc2vlt(ppd->sc2vl, true);
-	write_sequnlock_irq(&ppd->sc2vl_lock);
+	hfi1_update_sc2vlt(ppd, data, true);
 	sts = 0;
+	if (ppd->dd->is_sriov && !ppd->dd->is_vf) {
+		/*
+		 * TODO: does this need to be spawned off to a WQ?
+		 * That requires making a copy of 'smp' since caller
+		 * may destroy that on return from here.
+		 */
+		res = pf2vf_push_sc2vlt(ppd, VF2PF_SI_ALL);
+		if (res)
+			ppd_dev_err(ppd, "pf2vf_push_sc2vlt failed %d\n", res);
+	}
 out:
 #ifdef CPORT_MAD_TRACE
 	ppd_dev_info(ppd, "SC_TO_VLT MAPPING (%d)\n", sts);
