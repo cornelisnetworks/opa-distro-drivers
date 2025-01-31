@@ -728,6 +728,8 @@ bool apply_link_downgrade_policy(struct hfi1_pportdata *ppd,
 				 bool refresh_widths);
 void update_usrhead(struct hfi1_ctxtdata *rcd, u32 hd, u32 updegr, u32 egrhd,
 		    u32 intr_adjust, u32 npkts);
+void update_usrhead_ctxt(struct hfi1_devdata *dd, u16 ctxt, u32 hd, u32 intr_cnt,
+			 u32 updegr, u32 egrhd);
 int stop_drain_data_vls(struct hfi1_pportdata *ppd);
 int open_fill_data_vls(struct hfi1_pportdata *ppd);
 u32 ns_to_cclock(struct hfi1_devdata *dd, u32 ns);
@@ -1241,6 +1243,15 @@ enum {
 	| SEND_EGRESS_ERR_INFO_VL_MAPPING_ERR_SMASK \
 	| SEND_EGRESS_ERR_INFO_VL_ERR_SMASK)
 
+#define RT_ADDR_SHIFT 12	/* 4KB kernel address boundary */
+
+/* PIO Send Memory Address details */
+#define PIO_ADDR_CONTEXT_MASK	0xfful
+#define PIO_ADDR_CONTEXT_SHIFT	16
+#define SOP_DISTANCE	(TXE_PIO_SIZE / 2)	/* distance btw non-SOP and SOP space */
+#define PIO_BLOCK_MASK	(PIO_BLOCK_SIZE - 1)
+#define PIO_BLOCK_QWS	(PIO_BLOCK_SIZE / sizeof(u64))	/* num QWs in a block */
+
 u64 get_all_cpu_total(u64 __percpu *cntr);
 void hfi1_start_cleanup(struct hfi1_devdata *dd);
 void hfi1_clear_tids(struct hfi1_ctxtdata *rcd);
@@ -1411,6 +1422,8 @@ int alloc_rsm_rule(struct hfi1_devdata *dd, int type);
 void add_rsm_rule(struct hfi1_devdata *dd, u8 rule_index,
 			 struct rsm_rule_data *rrd);
 void restore_qpmap_table(struct hfi1_devdata *dd);
+
+u32 hfi1_encoded_size(u32 size);
 
 struct cntr_entry {
 	/* counter name */

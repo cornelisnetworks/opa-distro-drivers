@@ -689,10 +689,6 @@ void jkr_set_port_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
 
 static inline u32 rcvarray_offset(u32 ctxt, u32 index, u32 type)
 {
-/* RcvArray access shifts */
-#define JKR_RCV_ARRAY_EGR_TID_SELECT_SHIFT 25
-#define JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT 17
-#define JKR_RCV_ARRAY_CSR_INDEX_SHIFT 3
 	return (type == PT_EAGER ? 0 : BIT(JKR_RCV_ARRAY_EGR_TID_SELECT_SHIFT))
 	       | (ctxt_bar_ctxt(ctxt) << JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT)
 	       | (index << JKR_RCV_ARRAY_CSR_INDEX_SHIFT);
