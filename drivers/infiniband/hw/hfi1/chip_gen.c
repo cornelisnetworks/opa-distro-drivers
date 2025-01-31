@@ -10,6 +10,7 @@
 #include "chip_jkr.h"
 #include "cport_traps.h"
 #include "vf2pf.h"
+#include "sriov.h"
 
 #undef DEBUG_CPORT_TRAP
 
@@ -641,6 +642,254 @@ int cport_read_temp(struct hfi1_devdata *dd, struct cport_temp *gen_temp)
 done:
 	kfree(how);
 	return ret;
+}
+
+static void gen_reset_rcvarray(struct hfi1_devdata *dd, u16 ctxt, u32 ra_cnt)
+{
+	u8 __iomem *ra;
+	u32 off;
+	u32 idx;
+
+	ra = dd->bar_maps[ctxt_bar_idx(ctxt)].rcvarray_wc;
+	ctxt = ctxt_bar_ctxt(ctxt);
+	for (idx = 0; idx < ra_cnt; ++idx) {
+		off = (ctxt << JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT) |
+		      (idx << JKR_RCV_ARRAY_CSR_INDEX_SHIFT);
+		writeq(RCV_ARRAY_RT_WRITE_ENABLE_SMASK, ra + off);
+	}
+	flush_wc();
+}
+
+/*
+ * Called on PF0 before VFs are created.
+ * Context will be used for Eager only (no TID).
+ * Initialize all CSRs that can only be accessed by PF0.
+ * May be called to reset context for re-use.
+ */
+int gen_init_rctxt_egr(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt,
+		       u32 ra_base, u32 ra_cnt, u32 hdr_size)
+{
+	u64 reg, kreg;
+
+	/* might need to reclaim context in PF0 */
+	if (si)
+		write_rctxt_csr(dd, ctxt, JKR_RCV_SI_IDX, 0);
+
+	/* reset eager head/tail by enabling ctxt after write of 0 to heads */
+	kreg = read_kctxt_csr(dd, ctxt, dd->params->rcv_kctxt_ctrl_reg);
+
+	/* disable context, in case it was previously used */
+	jkr_ena_rcv_ctxt(dd, pidx, ctxt, false);
+	/* remove RCV_CTXT_CTRL_ENABLE_SMASK (disable) */
+	kreg &= ~RCV_CTXT_CTRL_ENABLE_SMASK;
+	/* force these bits */
+	kreg |= RCV_CTXT_CTRL_ONE_PACKET_PER_EGR_BUFFER_SMASK |
+		JKR_RCV_KCTXT_CTRL_RECEIVE_CUT_THROUGH_DISABLE_SMASK;
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_kctxt_ctrl_reg, kreg);
+
+	reg = ((u64)(ra_cnt >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_CNT_SHIFT) |
+	      ((u64)(ra_base >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_BASE_INDEX_SHIFT);
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, reg);
+	jkr_upd_rcv_hdr_size(dd, pidx, ctxt, hdr_size);
+
+	reg = RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_rctxt_ctrl_reg, reg);
+
+	write_uctxt_csr(dd, ctxt, dd->params->rcv_hdr_head_reg, 0);
+	write_uctxt_csr(dd, ctxt, dd->params->rcv_egr_index_head_reg, 0);
+
+	gen_reset_rcvarray(dd, ctxt, ra_cnt);
+
+	/* (re-)enable context */
+	jkr_ena_rcv_ctxt(dd, pidx, ctxt, true);
+	kreg |= RCV_CTXT_CTRL_ENABLE_SMASK;
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_kctxt_ctrl_reg, kreg);
+
+	/* must be done after enable */
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_avail_time_out_reg,
+			RCV_AVAIL_TIME_OUT_TIME_OUT_RELOAD_MASK <<
+			RCV_AVAIL_TIME_OUT_TIME_OUT_RELOAD_SHIFT);
+	update_usrhead_ctxt(dd, ctxt, 0, 1, 0, 0);	/* needed for interrupts */
+
+	/*
+	 * Leave something for the VF to probe on.
+	 * Set any non-zero value, will be changed by VF later.
+	 */
+	reg = ((u64)encode_rcv_header_entry_size(32) & RCV_HDR_ENT_SIZE_ENT_SIZE_MASK) <<
+	      RCV_HDR_ENT_SIZE_ENT_SIZE_SHIFT;
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_ent_size_reg, reg);
+
+	/* finally, assign context to VF */
+	if (si)
+		write_rctxt_csr(dd, ctxt, JKR_RCV_SI_IDX, si);
+	return 0;
+}
+
+void gen_deinit_rctxt(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt)
+{
+	u32 ra_cnt;
+
+	/* first, assign context back to PF0 */
+	if (si)
+		write_rctxt_csr(dd, ctxt, JKR_RCV_SI_IDX, 0);
+
+	ra_cnt = ((read_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg) >>
+		   RCV_EGR_CTRL_EGR_CNT_SHIFT) &
+		  RCV_EGR_CTRL_EGR_CNT_MASK) << RCV_SHIFT;
+	jkr_ena_rcv_ctxt(dd, pidx, ctxt, false);
+
+	gen_reset_rcvarray(dd, ctxt, ra_cnt);
+
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_kctxt_ctrl_reg, 0);
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_rctxt_ctrl_reg, 0);
+	write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, 0);
+
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_cnt_reg, 0);
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_ent_size_reg, 0);
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_addr_reg, 0);
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_tail_addr_reg, 0);
+}
+
+/*
+ * Called by VFs before first VF-PF message.
+ */
+int gen_start_rctxt_egr(struct hfi1_devdata *dd, u8 pidx, u16 ctxt,
+			struct hfi1_ctxtbufs *bufs)
+{
+	u8 __iomem *ra;
+	u16 order;
+	u32 off;
+	u64 reg;
+	u32 r_each, r_size;
+	dma_addr_t r_dma;
+	int idx;
+
+	/* assumes RCV_CTXT_CTRL_ONE_PACKET_PER_EGR_BUFFER_SMASK is set */
+	r_each = bufs->egr_buf_size;
+	r_dma = bufs->egr.dma;
+	r_size = bufs->egr.size;
+	idx = 0;
+	order = hfi1_encoded_size(r_each);
+	ra = dd->bar_maps[ctxt_bar_idx(ctxt)].rcvarray_wc;
+	while (r_size >= r_each) {
+		off = (ctxt_bar_ctxt(ctxt) << JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT) |
+		      (idx << JKR_RCV_ARRAY_CSR_INDEX_SHIFT);
+		reg = RCV_ARRAY_RT_WRITE_ENABLE_SMASK |
+		      ((u64)order << JKR_RCV_ARRAY_EGR_RT_BUF_SIZE_SHIFT) |
+		      (r_dma >> RT_ADDR_SHIFT);
+		writeq(reg, ra + off);
+		++idx;
+		r_size -= r_each;
+		r_dma += r_each;
+	}
+	flush_wc();
+	if (!idx)	/* none allocated */
+		return -ENOSPC;
+
+	reg = (((u64)bufs->rhq_cnt >> HDRQ_SIZE_SHIFT) & RCV_HDR_CNT_CNT_MASK) <<
+	      RCV_HDR_CNT_CNT_SHIFT;
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_cnt_reg, reg);
+	reg = ((u64)encode_rcv_header_entry_size(bufs->rhq_ent_size) &
+	       RCV_HDR_ENT_SIZE_ENT_SIZE_MASK) << RCV_HDR_ENT_SIZE_ENT_SIZE_SHIFT;
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_ent_size_reg, reg);
+
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_addr_reg, bufs->rhq.dma);
+	if (dd->params->set_rheq_addr)
+		dd->params->set_rheq_addr(dd, ctxt, bufs->rheq.dma);
+
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_tail_addr_reg,
+			dd->rcvhdrtail_dummy_dma);
+
+	return 0;
+}
+
+/*
+ * Called on PF0 before VFs are created.
+ * Context is used for PIO only (no SDMA).
+ * Initialize all CSRs that can only be accessed by PF0.
+ */
+int gen_init_sctxt_pio(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt,
+		       u32 cr_base, u32 cr_cnt)
+{
+	u64 reg;
+	int ret;
+
+	/* might need to reclaim context in PF0 */
+	if (si)
+		write_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * ctxt), 0);
+
+	/* first, ensure context is disabled - to ensure reset */
+	ret = priv_reg_op(dd, pidx, ctxt, SC_KERNEL, SC_DISABLE_OP, 0);
+	if (ret)
+		return ret;
+
+	reg = ((u64)cr_cnt << SEND_CTXT_CTRL_CTXT_DEPTH_SHIFT) |
+	      ((u64)cr_base << dd->params->pio_base_shift);
+	write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, reg);
+	/* or: dd->params->set_pio_integrity(dd, pidx, ctxt, SC_KERNEL, SPI_INIT) */
+	write_epsc_csr(dd, pidx, ctxt,
+		       dd->params->send_ctxt_check_enable_reg,
+		       JKR_SEND_CTXT_CHECK_ENABLE_L2_TYPE9BALLOWED_SMASK);
+	write_epsc_csr(dd, pidx, ctxt,
+		       dd->params->send_ctxt_check_partition_key_reg,
+		       (SEND_CTXT_CHECK_PARTITION_KEY_VALUE_MASK & DEFAULT_PKEY) <<
+		       SEND_CTXT_CHECK_PARTITION_KEY_VALUE_SHIFT);
+	write_epsc_csr(dd, pidx, ctxt,
+		       dd->params->send_ctxt_check_opcode_reg,
+		       ((u64)OPCODE_CHECK_MASK_DISABLED <<
+			SEND_CTXT_CHECK_OPCODE_MASK_SHIFT) |
+		       ((u64)OPCODE_CHECK_VAL_DISABLED <<
+			SEND_CTXT_CHECK_OPCODE_VALUE_SHIFT));
+
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_err_mask_reg, 0);
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_credit_return_addr_reg, 0);
+
+	/* TODO: what is the correct CR threshold? */
+	reg = 1 << SEND_CTXT_CREDIT_CTRL_THRESHOLD_SHIFT;
+	/* TODO: need to save? sc->credit_ctrl = reg; */
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_credit_ctrl_reg, reg);
+	/* send_ctxt_check_vl_reg stays 0? */
+
+	/* this does a PIO init on the context */
+	ret = priv_reg_op(dd, pidx, ctxt, SC_KERNEL, SC_ENABLE_OP, 0);
+	if (ret)
+		return ret;
+
+	/* finally, assign context to VF */
+	if (si)
+		write_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * ctxt), si);
+
+	return 0;
+}
+
+void gen_deinit_sctxt(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt)
+{
+	/* first, assign context back to PF0 */
+	if (si)
+		write_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * ctxt), 0);
+
+	write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, 0);
+	write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_enable_reg, 0);
+	write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_partition_key_reg, 0);
+	write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_opcode_reg, 0);
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_err_mask_reg, 0);
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_credit_return_addr_reg, 0);
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_credit_ctrl_reg, 0);
+}
+
+/*
+ * Called by VFs before first VF-PF message.
+ */
+int gen_start_sctxt(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, struct hfi1_ctxtbufs *bufs)
+{
+	u64 reg;
+
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_err_mask_reg, (u64)-1);
+
+	reg = bufs->cr.dma & SEND_CTXT_CREDIT_RETURN_ADDR_ADDRESS_SMASK;
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_credit_return_addr_reg, reg);
+
+	return 0;
 }
 
 static void set_sc_check(struct hfi1_devdata *dd, u8 pidx, u32 ctxt, int type)
