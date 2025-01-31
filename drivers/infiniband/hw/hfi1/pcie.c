@@ -13,6 +13,7 @@
 #include "hfi.h"
 #include "chip_registers.h"
 #include "aspm.h"
+#include "sriov.h"
 
 /*
  * This file contains PCIe utility routines.
@@ -150,6 +151,7 @@ static int do_bar_map(struct hfi1_devdata *dd, struct pci_dev *pdev, int idx)
 		/* verify that reads actually work, save revision for reset check */
 		/*
 		 * VFs don't have a CCE_REVISION, so need to avoid access violation.
+		 * Calling vf2pf_get_config() provides this information to VFs.
 		 */
 		if (!dd->is_vf) {
 			dd->revision = readq(bm->kregbase1 + CCE_REVISION);
@@ -212,6 +214,10 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 	if (ret)
 		goto fail;
 	ret = do_bar_map(dd, pdev, 2);
+	if (ret)
+		goto fail;
+	/* this may require BARs, mapped above */
+	ret = hfi1_sriov_set_si(dd);
 	if (ret)
 		goto fail;
 
