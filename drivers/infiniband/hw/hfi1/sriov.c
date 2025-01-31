@@ -33,10 +33,244 @@ MODULE_PARM_DESC(vf_claim, "Claim VF PCI devices on host");
 #endif
 
 #ifdef HFI_SRIOV_MOD_PARAMS
+static uint si_idx;
 static uint max_num_vfs;
+static uint ctxt_per_vf; /* send/recv use same number */
+static uint sdma_per_vf;
+static uint rcv_per_vf;
+static uint pio_per_vf;
+
+/* all of these are fixed at driver load */
+module_param_named(si_idx, si_idx, uint, 0444);
 module_param_named(max_num_vfs, max_num_vfs, uint, 0444);
+module_param_named(ctxt_per_vf, ctxt_per_vf, uint, 0444);
+module_param_named(sdma_per_vf, sdma_per_vf, uint, 0444);
+module_param_named(rcv_per_vf, rcv_per_vf, uint, 0444);
+module_param_named(pio_per_vf, pio_per_vf, uint, 0444);
+
+MODULE_PARM_DESC(si_idx, "The SiIdx that this driver represents");
 MODULE_PARM_DESC(max_num_vfs, "Allow SRIOV and specify max num VFs");
+MODULE_PARM_DESC(ctxt_per_vf, "Number of send/recv contexts per VF");
+MODULE_PARM_DESC(sdma_per_vf, "Number of SEDMA engines per VF");
+MODULE_PARM_DESC(rcv_per_vf, "Number of RcvArray blocks per VF");
+MODULE_PARM_DESC(pio_per_vf, "Number of PIO blocks (credits) per VF");
 #endif
+
+#define HFI_MIN_PF0_CONTEXTS	32	/* includes max used by CPORT */
+#define HFI_MIN_PF0_SDE		2
+/* TODO: how many required? */
+#define HFI_MIN_PF0_RCVARY(c)	(512 * (c))	/* includes max used by CPORT */
+#define HFI_MIN_PF0_PIO(c)	(256 * (c))	/* includes max used by CPORT */
+
+/*
+ * Only called on PF0, but possibly on behalf of VF.
+ *
+ * 'dd' is the PF0, 'out' is the target based on 'si'.
+ * 'out' is assumed to be uninitialized.
+ */
+int sriov_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si)
+{
+	u32 num_ctxt, pf0_ctxts, vf2pf_ctxts;
+	u32 num_sdma;
+	u32 num_rcvary;
+	u32 num_pio;
+	int num_vfs = 0;
+	int num;
+
+#ifdef HFI_SRIOV_MOD_PARAMS
+	num_vfs = max_num_vfs;
+#endif
+	/* TODO: other methods of SRIOV config... */
+
+	if (!num_vfs)
+		return -ENODEV;
+
+	if (si > JKR_C_CCE_NUM_VFS || num_vfs > JKR_C_CCE_NUM_VFS)
+		return -EINVAL;
+
+#ifdef HFI_SRIOV_MOD_PARAMS
+	/*
+	 * Assumes #send contexts == #recv contexts, uses #recv
+	 * as the limit since #send might be larger in the future.
+	 */
+	vf2pf_ctxts = vf2pf_num_ctxts(dd);
+	num_ctxt = chip_rcv_contexts(dd) - vf2pf_ctxts;
+	num_sdma = chip_sdma_engines(dd);
+	num_rcvary = chip_rcv_array_count(dd) - HFI_MIN_PF0_RCVARY(vf2pf_ctxts);
+	num_pio = chip_pio_mem_size(dd) / PIO_BLOCK_SIZE - HFI_MIN_PF0_PIO(vf2pf_ctxts);
+
+	/*
+	 * Automatically adjust excessive values and set defaults for '0'.
+	 * This may not work well if adapters of different architecture are
+	 * installed (and having SRIOV capability).
+	 */
+	if (!ctxt_per_vf)
+		ctxt_per_vf = (num_ctxt - HFI_MIN_PF0_CONTEXTS) / max_num_vfs;
+	if (ctxt_per_vf * max_num_vfs > num_ctxt - HFI_MIN_PF0_CONTEXTS) {
+		ctxt_per_vf = (num_ctxt - HFI_MIN_PF0_CONTEXTS) / max_num_vfs;
+		dd_dev_info(dd, "Reducing ctxt_per_vf to %d\n", ctxt_per_vf);
+	}
+	pf0_ctxts = num_ctxt - ctxt_per_vf * max_num_vfs;
+
+	if (!sdma_per_vf)
+		sdma_per_vf = (num_sdma - HFI_MIN_PF0_SDE) / max_num_vfs;
+	if (!rcv_per_vf)
+		rcv_per_vf = (num_rcvary - HFI_MIN_PF0_RCVARY(pf0_ctxts)) / max_num_vfs;
+	if (!pio_per_vf)
+		pio_per_vf = (num_pio - HFI_MIN_PF0_PIO(pf0_ctxts)) / max_num_vfs;
+
+	if (sdma_per_vf * max_num_vfs > num_sdma - HFI_MIN_PF0_SDE) {
+		sdma_per_vf = (num_sdma - HFI_MIN_PF0_SDE) / max_num_vfs;
+		dd_dev_info(dd, "Reducing sdma_per_vf to %d\n", sdma_per_vf);
+	}
+	if (rcv_per_vf * max_num_vfs > num_rcvary - HFI_MIN_PF0_RCVARY(pf0_ctxts)) {
+		rcv_per_vf = (num_rcvary - HFI_MIN_PF0_RCVARY(pf0_ctxts)) / max_num_vfs;
+		dd_dev_info(dd, "Reducing rcv_per_vf to %d\n", rcv_per_vf);
+	}
+	if (pio_per_vf * max_num_vfs > num_pio - HFI_MIN_PF0_PIO(pf0_ctxts)) {
+		pio_per_vf = (num_pio - HFI_MIN_PF0_PIO(pf0_ctxts)) / max_num_vfs;
+		dd_dev_info(dd, "Reducing pio_per_vf to %d\n", pio_per_vf);
+	}
+
+	out->num_vfs = max_num_vfs;
+	out->si_idx = si;
+	out->pfunit = dd->unit;
+	/* si_idx == 0 implies PF0, which decides all VF resources */
+
+	num = si ? si : max_num_vfs + 1; /* never 0 */
+	out->c.first_send_context = si ? num_ctxt - num * ctxt_per_vf : 0;
+	out->c.last_send_context = num_ctxt - (num - 1) * ctxt_per_vf;
+	out->c.first_rcv_context = si ? num_ctxt - num * ctxt_per_vf : 0;
+	out->c.last_rcv_context = num_ctxt - (num - 1) * ctxt_per_vf;
+	out->first_sdma_engine = si ? num_sdma - num * sdma_per_vf : 0;
+	out->last_sdma_engine = num_sdma - (num - 1) * sdma_per_vf;
+	out->c.first_rcvarray_entry = si ? num_rcvary - num * rcv_per_vf : 0;
+	out->c.last_rcvarray_entry = num_rcvary - (num - 1) * rcv_per_vf;
+	out->c.first_pio_block = si ? num_pio - num * pio_per_vf : 0;
+	out->c.last_pio_block = num_pio - (num - 1) * pio_per_vf;
+#endif
+	return 0;
+}
+
+/*
+ * If SRIOV is allowed (max_num_vfs > 0) then divide up
+ * resources according to heuristics or limits. The rest of the driver
+ * init should use these parameters, if available (dd->rsrcs.num_vfs != 0).
+ * Note that the driver can no longer assume a resource begins at "0".
+ */
+int hfi1_sriov_set_cfg(struct hfi1_devdata *dd)
+{
+	int ret;
+
+	if (dd->params->chip_type == CHIP_WFR)
+		return 0;
+	/* prior call to hfi1_sriov_set_si() must have succeeded */
+	if (dd->is_vf) {
+		ret = vf2pf_get_config(dd, &dd->rsrcs, dd->rsrcs.si_idx);
+		return ret;
+	}
+	if (!sriov_is_enabled())
+		return 0;
+
+	ret = sriov_get_config(dd, &dd->rsrcs, 0);
+	return ret;
+}
+
+int hfi1_sriov_set_si(struct hfi1_devdata *dd)
+{
+	int si = 0; /* assume PF0 to start */
+
+	if (!dd->is_vf)
+		goto out_set;
+
+	si = si_idx;
+	if (!si) {
+		if (dd->is_vm)
+			si = vf2pf_probe_si(dd); /* hope for the best */
+		else
+			/* TODO: need to adjust for CYR? does pci_iov already do that? */
+			si = pci_iov_vf_id(dd->pcidev) + 1;
+	}
+	if (!si) {
+		dd_dev_err(dd, "Cannot determine device SI\n");
+		return -ENXIO;
+	}
+out_set:
+	dd->rsrcs.si_idx = si;
+	return 0;
+}
+
+/*
+ * Sets the SiIdx CSRs of contrexts and SDMA engines for
+ * VF1..VFn based on data passed in 'dr'.
+ *
+ * Only PF0 can access the SiIdx CSRS, so any other callers
+ * just return success.
+ *
+ * Called on behalf of a VF when it makes first contact with PF0.
+ */
+int hfi1_sriov_assign_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *dr)
+{
+	int x;
+
+	if (dd->is_vf)
+		return vf2pf_assign_rsrcs(dd, dr);
+
+	/* Only valid on PF0, if SRIOV is allowed */
+	if (!dd->rsrcs.num_vfs || dd->rsrcs.si_idx)
+		return 0;
+
+	/*
+	 * In theory, resources allocated to PF0 never need to have their
+	 * SiIdx written.
+	 */
+	if (!dr->si_idx)
+		return 0;
+
+	for (x = dr->c.first_send_context; x < dr->c.last_send_context; ++x)
+		write_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * x), dr->si_idx);
+	for (x = dr->c.first_rcv_context; x < dr->c.last_rcv_context; ++x)
+		write_rctxt_csr(dd, x, JKR_RCV_SI_IDX, dr->si_idx);
+	for (x = dr->first_sdma_engine; x < dr->last_sdma_engine; ++x)
+		write_csr(dd, JKR_SEND_DMA_CFG_SI_IDX + (8 * x), dr->si_idx);
+	return 0;
+}
+
+/*
+ * Resets the SiIdx CSRs of contrexts and SDMA engines for
+ * VF1..VFn back to PF0.
+ *
+ * Only PF0 can access the SiIdx CSRS, so any other callers
+ * just return success.
+ *
+ * Called on behalf of a VF when it disconnects with PF0.
+ */
+void hfi1_sriov_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *dr)
+{
+	int x;
+
+	if (dd->is_vf) {
+		vf2pf_free_rsrcs(dd, dr);
+		return;
+	}
+	/* Only valid on PF0, if SRIOV is allowed */
+	if (!dd->rsrcs.num_vfs || dd->rsrcs.si_idx)
+		return;
+
+	/*
+	 * In theory, resources allocated to PF0 never need to have their
+	 * SiIdx written.
+	 */
+	if (!dr->si_idx)
+		return;
+
+	for (x = dr->c.first_send_context; x < dr->c.last_send_context; ++x)
+		write_csr(dd, JKR_SEND_CTXT_SI_IDX + (8 * x), 0);
+	for (x = dr->c.first_rcv_context; x < dr->c.last_rcv_context; ++x)
+		write_rctxt_csr(dd, x, JKR_RCV_SI_IDX, 0);
+	for (x = dr->first_sdma_engine; x < dr->last_sdma_engine; ++x)
+		write_csr(dd, JKR_SEND_DMA_CFG_SI_IDX + (8 * x), 0);
+}
 
 /*
  * Free all SRIOV configuration resources. Called during
@@ -46,7 +280,8 @@ MODULE_PARM_DESC(max_num_vfs, "Allow SRIOV and specify max num VFs");
  */
 void hfi1_sriov_free_cfg(struct hfi1_devdata *dd)
 {
-	/* TODO: free resources back to PF0 */
+	/* On PF0, set all SiIdx back to 0 */
+	hfi1_sriov_free_rsrcs(dd, &dd->rsrcs);
 }
 
 /* NOTE:
@@ -169,6 +404,9 @@ int hfi1_sriov_configure(struct pci_dev *pdev, int nvf)
 
 	if (!nvf)
 		return hfi1_sriov_deconfigure(dd);
+
+	if (nvf > max_num_vfs)
+		return -EINVAL;
 
 	/* prepare VF resources (contexts) for creation of VFs */
 	ret = vf2pf_prep(dd);

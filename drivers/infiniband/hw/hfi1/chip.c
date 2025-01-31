@@ -30,6 +30,7 @@
 #include "chip_registers_jkr.h"
 #include "bulksvc.h"
 #include "vf2pf.h"
+#include "sriov.h"
 
 uint num_vls = HFI1_MAX_VLS_SUPPORTED;
 module_param(num_vls, uint, S_IRUGO);
@@ -16231,6 +16232,16 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	if (ret)
 		goto bail_cleanup;
 
+	/*
+	 * must be done before dd->params->find_used_resources()
+	 * but after hfi1_pcie_ddinit() (BARs enabled).
+	 * After this call, dd->rsrcs should have basic data needed
+	 * to initialize the driver resources.
+	 */
+	ret = hfi1_sriov_set_cfg(dd);
+	if (ret)
+		goto bail;
+
 	if (num_vls < HFI1_MIN_VLS_SUPPORTED ||
 	    num_vls > HFI1_MAX_VLS_SUPPORTED) {
 		dd_dev_err(dd, "Invalid num_vls %u, using %u VLs\n",
@@ -16252,6 +16263,11 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 			num_vls = sdma_engines;
 		}
 
+		/*
+		 * TODO: use of 'mod_num_sdma' is dubious at best,
+		 * should revisit whether this is supported at all.
+		 * It is not being factored into SRIOV SDMA assignment.
+		 */
 		if (mod_num_sdma &&
 		    /* can't exceed chip support */
 		    mod_num_sdma <= sdma_engines &&
@@ -16266,8 +16282,19 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 				hfi1_bulksvc_teardown(dd); /* disable bulksvc */
 		}
 		dd->num_sdma = sdma_engines;
-		dr->first_sdma_engine = 0;
-		dr->last_sdma_engine = dd->num_sdma;
+		if (dr->num_vfs) {
+			int num_sde = dr->last_sdma_engine - dr->first_sdma_engine;
+
+			/* resources already setup by hfi1_sriov_set_cfg() */
+			if (num_vls > num_sde) {
+				dd_dev_err(dd, "SI%d: num_vls %u too large, using %u VLs\n",
+					   dr->si_idx, num_vls, num_sde);
+				num_vls = num_sde;
+			}
+		} else {
+			dr->first_sdma_engine = 0;
+			dr->last_sdma_engine = dd->num_sdma;
+		}
 	} else {
 		HFI1_CAP_CLEAR(SDMA_AHG);
 		dd->num_sdma = 0;
@@ -16344,7 +16371,8 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 
 	/*
 	 * Obtain the hardware ID - NOT related to unit, which is a
-	 * software enumeration. VFs can't access CSR directly.
+	 * software enumeration. VFs can't access CSR directly and
+	 * already got this from PF0 via vf2pf_get_config().
 	 */
 	if (!dd->is_vf) {
 		reg = read_csr(dd, CCE_REVISION2);
@@ -16504,6 +16532,7 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 bail_clear_comp_vectors:
 	hfi1_comp_vectors_clean_up(dd);
 bail_free_rx:
+	hfi1_sriov_free_rsrcs(dd, &dd->rsrcs);
 	hfi1_free_rx(dd);
 bail_free_boardname:
 	kfree(dd->boardname);

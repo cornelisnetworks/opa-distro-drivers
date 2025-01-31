@@ -11,7 +11,10 @@
 #include <linux/pci.h>
 #include "hfi.h"
 
+int hfi1_sriov_set_si(struct hfi1_devdata *dd);
+int hfi1_sriov_set_cfg(struct hfi1_devdata *dd);
 void hfi1_sriov_free_cfg(struct hfi1_devdata *dd);
+int hfi1_sriov_assign_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr);
 void hfi1_sriov_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr);
 
 int hfi1_sriov_init(struct pci_dev *pdev);
@@ -22,5 +25,6 @@ int hfi1_sriov_auto_conf(struct hfi1_devdata *dd);
 int hfi1_sriov_disable(struct pci_dev *pdev);
 
 int sriov_is_enabled(void);
+int sriov_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si);
 
 #endif /* _SRIOV_H */
