@@ -867,6 +867,13 @@ int hfi1_create_kctxts(struct hfi1_devdata *dd)
 	u16 j;
 	int ret;
 
+	/*
+	 * TODO: This SI might have only a fraction of the total contexts,
+	 * so this is making dd->rcd much larger than needed. Unfortunately,
+	 * current code requires that dd->rcd[x].ctxt == x (h/w context number
+	 * must be the same as dd->rcd index number - s/w context number)
+	 * and much code needs to change in order to fix this.
+	 */
 	dd->num_rcd = chip_rcv_contexts(dd);
 	dd->rcd = kcalloc_node(dd->num_rcd, sizeof(*dd->rcd),
 			       GFP_KERNEL, dd->node);
@@ -1664,6 +1671,12 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 		}
 	}
 
+	/*
+	 * TODO: This SI might have only a fraction of the total contexts,
+	 * so this is making dd->events much larger than needed. Unfortunately,
+	 * uctxt_offset() uses the h/w context number and so all that would
+	 * need to change in order to fix this.
+	 */
 	/* Allocate enough memory for user event notification. */
 	len = PAGE_ALIGN(chip_rcv_contexts(dd) * HFI1_MAX_SHARED_CTXTS *
 			 sizeof(*dd->events));
@@ -1846,6 +1859,7 @@ static void shutdown_device(struct hfi1_devdata *dd)
 	if (dd->hfi1_wq)
 		flush_workqueue(dd->hfi1_wq);
 
+	/* TODO: PF0 may need to force all SDMA engines into shutdown, using CSRs */
 	sdma_exit(dd);
 }
 

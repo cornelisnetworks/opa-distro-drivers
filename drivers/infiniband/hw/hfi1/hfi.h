@@ -1457,6 +1457,11 @@ struct hfi1_portrsrcs {
 };
 
 /*
+ * This determines the source for data to fill-in dd->rsrcs.
+ */
+#define HFI_SRIOV_MOD_PARAMS
+
+/*
  * Device resources.
  */
 struct hfi1_devrsrcs {
