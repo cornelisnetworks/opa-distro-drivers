@@ -130,22 +130,111 @@ static int vf2pf_send_recv(struct hfi1_devdata *dd, u8 si, void *buf, long to)
 }
 
 /*
- * Example:
- * Called from something(...) if dd->is_vf is true.
- *
-int vf2pf_something(struct hfi1_devdata *dd, ...)
+ * VF call to PF0 to setup dd->rsrcs.
+ */
+int vf2pf_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si)
+{
+	int ret;
+
+	if (!dd->is_vf)
+		return -EINVAL;
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		ret = sriov_get_config(pdd, out, si);
+		if (ret)
+			return ret;
+		dd->base_guid = pdd->base_guid;
+		dd->revision = pdd->revision;
+		dd->hfi1_id = pdd->hfi1_id;
+		dd->icode = pdd->icode;
+		dd->irev = pdd->irev;
+		return 0;
+	}
+	/* TODO:
+	 * copy 'out' structure to message buffer, send to PF0 and get
+	 * response, copy results from message buffer to 'out'.
+	msg = kzalloc(...);
+	msg->op = GET_CONFIG;
+	memcpy(&msg->buf, out, sizeof(*out)); << TODO: anything to copyin?
+	ret = vf2pf_send_recv(dd, msg);
+	memcpy(out, &msg->buf, sizeof(*out));
+	dd->base_guid = msg->base_guid;
+	dd->revision = msg->revision;
+	dd->hfi1_id = msg->hfi1_id;
+	dd->icode = msg->icode;
+	dd->irev = msg->irev;
+	 */
+	return -EINVAL;
+}
+
+/*
+ * VF call to PF0 to assign chip resources to this SI.
+ * May include additional early setup.
+ */
+int vf2pf_assign_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
 {
 	if (!dd->is_vf)
 		return -EINVAL;
-
-	if (IS_LOCAL_VF(dd)) { // VF and PF0 are using the same driver/OS instance
-		// VF was claimed locally, comms with PF0 is easy...
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
 		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
-		return something(pdd, ...);
+
+		return hfi1_sriov_assign_rsrcs(pdd, vfr);
 	}
-	// other communication methods here...
+	/* TODO:
+	 * copy 'vfr' structure to message buffer, send to PF0 and get
+	 * response.
+	msg = kzalloc(...);
+	msg->op = ASGN_RSRCS;
+	memcpy(&msg->buf, vfr, sizeof(*vfr));
+	ret = vf2pf_send_recv(dd, msg);
+	 */
 	return -EINVAL;
 }
+
+/*
+ * VF call to PF0 to release chip resources.
+ * May include other late shutdown.
+ */
+int vf2pf_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
+{
+	if (!dd->is_vf)
+		return -EINVAL;
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		hfi1_sriov_free_rsrcs(pdd, vfr);
+		return 0;
+	}
+	/* TODO:
+	 * copy 'vfr' structure to message buffer, send to PF0 and get
+	 * response.
+	msg = kzalloc(...);
+	msg->op = FREE_RSRCS;
+	memcpy(&msg->buf, vfr, sizeof(*vfr));
+	ret = vf2pf_send_recv(dd, msg);
+	 */
+	return -EINVAL;
+}
+
+/* TODO:
+ * Need a message handler for PF0 here. Receive a message from a VF,
+ * determine 'si', make appropriate call, return results.
+	switch (op) {
+	...
+	case GET_CONFIG:
+		ret = sriov_get_config(dd, &msg->buf, si);
+		break;
+	case ASGN_RSRCS:
+		ret = hfi1_sriov_assign_rsrcs(dd, &msg->buf);
+		break;
+	case FREE_RSRCS:
+		ret = hfi1_sriov_free_rsrcs(dd, &msg->buf);
+		break;
+	...
+	}
+	msg->ret = ret;
+	vf2pf_send_resp(dd, msg...);
  */
 
 static void vf2pf_syncup(struct hfi1_devdata *dd, int si)
