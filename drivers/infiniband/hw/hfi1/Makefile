@@ -71,6 +71,7 @@ hfi1-y := \
 	verbs.o \
 	verbs_txreq.o \
 	vf2pf.o \
+	vf2pf_lb.o \
 	vnic_main.o \
 	vnic_sdma.o
 

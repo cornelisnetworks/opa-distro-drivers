@@ -25,9 +25,20 @@ int cport_set_link_state(struct hfi1_pportdata *ppd, struct opa_port_info *pi, u
 int cport_start_link(struct hfi1_pportdata *ppd, struct opa_port_info *pi);
 int cport_read_temp(struct hfi1_devdata *dd, struct cport_temp *gen_temp);
 int hfi1_sriov_sync_ports(struct hfi1_devdata *dd, int si_mask);
+int gen_init_special(struct hfi1_devdata *dd);
 
 int init_cport_trap128(struct hfi1_devdata *dd);
 int deinit_cport_trap128(struct hfi1_devdata *dd);
 int init_cport_overtemp(struct hfi1_devdata *dd);
+
+int gen_init_rctxt_egr(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt,
+		       u32 ra_base, u32 ra_cnt, u32 hdr_size);
+void gen_deinit_rctxt(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt);
+int gen_start_rctxt_egr(struct hfi1_devdata *dd, u8 pidx, u16 ctxt,
+			struct hfi1_ctxtbufs *bufs);
+int gen_init_sctxt_pio(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt,
+		       u32 cr_base, u32 cr_cnt);
+void gen_deinit_sctxt(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt);
+int gen_start_sctxt(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, struct hfi1_ctxtbufs *bufs);
 
 #endif /* _CHIP_GEN_H */

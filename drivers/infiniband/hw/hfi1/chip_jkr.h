@@ -12,6 +12,11 @@
 #define JKR_PIO_SEND (JKR_TXE + JKR_C_TXE_PIO_SEND_OFFSET)
 #define JKR_RCV_ARRAY JKR_C_RXE_RCV_ARRAY_EGR_BASE
 
+/* RcvArray access shifts */
+#define JKR_RCV_ARRAY_EGR_TID_SELECT_SHIFT 25
+#define JKR_RCV_ARRAY_RCV_CTXT_IDX_SHIFT 17
+#define JKR_RCV_ARRAY_CSR_INDEX_SHIFT 3
+
 /*
  * The JKR BAR space is not split up by the RcvArray.  To maintain
  * compatibility with WFR, arbitrarily split the BAR space at some

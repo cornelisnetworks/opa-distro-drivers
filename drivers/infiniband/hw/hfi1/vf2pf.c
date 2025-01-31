@@ -12,12 +12,29 @@
 #include "sriov.h"
 #include "vf2pf_int.h"
 
+#ifdef HFI_VF2PF_LOOPBACK
+#include "vf2pf_lb.h"
+#define HFI_VF2PF_LOOPBACK_CONFIG
+#endif
+
+/* TODO: this may not be for production */
+bool vf2pf_lb;
+module_param_named(vf2pf_lb, vf2pf_lb, bool, 0644);
+MODULE_PARM_DESC(vf2pf_lb, "Enable use of loopback port for VF-PF, default N (off)");
+
 uint vf2pf_to = 1;
 module_param_named(vf2pf_to, vf2pf_to, uint, 0644);
 MODULE_PARM_DESC(vf2pf_to, "Timeout for vf2pf responses, seconds, default 1");
 
+#undef VF2PF_FORCE_LB	/* set to force use of loopback vf2pf even if VFs are local */
+
+#ifdef VF2PF_FORCE_LB
+#define IS_LOCAL_VF(dd)		(!vf2pf_lb && !(dd)->is_vm)
+#define IS_LOCAL_VDD(vdd)	(!vf2pf_lb && (vdd))
+#else
 #define IS_LOCAL_VF(dd)		(!(dd)->is_vm)
 #define IS_LOCAL_VDD(vdd)	(vdd)
+#endif
 
 static struct vf2pf_devops vf2pf_nodev = { };
 
@@ -640,6 +657,12 @@ int vf2pf_init(struct hfi1_devdata *dd)
 		dd->rsrcs.sync_done = 0;
 	}
 
+#ifdef HFI_VF2PF_LOOPBACK
+#ifndef HFI_VF2PF_LOOPBACK_CONFIG
+	if (vf2pf_lb)
+#endif
+		vf2pf_dev = get_lb_devops();
+#endif
 	if (!vf2pf_dev->init)
 		return 0;
 	return vf2pf_dev->init(dd, dd->rsrcs.si_idx);

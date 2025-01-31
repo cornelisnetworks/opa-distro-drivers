@@ -5,12 +5,6 @@
 
 #include "hfi.h"
 
-/* additive distance between non-SOP and SOP space */
-#define SOP_DISTANCE (TXE_PIO_SIZE / 2)
-#define PIO_BLOCK_MASK (PIO_BLOCK_SIZE - 1)
-/* number of QUADWORDs in a block */
-#define PIO_BLOCK_QWS (PIO_BLOCK_SIZE / sizeof(u64))
-
 /**
  * pio_copy - copy data block to MMIO space
  * @dd: hfi1 dev data
