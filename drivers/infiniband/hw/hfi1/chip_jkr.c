@@ -8,6 +8,8 @@
 #include "trace.h"
 #include "chip_jkr.h"
 #include "cport.h"
+#include "sriov.h"
+#include "vf2pf.h"
 
 // IS source value within the IS_PORT range
 #define JKR_IS_PORT0INT6 (6)
@@ -20,15 +22,25 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 	bool found_first_unused;
 	int i;
 
-	dr->pfunit = dd->unit;
-	dr->c.first_send_context = 0;
-	dr->c.last_send_context = chip_send_contexts(dd);
-	dr->c.first_rcv_context = 0;
-	dr->c.last_rcv_context = chip_rcv_contexts(dd);
-	dr->c.first_rcvarray_entry = 0;
-	dr->c.last_rcvarray_entry = chip_rcv_array_count(dd);
-	dr->c.first_pio_block = 0;
-	dr->c.last_pio_block = chip_pio_mem_size(dd) / PIO_BLOCK_SIZE;
+	/*
+	 * This sets up boundaries only. PF0 must initialize all and
+	 * assign to SI(s), as well as avoid CPORT ones.
+	 */
+	if (dr->num_vfs) {
+		/* resources already setup by hfi1_sriov_set_cfg() */
+		if (dd->is_vf)
+			goto out;
+	} else {
+		dr->pfunit = dd->unit;
+		dr->c.first_send_context = 0;
+		dr->c.last_send_context = chip_send_contexts(dd);
+		dr->c.first_rcv_context = 0;
+		dr->c.last_rcv_context = chip_rcv_contexts(dd);
+		dr->c.first_rcvarray_entry = 0;
+		dr->c.last_rcvarray_entry = chip_rcv_array_count(dd);
+		dr->c.first_pio_block = 0;
+		dr->c.last_pio_block = chip_pio_mem_size(dd) / PIO_BLOCK_SIZE;
+	}
 
 	/*
 	 * Find reserved resources.  Expectations:  All used resources are
@@ -177,6 +189,7 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 		set_bit(i, dd->rsm_rule_bitmap);
 	dd->rsm_rule_init = true;
 
+out:
 	dd_dev_info(dd, "Resource starts: send ctxt %d, pio block %d, rcv ctxt %d, RcvArray %d, rsm rule %d\n",
 		    dr->c.first_send_context, dr->c.first_pio_block,
 		    dr->c.first_rcv_context, dr->c.first_rcvarray_entry,
@@ -194,7 +207,8 @@ int jkr_early_per_chip_init(struct hfi1_devdata *dd)
 {
 	tune_pcie_caps(dd);
 	init_early_variables(dd);
-	return 0;
+
+	return hfi1_sriov_assign_rsrcs(dd, &dd->rsrcs);
 }
 
 int jkr_mid_per_chip_init(struct hfi1_devdata *dd)
@@ -204,7 +218,7 @@ int jkr_mid_per_chip_init(struct hfi1_devdata *dd)
 	int ret = 0;
 
 	if (dd->is_vf)
-		goto skip_guid; /* VFs can't access CPORT */
+		goto skip_guid; /* guid obtained earlier via hfi1_sriov_set_cfg */
 
 	dd->base_guid = 0xabcd;	/* on success, a valid value is set */
 	ret = cport_send_req(dd, CH_OP_WHO, 0, NULL, 0, (void **)&who, &resp_len,

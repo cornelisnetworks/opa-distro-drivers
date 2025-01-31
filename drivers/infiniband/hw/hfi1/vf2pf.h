@@ -28,9 +28,10 @@ void vf2pf_set_si_enables(struct hfi1_devdata *dd, int si,
 
 /*
  * Add vf2pf_* methods here, to request actions from PF0
- *
- * int vf2pf_some-action(struct hfi1_devdata *dd, struct something *arg...);
  */
+int vf2pf_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si);
+int vf2pf_assign_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr);
+int vf2pf_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr);
 void vf2pf_ready(struct hfi1_devdata *dd);
 
 #endif /* _VF2PF_H */
