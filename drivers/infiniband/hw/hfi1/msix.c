@@ -449,3 +449,19 @@ void msix_netdev_synchronize_irq(struct hfi1_pportdata *ppd)
 		synchronize_irq(me->irq);
 	}
 }
+
+int msix_request_irq_remap(struct hfi1_devdata *dd, u16 ctxt,
+			   enum irq_type type, int src,
+			   irq_handler_t handler, irq_handler_t thread,
+			   void *arg, const char *name)
+{
+	int nr;
+
+	nr = msix_request_irq(dd, arg, handler, thread, type, name);
+	if (nr < 0)
+		return nr;
+
+	src = dd->params->is_rcvavail_start + ctxt;
+	remap_intr(dd, src, nr);
+	return nr;
+}
