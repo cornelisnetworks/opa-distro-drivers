@@ -1431,6 +1431,22 @@ struct bar_map {
 #define ctxt_bar_idx(ctxt) (((ctxt) >> 8) & 0x3)
 #define ctxt_bar_ctxt(ctxt) ((ctxt) & 0xff)
 
+struct hfi1_dma_alloc {
+	size_t size;
+	void *va;
+	dma_addr_t dma;
+};
+
+struct hfi1_ctxtbufs {
+	struct hfi1_dma_alloc cr;	/* send credit return */
+	u32 egr_buf_size;		/* egr alloc divided into this size bufs */
+	u32 rhq_ent_size;		/* rhq entry size in DWs */
+	u32 rhq_cnt;			/* rhq entry count */
+	struct hfi1_dma_alloc egr;	/* recv eager buffer (single) */
+	struct hfi1_dma_alloc rhq;	/* recv hdr queue buffer */
+	struct hfi1_dma_alloc rheq;	/* recv hdr err queue buffer */
+};
+
 /*
  * Resources for describing contexts.
  */
