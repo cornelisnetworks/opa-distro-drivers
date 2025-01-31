@@ -10,6 +10,12 @@
 
 #include "vf2pf.h"
 
+/*
+ * This selects the loopback port implementation for
+ * VF-PF communication in SRIOV.
+ */
+#define HFI_VF2PF_LOOPBACK
+
 enum {
 	VF2PF_OP_PING = 0,
 };

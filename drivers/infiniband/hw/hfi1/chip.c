@@ -989,7 +989,6 @@ static const struct flag_table dc8051_info_host_msg_flags[] = {
 	FLAG_ENTRY0("Link width downgraded", 0x0200),
 };
 
-static u32 encoded_size(u32 size);
 static u32 chip_to_opa_lstate(struct hfi1_devdata *dd, u32 chip_lstate);
 static int set_physical_link_state(struct hfi1_devdata *dd, u64 state);
 static void read_vc_remote_phy(struct hfi1_devdata *dd, u8 *power_management,
@@ -12140,7 +12139,6 @@ void update_usrhead(struct hfi1_ctxtdata *rcd, u32 hd, u32 updegr, u32 egrhd,
 		    u32 intr_adjust, u32 npkts)
 {
 	struct hfi1_devdata *dd = rcd->dd;
-	u64 reg;
 	u32 ctxt = rcd->ctxt;
 
 	/*
@@ -12149,12 +12147,20 @@ void update_usrhead(struct hfi1_ctxtdata *rcd, u32 hd, u32 updegr, u32 egrhd,
 	 */
 	if (intr_adjust)
 		adjust_rcv_timeout(rcd, npkts);
+	update_usrhead_ctxt(dd, ctxt, hd, rcv_intr_count, updegr, egrhd);
+}
+
+void update_usrhead_ctxt(struct hfi1_devdata *dd, u16 ctxt, u32 hd, u32 intr_cnt,
+			 u32 updegr, u32 egrhd)
+{
+	u64 reg;
+
 	if (updegr) {
 		reg = (egrhd & RCV_EGR_INDEX_HEAD_HEAD_MASK)
 			<< RCV_EGR_INDEX_HEAD_HEAD_SHIFT;
 		write_uctxt_csr(dd, ctxt, dd->params->rcv_egr_index_head_reg, reg);
 	}
-	reg = ((u64)rcv_intr_count << RCV_HDR_HEAD_COUNTER_SHIFT) |
+	reg = ((u64)intr_cnt << RCV_HDR_HEAD_COUNTER_SHIFT) |
 		(((u64)hd & RCV_HDR_HEAD_HEAD_MASK)
 			<< RCV_HDR_HEAD_HEAD_SHIFT);
 	write_uctxt_csr(dd, ctxt, dd->params->rcv_hdr_head_reg, reg);
@@ -12194,7 +12200,7 @@ u32 hdrqempty(struct hfi1_ctxtdata *rcd)
  *
  * This routine assumes that the value has already been sanity checked.
  */
-static u32 encoded_size(u32 size)
+u32 hfi1_encoded_size(u32 size)
 {
 	switch (size) {
 	case   4 * 1024: return 0x1;
@@ -12414,7 +12420,7 @@ void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 
 		/* clean the egr buffer size first */
 		rcvctrl &= ~RCV_CTXT_CTRL_EGR_BUF_SIZE_SMASK;
-		rcvctrl |= ((u64)encoded_size(rcd->egrbufs.rcvtid_size)
+		rcvctrl |= ((u64)hfi1_encoded_size(rcd->egrbufs.rcvtid_size)
 				& RCV_CTXT_CTRL_EGR_BUF_SIZE_MASK)
 					<< RCV_CTXT_CTRL_EGR_BUF_SIZE_SHIFT;
 
