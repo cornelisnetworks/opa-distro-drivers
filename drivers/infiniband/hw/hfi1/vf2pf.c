@@ -26,7 +26,7 @@ uint vf2pf_to = 1;
 module_param_named(vf2pf_to, vf2pf_to, uint, 0644);
 MODULE_PARM_DESC(vf2pf_to, "Timeout for vf2pf responses, seconds, default 1");
 
-#undef VF2PF_FORCE_LB	/* set to force use of loopback vf2pf even if VFs are local */
+#define VF2PF_FORCE_LB	/* set to force use of loopback vf2pf even if VFs are local */
 
 #ifdef VF2PF_FORCE_LB
 #define IS_LOCAL_VF(dd)		(!vf2pf_lb && !(dd)->is_vm)
@@ -147,6 +147,9 @@ static int vf2pf_send_recv(struct hfi1_devdata *dd, u8 si, void *buf, long to)
  */
 int vf2pf_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si)
 {
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_getcfg_msg *msg;
+	void *mem;
 	int ret;
 
 	if (!dd->is_vf)
@@ -164,8 +167,48 @@ int vf2pf_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si)
 		dd->irev = pdd->irev;
 		return 0;
 	}
-	/* TODO: send message to PF0 */
-	return -EINVAL;
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_getcfg_msg *)hdr;
+	msg->hdr.op = VF2PF_GET_CFG;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	msg->si = si;
+	ret = vf2pf_send_recv(dd, 0, mem, vf2pf_to * HZ);
+	if (!ret)
+		ret = hdr->status;
+	if (ret)
+		goto out;
+	memcpy(out, &msg->rsrcs, sizeof(*out));
+	dd->base_guid = msg->base_guid;
+	dd->revision = msg->revision;
+	dd->hfi1_id = msg->hfi1_id;
+	dd->icode = msg->icode;
+	dd->irev = msg->irev;
+out:
+	kfree(mem);
+	return ret;
+}
+
+static int do_asgnrs_msg(struct hfi1_devdata *dd, u8 op, struct hfi1_devrsrcs *vfr)
+{
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_asgnrs_msg *msg;
+	void *mem;
+	int ret;
+
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_asgnrs_msg *)hdr;
+	msg->hdr.op = op;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	memcpy(&msg->rsrcs, vfr, sizeof(msg->rsrcs));
+	ret = vf2pf_send_recv(dd, 0, mem, vf2pf_to * HZ);
+	if (!ret)
+		ret = hdr->status;
+	kfree(mem);
+	return ret;
 }
 
 /*
@@ -181,8 +224,7 @@ int vf2pf_assign_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
 
 		return hfi1_sriov_assign_rsrcs(pdd, vfr);
 	}
-	/* TODO: send message to PF0 */
-	return -EINVAL;
+	return do_asgnrs_msg(dd, VF2PF_ASGN_RES, vfr);
 }
 
 /*
@@ -199,13 +241,17 @@ int vf2pf_free_rsrcs(struct hfi1_devdata *dd, struct hfi1_devrsrcs *vfr)
 		hfi1_sriov_free_rsrcs(pdd, vfr);
 		return 0;
 	}
-	/* TODO: send message to PF0 */
-	return -EINVAL;
+	return do_asgnrs_msg(dd, VF2PF_FREE_RES, vfr);
 }
 
 int vf2pf_priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
 		      enum preg_op op, u64 arg)
 {
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_pregop_msg *msg;
+	void *mem;
+	int ret;
+
 	if (!dd->is_vf)
 		return -EINVAL;
 	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
@@ -213,14 +259,34 @@ int vf2pf_priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
 
 		return priv_reg_op(pdd, pidx, ctxt, type, op, arg);
 	}
-	/* TODO: send message to PF0 */
-	return -EINVAL;
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_pregop_msg *)hdr;
+	msg->hdr.op = VF2PF_PREG_OP;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	msg->pidx = pidx;
+	msg->ctxt = ctxt;
+	msg->type = type;
+	msg->op = op;
+	msg->arg = arg;
+	ret = vf2pf_send_recv(dd, 0, mem, vf2pf_to * HZ);
+	if (!ret)
+		ret = hdr->status;
+	kfree(mem);
+	return ret;
 }
 
 /* Called for PF0 and VFs */
 u64 pf0_read_csr(struct hfi1_devdata *dd, enum csr_type type, u32 off,
 		 u16 ctxt, u8 pidx_eng)
 {
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_readcsr_msg *msg;
+	void *mem;
+	u64 reg = ~(u64)0; /* error */
+	int ret;
+
 	if (!dd->is_vf)
 		return read_csr(dd, off);
 	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
@@ -228,26 +294,62 @@ u64 pf0_read_csr(struct hfi1_devdata *dd, enum csr_type type, u32 off,
 
 		return read_csr_type(pdd, type, off, ctxt, pidx_eng);
 	}
-	/* TODO: send message to PF0 */
-	return ~(u64)0; /* error */
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_readcsr_msg *)hdr;
+	msg->hdr.op = VF2PF_RCSR_OP;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	msg->off = off;
+	ret = vf2pf_send_recv(dd, 0, mem, vf2pf_to * HZ);
+	if (!ret)
+		ret = hdr->status;
+	if (!ret)
+		reg = msg->reg;
+	kfree(mem);
+	return reg;
 }
 
 /* Only called for VFs */
 u64 pf0_rctxt_ctrl_op(struct hfi1_devdata *dd, u16 ctxt, unsigned int op)
 {
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_rcctrl_msg *msg;
+	void *mem;
+	u64 reg = ~(u64)0; /* error */
+	int ret;
+
 	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
 		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
 
 		return rctxt_ctrl_op(pdd, ctxt, op);
 	}
-	/* TODO: send message to PF0 */
-	return ~(u64)0; /* error */
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_rcctrl_msg *)hdr;
+	msg->hdr.op = VF2PF_RCCTRL_OP;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	msg->ctxt = ctxt;
+	msg->op = op;
+	ret = vf2pf_send_recv(dd, 0, mem, vf2pf_to * HZ);
+	if (!ret)
+		ret = hdr->status;
+	if (!ret)
+		reg = msg->reg;
+	kfree(mem);
+	return reg;
 }
 
 void vf2pf_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
 		      u32 eager_base, u16 alloced,
 		      u32 expected_base, u32 expected_count)
 {
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_tidcfg_msg *msg;
+	void *mem;
+	int ret;
+
 	if (!dd->is_vf)
 		return; /*should never happen */
 	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
@@ -257,19 +359,22 @@ void vf2pf_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
 						 expected_base, expected_count);
 		return;
 	}
-	/* TODO:
-	 * send 'off' to PF0 and get response.
-	msg = kzalloc(...);
-	msg->op = TID_CONFIG;
+	mem = msg_alloc(dd, &hdr);
+	if (!mem) {
+		dd_dev_err(dd, "Failed to allocate vf2pf message buffer for tid_config\n");
+		return;
+	}
+	msg = (struct vf2pf_tidcfg_msg *)hdr;
+	msg->hdr.op = VF2PF_TIDCFG_OP;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
 	msg->pidx = pidx;
 	msg->ctxt = ctxt;
-	msg->eager_base = eager_base;
 	msg->alloced = alloced;
-	msg->expected_base = expected_base;
-	msg->expected_count = expected_count;
-	ret = vf2pf_send_recv(dd, msg);
-	 */
-	dd_dev_err(dd, "%s not implemented\n", __func__);
+	msg->egr_base = eager_base;
+	msg->exp_base = expected_base;
+	msg->exp_cnt = expected_count;
+	ret = vf2pf_send_recv(dd, 0, mem, vf2pf_to * HZ);
+	kfree(mem);
 }
 
 int vf2pf_init_rxe_rsm(struct hfi1_devdata *dd)
@@ -279,19 +384,37 @@ int vf2pf_init_rxe_rsm(struct hfi1_devdata *dd)
 
 		return init_rxe_rsm(pdd, &dd->rsrcs);
 	}
-	/* TODO: send message to PF0 */
-	return -EINVAL;
+	return do_asgnrs_msg(dd, VF2PF_RXERSM_OP, &dd->rsrcs);
 }
 
 u16 vf2pf_get_qp_map(struct hfi1_devdata *dd, int pidx, u16 idx)
 {
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_qpmap_msg *msg;
+	void *mem;
+	u16 res = 0; /* guaranteed error */
+	int ret;
+
 	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
 		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
 
 		return hfi1_get_qp_map(pdd->pport + pidx, idx);
 	}
-	/* TODO: send message to PF0 */
-	return 0; /* guaranteed to error(?) */
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_qpmap_msg *)hdr;
+	msg->hdr.op = VF2PF_QPMAP_OP;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	msg->pidx = pidx;
+	msg->idx = idx;
+	ret = vf2pf_send_recv(dd, 0, mem, vf2pf_to * HZ);
+	if (!ret)
+		ret = hdr->status;
+	if (!ret)
+		res = msg->res;
+	kfree(mem);
+	return res;
 }
 
 /*
@@ -302,6 +425,9 @@ int pf2vf_push_portinfo(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 {
 	struct hfi1_devdata *dd = ppd->dd, *vdd;
 	struct pci_dev *pdev, *vpdev;
+	struct vf2pf_hdr *hdr;
+	struct pf0_pushpi_msg *msg;
+	void *mem;
 	int id;
 	int ret;
 
@@ -314,7 +440,24 @@ int pf2vf_push_portinfo(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 		return 0;
 
 	pdev = dd->pcidev;
-	/* TODO: use some common broadcast code... */
+	/*
+	 * TODO: use some common broadcast code... same message is sent to all.
+	 * However, it is possible that some VFs may be local and some in VMs,
+	 * so might need to have each VF differently. At least, though, we can
+	 * only allocate message buffer once.
+	 */
+	/*
+	 * 'pi' is always opa_get_smp_data(smp) so we only
+	 * need to send 'smp' (the whole MAD).
+	 */
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct pf0_pushpi_msg *)hdr;
+	msg->hdr.op = PF0_PUSH_PI;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	msg->pidx = ppd->hw_pidx;
+	memcpy(&msg->smp, smp, sizeof(*smp));
 	for (id = 0; id < dd->rsrcs.num_vfs; ++id) {
 		if (!(si_mask & (1 << (id + 1))))
 			continue;
@@ -331,16 +474,15 @@ int pf2vf_push_portinfo(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 		if (IS_LOCAL_VDD(vdd)) { /* must not be in VM... */
 			ret = update_from_opa_portinfo(&vdd->pport[ppd->hw_pidx], smp, pi);
 		} else {
-			/*
-			 * 'pi' is always opa_get_smp_data(smp) so we only
-			 * need to send 'smp' (the whole MAD).
-			 */
-			/* TODO: send message to PF0 */
-			ret = -EINVAL;
+			ret = vf2pf_send(dd, id + 1, mem);
+			if (ret)
+				dd_dev_warn(dd, "Failed to push portinfo to %d (%d)\n",
+					    id + 1, ret);
 		}
 		if (ret)
 			break;
 	}
+	kfree(mem);
 	return ret;
 }
 
@@ -351,6 +493,9 @@ int pf2vf_push_sc2vlt(struct hfi1_pportdata *ppd, int si_mask)
 {
 	struct hfi1_devdata *dd = ppd->dd, *vdd;
 	struct pci_dev *pdev, *vpdev;
+	struct vf2pf_hdr *hdr;
+	struct pf0_pushvlt_msg *msg;
+	void *mem;
 	int id;
 	int ret = 0;
 
@@ -363,7 +508,24 @@ int pf2vf_push_sc2vlt(struct hfi1_pportdata *ppd, int si_mask)
 		return 0;
 
 	pdev = dd->pcidev;
-	/* TODO: use some common broadcast code... */
+	/*
+	 * TODO: use some common broadcast code... same message is sent to all.
+	 * However, it is possible that some VFs may be local and some in VMs,
+	 * so might need to have each VF differently. At least, though, we can
+	 * only allocate message buffer once.
+	 */
+	/*
+	 * 'pi' is always opa_get_smp_data(smp) so we only
+	 * need to send 'smp' (the whole MAD).
+	 */
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct pf0_pushvlt_msg *)hdr;
+	msg->hdr.op = PF0_PUSH_VLT;
+	msg->hdr.len = sizeof(*msg) - sizeof(*hdr);
+	msg->pidx = ppd->hw_pidx;
+	memcpy(msg->sc2vl, ppd->sc2vl, sizeof(msg->sc2vl));
 	for (id = 0; id < dd->rsrcs.num_vfs; ++id) {
 		if (!(si_mask & (1 << (id + 1))))
 			continue;
@@ -380,12 +542,15 @@ int pf2vf_push_sc2vlt(struct hfi1_pportdata *ppd, int si_mask)
 		if (IS_LOCAL_VDD(vdd)) { /* must not be in VM... */
 			hfi1_update_sc2vlt(&vdd->pport[ppd->hw_pidx], ppd->sc2vl, false);
 		} else {
-			/* TODO: send message to PF0 */
-			ret = -EINVAL;
+			ret = vf2pf_send(dd, id + 1, mem);
+			if (ret)
+				dd_dev_warn(dd, "Failed to push sc2vlt to %d (%d)\n",
+					    id + 1, ret);
 		}
 		if (ret)
 			break;
 	}
+	kfree(mem);
 	return ret;
 }
 
@@ -433,7 +598,95 @@ void vf2pf_rcv_msg(struct hfi1_devdata *dd, struct vf2pf_hdr *hdr, void *buf)
 		ping->data[hdr->len++] = '!';
 		break;
 	}
-	/* TODO: implement other message handlers */
+
+	/* only received on PF0 */
+	case VF2PF_GET_CFG: {
+		struct vf2pf_getcfg_msg *msg = (struct vf2pf_getcfg_msg *)hdr;
+
+		ret = sriov_get_config(dd, &msg->rsrcs, msg->si);
+		/* copy these even if error */
+		msg->base_guid = dd->base_guid;
+		msg->revision = dd->revision;
+		msg->hfi1_id = dd->hfi1_id;
+		msg->icode = dd->icode;
+		msg->irev = dd->irev;
+		break;
+	}
+	case VF2PF_ASGN_RES: {
+		struct vf2pf_asgnrs_msg *msg = (struct vf2pf_asgnrs_msg *)hdr;
+
+		ret = hfi1_sriov_assign_rsrcs(dd, &msg->rsrcs);
+		break;
+	}
+	case VF2PF_FREE_RES: {
+		struct vf2pf_asgnrs_msg *msg = (struct vf2pf_asgnrs_msg *)hdr;
+
+		hfi1_sriov_free_rsrcs(dd, &msg->rsrcs);
+		break;
+	}
+	case VF2PF_PREG_OP: {
+		struct vf2pf_pregop_msg *msg = (struct vf2pf_pregop_msg *)hdr;
+
+		ret = priv_reg_op(dd, msg->pidx, msg->ctxt, msg->type, msg->op, msg->arg);
+		break;
+	}
+	case VF2PF_RCSR_OP: {
+		struct vf2pf_readcsr_msg *msg = (struct vf2pf_readcsr_msg *)hdr;
+
+		msg->reg = read_csr(dd, msg->off);
+		break;
+	}
+	case VF2PF_RCCTRL_OP: {
+		struct vf2pf_rcctrl_msg *msg = (struct vf2pf_rcctrl_msg *)hdr;
+
+		ret = rctxt_ctrl_op(dd, msg->ctxt, msg->op);
+		break;
+	}
+	case VF2PF_TIDCFG_OP: {
+		struct vf2pf_tidcfg_msg *msg = (struct vf2pf_tidcfg_msg *)hdr;
+
+		dd->params->set_port_tid_config(dd, msg->pidx, msg->ctxt, msg->egr_base,
+						msg->alloced, msg->exp_base, msg->exp_cnt);
+		break;
+	}
+	case VF2PF_RXERSM_OP: {
+		struct vf2pf_asgnrs_msg *msg = (struct vf2pf_asgnrs_msg *)hdr;
+
+		ret = init_rxe_rsm(dd, &msg->rsrcs);
+		break;
+	}
+	case VF2PF_QPMAP_OP: {
+		struct vf2pf_qpmap_msg *msg = (struct vf2pf_qpmap_msg *)hdr;
+
+		msg->res = hfi1_get_qp_map(dd->pport + msg->pidx, msg->idx);
+		break;
+	}
+	case VF2PF_STOP: {
+		if (vf2pf_dev->deinit)
+			vf2pf_dev->deinit(dd, hdr->si);
+		return;	/* no response */
+	}
+	case VF2PF_READY: {
+		vf2pf_syncup(dd, hdr->si);
+		return;	/* no response */
+	}
+
+	/* only received on VFs */
+	case PF0_PUSH_PI: {
+		struct pf0_pushpi_msg *msg = (struct pf0_pushpi_msg *)hdr;
+		struct opa_port_info *pi = (struct opa_port_info *)opa_get_smp_data(&msg->smp);
+
+		ret = update_from_opa_portinfo(dd->pport + msg->pidx, &msg->smp, pi);
+		if (ret)
+			dd_dev_err(dd, "Failed to process port_info update (%d)\n", ret);
+		return;	/* no response */
+	}
+	case PF0_PUSH_VLT: {
+		struct pf0_pushvlt_msg *msg = (struct pf0_pushvlt_msg *)hdr;
+
+		hfi1_update_sc2vlt(dd->pport + msg->pidx, msg->sc2vl, false);
+		return;	/* no response */
+	}
 	default:
 		dd_dev_err(dd, "Unknown vf2pf msg op %u from %u\n", hdr->op, hdr->si);
 		return;
@@ -579,6 +832,10 @@ void vf2pf_set_si_enables(struct hfi1_devdata *dd, int si, u64 *csrs,
 
 void vf2pf_ready(struct hfi1_devdata *dd)
 {
+	struct vf2pf_hdr *hdr;
+	void *mem;
+	int ret;
+
 	if (!dd->is_vf)
 		return;
 
@@ -588,7 +845,17 @@ void vf2pf_ready(struct hfi1_devdata *dd)
 		vf2pf_syncup(pdd, dd->rsrcs.si_idx);
 		return;
 	}
-	dd_dev_err(dd, "%s not implemended from VMs\n", __func__);
+	mem = msg_alloc(dd, &hdr);
+	if (!mem) {
+		dd_dev_err(dd, "Failed to signal ready to PF0 (msg_alloc)\n");
+		return;
+	}
+	hdr->op = VF2PF_READY;
+	hdr->len = 0;
+	ret = vf2pf_send(dd, 0, mem);
+	kfree(mem);
+	if (ret)
+		dd_dev_err(dd, "Failed to signal ready to PF0 (%d)\n", ret);
 }
 
 void vf2pf_init_sysfs(struct hfi1_devdata *dd, struct device *class_dev)
@@ -674,6 +941,10 @@ int vf2pf_init(struct hfi1_devdata *dd)
  */
 void vf2pf_deinit(struct hfi1_devdata *dd)
 {
+	struct vf2pf_hdr *hdr;
+	void *mem;
+	int ret;
+
 	if (dd->is_vf) {
 		if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
 			struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
@@ -682,8 +953,17 @@ void vf2pf_deinit(struct hfi1_devdata *dd)
 				vf2pf_dev->deinit(pdd, dd->rsrcs.si_idx);
 			goto out;
 		}
-		/* perform other communication to PF0 */
-		dd_dev_err(dd, "Failed to notify PF0 (%d)\n", -ENXIO);
+		mem = msg_alloc(dd, &hdr);
+		if (!mem) {
+			dd_dev_err(dd, "Failed to notify PF0 (msg_alloc)\n");
+			return;
+		}
+		hdr->op = VF2PF_STOP;
+		hdr->len = 0;
+		ret = vf2pf_send(dd, 0, mem);
+		kfree(mem);
+		if (ret)
+			dd_dev_err(dd, "Failed to notify PF0 (%d)\n", ret);
 	}
 out:
 	if (vf2pf_dev->deinit)
