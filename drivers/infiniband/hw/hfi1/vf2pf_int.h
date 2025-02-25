@@ -18,6 +18,20 @@
 
 enum {
 	VF2PF_OP_PING = 0,
+	VF2PF_GET_CFG,
+	VF2PF_ASGN_RES,
+	VF2PF_FREE_RES,
+	VF2PF_PREG_OP,
+	VF2PF_RCSR_OP,
+	VF2PF_RCCTRL_OP,
+	VF2PF_TIDCFG_OP,
+	VF2PF_RXERSM_OP,
+	VF2PF_QPMAP_OP,
+	VF2PF_STOP,
+	VF2PF_READY,
+
+	PF0_PUSH_PI,
+	PF0_PUSH_VLT,
 };
 
 #define VF2PF_OP_RESP	0x80
@@ -55,6 +69,73 @@ struct vf2pf_hdr {
 struct vf2pf_ping_msg {
 	struct vf2pf_hdr hdr;
 	u8 data[256];
+};
+
+struct vf2pf_getcfg_msg {
+	struct vf2pf_hdr hdr;
+	u8 si;
+	struct hfi1_devrsrcs rsrcs;
+	u64 base_guid;
+	u64 revision;
+	u8 hfi1_id;
+	u8 icode;
+	u16 irev;
+};
+
+struct vf2pf_asgnrs_msg {
+	struct vf2pf_hdr hdr;
+	struct hfi1_devrsrcs rsrcs;
+};
+
+struct vf2pf_pregop_msg {
+	struct vf2pf_hdr hdr;
+	u64 arg;
+	u32 ctxt;
+	s32 type;
+	u8 op;
+	u8 pidx;
+};
+
+struct vf2pf_readcsr_msg {
+	struct vf2pf_hdr hdr;
+	u32 off;
+	u64 reg;
+};
+
+struct vf2pf_rcctrl_msg {
+	struct vf2pf_hdr hdr;
+	u16 ctxt;
+	int op;
+	u64 reg;
+};
+
+struct vf2pf_tidcfg_msg {
+	struct vf2pf_hdr hdr;
+	u8 pidx;
+	u16 ctxt;
+	u16 alloced;
+	u32 egr_base;
+	u32 exp_base;
+	u32 exp_cnt;
+};
+
+struct vf2pf_qpmap_msg {
+	struct vf2pf_hdr hdr;
+	u8 pidx;
+	u16 idx;
+	u16 res;
+};
+
+struct pf0_pushpi_msg {
+	struct vf2pf_hdr hdr;
+	u8 pidx;
+	struct opa_smp smp;
+};
+
+struct pf0_pushvlt_msg {
+	struct vf2pf_hdr hdr;
+	u8 pidx;
+	u64 sc2vl[4];
 };
 
 struct vf2pf_devops {
