@@ -17,8 +17,8 @@ static uint vf2pf_lb_port;
 module_param(vf2pf_lb_port, uint, 0444);
 MODULE_PARM_DESC(vf2pf_lb_port, "VF2PF loopback port");
 
-#define VF2PF_LB_DEBUG
-#undef LB_RCV_CANT_SLEEP
+#undef VF2PF_LB_DEBUG
+#define LB_RCV_CANT_SLEEP
 
 #define LB_IN_INTR	0
 #define LB_IN_THREAD	1
