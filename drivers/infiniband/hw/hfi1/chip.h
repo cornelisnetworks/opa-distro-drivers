@@ -710,6 +710,7 @@ int wait_fm_ready(struct hfi1_devdata *dd, u32 mstimeout);
 void set_link_down_reason(struct hfi1_pportdata *ppd, u8 lcl_reason,
 			  u8 neigh_reason, u8 rem_reason);
 int set_link_state(struct hfi1_pportdata *, u32 state);
+void init_kdeth_qp(struct hfi1_devdata *dd);
 int port_ltp_to_cap(int port_ltp);
 void handle_verify_cap(struct work_struct *work);
 void handle_freeze(struct work_struct *work);
