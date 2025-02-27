@@ -6681,7 +6681,7 @@ void start_linkdown_handling(struct hfi1_pportdata *ppd)
 	 * PIO: Halt, with linkdown flag, all of the enabled send contexts for
 	 * this port.
 	 */
-	sc_flags = SCF_HALTED | SCF_LINK_DOWN;
+	sc_flags = SCF_LINK_DOWN;
 	for (i = 0; i < dd->num_send_contexts; i++) {
 		sc = dd->send_contexts[i].sc;
 		if (!sc || sc->ppd != ppd || !(sc->flags & SCF_ENABLED))
@@ -6695,13 +6695,13 @@ void start_linkdown_handling(struct hfi1_pportdata *ppd)
 	 *
 	 * SDMA: The engines are left running.  Nothing to do.
 	 *
-	 * PIO: Disable all non-user contexts for this port.  Non-user
-	 * contexts will be re-enabled at linkup time.  User contexts will
-	 * be disabled and re-enabled when the user requests a context reset.
+	 * PIO: Disable all contexts for this port.  Non-user contexts will be
+	 * re-enabled at linkup time.  User contexts will be re-enabled when
+	 * the user requests a context reset.
 	 */
 	for (i = 0; i < dd->num_send_contexts; i++) {
 		sc = dd->send_contexts[i].sc;
-		if (!sc || sc->ppd != ppd || sc->type == SC_USER)
+		if (!sc || sc->ppd != ppd)
 			continue;
 
 		sc_disable(sc);
@@ -14613,7 +14613,7 @@ void init_early_variables(struct hfi1_devdata *dd)
 	init_sc2vl_tables(dd);
 }
 
-static void init_kdeth_qp(struct hfi1_devdata *dd)
+void init_kdeth_qp(struct hfi1_devdata *dd)
 {
 	u64 val;
 	int i;

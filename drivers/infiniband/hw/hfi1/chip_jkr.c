@@ -178,6 +178,7 @@ void jkr_read_guid(struct hfi1_devdata *dd)
 
 int jkr_early_per_chip_init(struct hfi1_devdata *dd)
 {
+	tune_pcie_caps(dd);
 	init_early_variables(dd);
 	return 0;
 }

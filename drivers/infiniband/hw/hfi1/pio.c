@@ -1138,8 +1138,8 @@ int sc_restart(struct send_context *sc)
 	u32 loop;
 	int count;
 
-	/* bounce off if not halted, or being free'd */
-	if (!(sc->flags & SCF_HALTED) || (sc->flags & SCF_IN_FREE))
+	/* bounce off if not (halted or link down) or being free'd */
+	if (!(sc->flags & (SCF_HALTED | SCF_LINK_DOWN)) || (sc->flags & SCF_IN_FREE))
 		return -EINVAL;
 
 	dd_dev_info(dd, "restarting send context %u(%u)\n", sc->sw_index,
@@ -1151,18 +1151,21 @@ int sc_restart(struct send_context *sc)
 	 * The error interrupt is asynchronous to actually setting halt
 	 * on the context.
 	 */
-	loop = 0;
-	while (1) {
-		reg = read_sctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_status_reg);
-		if (reg & SC(STATUS_CTXT_HALTED_SMASK))
-			break;
-		if (loop > 100) {
-			dd_dev_err(dd, "%s: context %u(%u) not halting, skipping\n",
-				   __func__, sc->sw_index, sc->hw_context);
-			return -ETIME;
+	if (sc->flags & SCF_HALTED) {
+		loop = 0;
+		while (1) {
+			reg = read_sctxt_csr(dd, sc->hw_context,
+					     dd->params->send_ctxt_status_reg);
+			if (reg & SC(STATUS_CTXT_HALTED_SMASK))
+				break;
+			if (loop > 100) {
+				dd_dev_err(dd, "%s: context %u(%u) not halting, skipping\n",
+					   __func__, sc->sw_index, sc->hw_context);
+				return -ETIME;
+			}
+			loop++;
+			udelay(1);
 		}
-		loop++;
-		udelay(1);
 	}
 
 	/*
