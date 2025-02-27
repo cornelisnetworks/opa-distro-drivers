@@ -255,6 +255,13 @@ void cport_handle_linkup_change(struct hfi1_pportdata *ppd,
 		ppd->link_speed_active = be16_to_cpu(pi->link_speed.active);
 		ppd->link_speed_enabled = be16_to_cpu(pi->link_speed.enabled);
 
+		/*
+		 * Rewrite the KDETH indicator.  The firmware overwrites it
+		 * when resetting the link.  All ports are rewritten, but
+		 * the same value is always used - a noop on other ports.
+		 */
+		init_kdeth_qp(dd);
+
 	} else {
 		/* physical link went down */
 		ppd->linkup = 0;
