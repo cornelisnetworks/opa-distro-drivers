@@ -1839,9 +1839,9 @@ int ctxt_reset(struct hfi1_ctxtdata *uctxt)
 	 * halted or frozen. Report error if we time out.
 	 */
 	wait_event_interruptible_timeout(
-		sc->halt_wait, (sc->flags & SCF_HALTED),
+		sc->halt_wait, (sc->flags & (SCF_HALTED | SCF_LINK_DOWN)),
 		msecs_to_jiffies(SEND_CTXT_HALT_TIMEOUT));
-	if (!(sc->flags & SCF_HALTED))
+	if (!(sc->flags & (SCF_HALTED | SCF_LINK_DOWN)))
 		return -ENOLCK;
 
 	/*
