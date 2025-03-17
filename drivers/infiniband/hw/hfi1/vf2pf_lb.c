@@ -839,6 +839,26 @@ static ssize_t vf2pf_lb_debug_show(struct device *device,
 
 static DEVICE_ATTR_RO(vf2pf_lb_debug);
 
+static ssize_t vf2pf_lb_reset_store(struct device *device,
+				    struct device_attribute *attr, const char *buf,
+				    size_t count)
+{
+	struct hfi1_ibdev *dev =
+		rdma_device_to_drv_device(device, struct hfi1_ibdev, rdi.ibdev);
+	struct hfi1_devdata *dd = dd_from_dev(dev);
+	unsigned long si;
+	int ret;
+
+	ret = kstrtoul(buf, 0, &si);
+	if (ret || !si || si > dd->rsrcs.num_vfs)
+		return -EINVAL;
+
+	lb_deinit(dd, (u8)si);
+	return count;
+}
+
+static DEVICE_ATTR_WO(vf2pf_lb_reset);
+
 static void lb_init_sysfs(struct hfi1_devdata *dd, struct device *class_dev)
 {
 	int ret;
@@ -847,6 +867,12 @@ static void lb_init_sysfs(struct hfi1_devdata *dd, struct device *class_dev)
 	if (ret)
 		dd_dev_warn(dd, "failed to create sysfs attr %s (%d)\n",
 			    dev_attr_vf2pf_lb_debug.attr.name, ret);
+	if (!dd->is_vf) {
+		ret = sysfs_create_file(&class_dev->kobj, &dev_attr_vf2pf_lb_reset.attr);
+		if (ret)
+			dd_dev_warn(dd, "failed to create sysfs attr %s (%d)\n",
+				    dev_attr_vf2pf_lb_reset.attr.name, ret);
+	}
 }
 
 /* for additional output to "hw_resources" */
