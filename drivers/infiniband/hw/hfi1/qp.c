@@ -242,6 +242,20 @@ void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 		qp_set_16b(qp);
 	}
 
+	if (attr_mask & IB_QP_PORT) {
+		/*
+		 * Set or replace associated receive context based on the new
+		 * port number.  Note: At call time, qp->port_num is updated,
+		 * but qp->ipqp.port is not updated.
+		 */
+		priv->rcd = qp_to_rcd(qp);
+		if (!priv->rcd) {
+			// FIXME: should we error out here?  How?
+			// Even if we error out, we are still vunerable to a NULL rcd.
+			printk("%s: not able to find a rcd for QP 0x%x\n", __func__, qp->ibqp.qp_num);
+		}
+	}
+
 	opfn_qp_init(qp, attr, attr_mask);
 }
 
@@ -264,8 +278,7 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 {
 	struct hfi1_ibport *ibp = to_iport(qp->ibqp.device, qp->port_num);
 	struct rvt_ah *ah;
-	struct hfi1_pportdata *ppd;
-	struct hfi1_devdata *dd;
+	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_RC:
@@ -285,9 +298,7 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 		 * fields (vl and pmtu) in ah may not be set correctly,
 		 * depending on the SL2SC and SC2VL tables at the time.
 		 */
-		ppd = ppd_from_ibp(ibp);
-		dd = dd_from_ppd(ppd);
-		if (wqe->length > dd->vld[15].mtu)
+		if (wqe->length > ppd->vld[15].mtu)
 			return -EINVAL;
 		break;
 	case IB_QPT_GSI:
@@ -300,6 +311,16 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 		break;
 	default:
 		break;
+	}
+
+	/*
+	 * Reject any non-SMP transmit attempts unless the link is ACTIVE
+	 * or ARMED + NeighborNormal.
+	 */
+	if (qp->ibqp.qp_type != IB_QPT_SMI &&
+	    !(ppd->host_link_state == HLS_UP_ACTIVE ||
+	     (ppd->host_link_state == HLS_UP_ARMED && ppd->neighbor_normal))) {
+		return -EINVAL;
 	}
 
 	/*
@@ -331,7 +352,7 @@ bool _hfi1_schedule_send(struct rvt_qp *qp)
 	if (dd->flags & HFI1_SHUTDOWN)
 		return true;
 
-	return iowait_schedule(&priv->s_iowait, ppd->hfi1_wq,
+	return iowait_schedule(&priv->s_iowait, dd->hfi1_wq,
 			       priv->s_sde ?
 			       priv->s_sde->cpu :
 			       cpumask_first(cpumask_of_node(dd->node)));
@@ -477,9 +498,14 @@ static int iowait_sleep(
 		write_sequnlock(&sde->waitlock);
 		hfi1_qp_unbusy(qp, wait);
 		spin_unlock_irqrestore(&qp->s_lock, flags);
-		ret = -EBUSY;
+		ret = -EIOCBQUEUED;
 	} else {
 		spin_unlock_irqrestore(&qp->s_lock, flags);
+		/*
+		 * Silently drop by faking success:
+		 * o drop the extra reference taken in hfi1_verbs_send_dma()
+		 * o return 0 ("success")
+		 */
 		hfi1_put_txreq(tx);
 	}
 	return ret;
@@ -538,7 +564,9 @@ static void hfi1_init_priority(struct iowait *w)
  */
 struct sdma_engine *qp_to_sdma_engine(struct rvt_qp *qp, u8 sc5)
 {
-	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+	struct hfi1_ibport *ibp = to_iport(qp->ibqp.device, qp->port_num);
+	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
+	struct hfi1_devdata *dd = ppd->dd;
 	struct sdma_engine *sde;
 
 	if (!(dd->flags & HFI1_HAS_SEND_DMA))
@@ -549,7 +577,7 @@ struct sdma_engine *qp_to_sdma_engine(struct rvt_qp *qp, u8 sc5)
 	default:
 		break;
 	}
-	sde = sdma_select_engine_sc(dd, qp->ibqp.qp_num >> dd->qos_shift, sc5);
+	sde = sdma_select_engine_sc(ppd, qp->ibqp.qp_num >> ppd->qos_shift, sc5);
 	return sde;
 }
 
@@ -563,17 +591,18 @@ struct sdma_engine *qp_to_sdma_engine(struct rvt_qp *qp, u8 sc5)
  */
 struct send_context *qp_to_send_context(struct rvt_qp *qp, u8 sc5)
 {
-	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+	struct hfi1_ibport *ibp = to_iport(qp->ibqp.device, qp->port_num);
+	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_SMI:
 		/* SMA packets to VL15 */
-		return dd->vld[15].sc;
+		return ppd->vld[15].sc;
 	default:
 		break;
 	}
 
-	return pio_select_send_context_sc(dd, qp->ibqp.qp_num >> dd->qos_shift,
+	return pio_select_send_context_sc(ppd, qp->ibqp.qp_num >> ppd->qos_shift,
 					  sc5);
 }
 
@@ -805,16 +834,16 @@ u32 mtu_from_qp(struct rvt_dev_info *rdi, struct rvt_qp *qp, u32 pmtu)
 	struct hfi1_devdata *dd = container_of(verbs_dev,
 					       struct hfi1_devdata,
 					       verbs_dev);
-	struct hfi1_ibport *ibp;
+	struct hfi1_pportdata *ppd = &dd->pport[qp->port_num - 1];
+	struct hfi1_ibport *ibp = &ppd->ibport_data;
 	u8 sc, vl;
 
-	ibp = &dd->pport[qp->port_num - 1].ibport_data;
 	sc = ibp->sl_to_sc[rdma_ah_get_sl(&qp->remote_ah_attr)];
-	vl = sc_to_vlt(dd, sc);
+	vl = sc_to_vlt(ppd, sc);
 
 	mtu = verbs_mtu_enum_to_int(qp->ibqp.device, pmtu);
 	if (vl < PER_VL_SEND_CONTEXTS)
-		mtu = min_t(u32, mtu, dd->vld[vl].mtu);
+		mtu = min_t(u32, mtu, ppd->vld[vl].mtu);
 	return mtu;
 }
 

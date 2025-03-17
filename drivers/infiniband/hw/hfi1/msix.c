@@ -27,7 +27,8 @@ int msix_initialize(struct hfi1_devdata *dd)
 	 *	one for each VNIC context
 	 *      ...any new IRQs should be added here.
 	 */
-	total = 1 + dd->num_sdma + dd->n_krcv_queues + dd->num_netdev_contexts;
+	total = 1 + dd->num_sdma + (dd->num_pports *
+		(dd->n_krcv_queues + dd->num_netdev_contexts));
 
 	if (total >= CCE_NUM_MSIX_VECTORS)
 		return -EINVAL;
@@ -89,7 +90,10 @@ static int msix_request_irq(struct hfi1_devdata *dd, void *arg,
 	spin_unlock(&dd->msix_info.msix_lock);
 
 	if (nr == dd->msix_info.max_requested)
+{
+printk("%s: failed, nr %ld, max_requested %d, -ENOSPC\n", __func__, nr, dd->msix_info.max_requested);
 		return -ENOSPC;
+}
 
 	if (type < IRQ_SDMA || type >= IRQ_OTHER)
 		return -EINVAL;
@@ -115,10 +119,14 @@ static int msix_request_irq(struct hfi1_devdata *dd, void *arg,
 	me->arg = arg;
 	me->type = type;
 
-	/* This is a request, so a failure is not fatal */
-	ret = hfi1_get_irq_affinity(dd, me);
-	if (ret)
-		dd_dev_err(dd, "%s: unable to pin IRQ %d\n", name, ret);
+	/* affinity is not set up when the general interrupt is requested */
+	if (type != IRQ_GENERAL) {
+		/* This is a request, so a failure is not fatal */
+		ret = hfi1_get_irq_affinity(dd, me);
+		if (ret)
+			dd_dev_err(dd, "%s: unable to pin IRQ %d, vector %ld\n",
+				   name, irq, nr);
+	}
 
 	return nr;
 }
@@ -128,20 +136,23 @@ static int msix_request_rcd_irq_common(struct hfi1_ctxtdata *rcd,
 				       irq_handler_t thread,
 				       const char *name)
 {
-	int nr = msix_request_irq(rcd->dd, rcd, handler, thread,
-				  rcd->is_vnic ? IRQ_NETDEVCTXT : IRQ_RCVCTXT,
-				  name);
+	u32 source;
+	int nr;
+
+	nr = msix_request_irq(rcd->dd, rcd, handler, thread,
+			      rcd->is_vnic ? IRQ_NETDEVCTXT : IRQ_RCVCTXT,
+			      name);
 	if (nr < 0)
 		return nr;
 
 	/*
-	 * Set the interrupt register and mask for this
-	 * context's interrupt.
+	 * Set the interrupt register and mask for this context's interrupt.
 	 */
-	rcd->ireg = (IS_RCVAVAIL_START + rcd->ctxt) / 64;
-	rcd->imask = ((u64)1) << ((IS_RCVAVAIL_START + rcd->ctxt) % 64);
+	source = rcd->dd->params->is_rcvavail_start + rcd->ctxt;
+	rcd->ireg = source / 64;
+	rcd->imask = ((u64)1) << (source % 64);
 	rcd->msix_intr = nr;
-	remap_intr(rcd->dd, IS_RCVAVAIL_START + rcd->ctxt, nr);
+	remap_intr(rcd->dd, source, nr);
 
 	return 0;
 }
@@ -232,28 +243,43 @@ int msix_request_general_irq(struct hfi1_devdata *dd)
  */
 static void enable_sdma_srcs(struct hfi1_devdata *dd, int i)
 {
-	set_intr_bits(dd, IS_SDMA_START + i, IS_SDMA_START + i, true);
-	set_intr_bits(dd, IS_SDMA_PROGRESS_START + i,
-		      IS_SDMA_PROGRESS_START + i, true);
-	set_intr_bits(dd, IS_SDMA_IDLE_START + i, IS_SDMA_IDLE_START + i, true);
-	set_intr_bits(dd, IS_SDMAENG_ERR_START + i, IS_SDMAENG_ERR_START + i,
-		      true);
+	set_intr_bits(dd, dd->params->is_sdma_start + i,
+		      dd->params->is_sdma_start + i, true);
+	set_intr_bits(dd, dd->params->is_sdma_progress_start + i,
+		      dd->params->is_sdma_progress_start + i, true);
+	set_intr_bits(dd, dd->params->is_sdma_idle_start + i,
+		      dd->params->is_sdma_idle_start + i, true);
+	set_intr_bits(dd, dd->params->is_sdmaeng_err_start + i,
+		      dd->params->is_sdmaeng_err_start + i, true);
 }
 
 /**
- * msix_request_irqs() - Allocate all MSIx IRQs
+ * msix_request_irqs() - Allocate SDMA and receive IRQs
  * @dd: valid devdata structure
  *
- * Helper function to request the used MSIx IRQs.
- *
+ * Helper function to request MSIx IRQs for SDMA and receive.
  */
 int msix_request_irqs(struct hfi1_devdata *dd)
 {
 	int i;
-	int ret = msix_request_general_irq(dd);
+	int j;
+	int ret;
 
-	if (ret)
-		return ret;
+	/*
+	 * The general interrupt has already been requested, but affinity
+	 * has not been set due to affinity being initialized after the
+	 * interrupt is needed.  Set the affinity here.
+	 *
+	 * This code expects the general interrupt at index 0.  This is
+	 * enforced by msix_request_general_irq().
+	 *
+	 * This is a request, so a failure is not fatal.
+	 */
+	ret = hfi1_get_irq_affinity(dd, &dd->msix_info.msix_entries[0]);
+	if (ret) {
+		dd_dev_err(dd, "general irq: unable to pin IRQ %d, vector 0\n",
+			   dd->msix_info.msix_entries[0].irq);
+	}
 
 	for (i = 0; i < dd->num_sdma; i++) {
 		struct sdma_engine *sde = &dd->per_sdma[i];
@@ -264,17 +290,32 @@ int msix_request_irqs(struct hfi1_devdata *dd)
 		enable_sdma_srcs(sde->dd, i);
 	}
 
-	for (i = 0; i < dd->n_krcv_queues; i++) {
-		struct hfi1_ctxtdata *rcd = hfi1_rcd_get_by_index_safe(dd, i);
+	for (i = 0; i < dd->num_pports; i++) {
+		for (j = 0; j < dd->n_krcv_queues; j++) {
+			u16 ctxt = dd->pport[i].rcv_context_base + j;
+			struct hfi1_ctxtdata *rcd = hfi1_rcd_get_by_index(dd, ctxt);
 
-		if (rcd)
-			ret = msix_request_rcd_irq(rcd);
-		hfi1_rcd_put(rcd);
-		if (ret)
-			return ret;
+			if (rcd)
+				ret = msix_request_rcd_irq(rcd);
+			hfi1_rcd_put(rcd);
+			if (ret)
+				return ret;
+		}
 	}
 
 	return 0;
+}
+
+/**
+ * msix_early_request_irqs() - Allocate needed early IRQs.
+ * @dd: valid devdata structure
+ *
+ * Helper function to request an MSIx IRQs for anthing needed early in the
+ * device initialize.  Presently, only the general interrupt handler.
+ */
+int msix_early_request_irqs(struct hfi1_devdata *dd)
+{
+	return msix_request_general_irq(dd);
 }
 
 /**
@@ -314,10 +355,9 @@ void msix_free_irq(struct hfi1_devdata *dd, u8 msix_intr)
 void msix_clean_up_interrupts(struct hfi1_devdata *dd)
 {
 	int i;
-	struct hfi1_msix_entry *me = dd->msix_info.msix_entries;
 
 	/* remove irqs - must happen before disabling/turning off */
-	for (i = 0; i < dd->msix_info.max_requested; i++, me++)
+	for (i = 0; i < dd->msix_info.max_requested; i++)
 		msix_free_irq(dd, i);
 
 	/* clean structures */
@@ -328,20 +368,43 @@ void msix_clean_up_interrupts(struct hfi1_devdata *dd)
 	pci_free_irq_vectors(dd->pcidev);
 }
 
+/*
+ * msix_shut_down_interrupts - Free all or most IRQs
+ * @dd: device data structure
+ * @keep_gen: when true, keep general interrupt
+ *
+ * Free all IRQs with the possible exception of the general IRQ.  Retain all
+ * structures.  This should eventually be followed by a call to
+ * msix_clean_up_interrupts().
+ */
+void msix_shut_down_interrupts(struct hfi1_devdata *dd, bool keep_gen)
+{
+	struct hfi1_msix_entry *me;
+	int i;
+
+	/* remove irqs - must happen before disabling/turning off */
+	for (i = 0; i < dd->msix_info.max_requested; i++) {
+		me = &dd->msix_info.msix_entries[i];
+		if (keep_gen && me->type == IRQ_GENERAL)
+			continue;
+		msix_free_irq(dd, i);
+	}
+}
+
 /**
  * msix_netdev_synchronize_irq - netdev IRQ synchronize
- * @dd: valid devdata
+ * @ppd: valid port data
  */
-void msix_netdev_synchronize_irq(struct hfi1_devdata *dd)
+void msix_netdev_synchronize_irq(struct hfi1_pportdata *ppd)
 {
 	int i;
-	int ctxt_count = hfi1_netdev_ctxt_count(dd);
+	int ctxt_count = hfi1_netdev_ctxt_count(ppd);
 
 	for (i = 0; i < ctxt_count; i++) {
-		struct hfi1_ctxtdata *rcd = hfi1_netdev_get_ctxt(dd, i);
+		struct hfi1_ctxtdata *rcd = hfi1_netdev_get_ctxt(ppd, i);
 		struct hfi1_msix_entry *me;
 
-		me = &dd->msix_info.msix_entries[rcd->msix_intr];
+		me = &ppd->dd->msix_info.msix_entries[rcd->msix_intr];
 
 		synchronize_irq(me->irq);
 	}

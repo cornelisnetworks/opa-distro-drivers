@@ -400,6 +400,17 @@ void hfi1_handle_trap_timer(struct timer_list *t);
 u16 tx_link_width(u16 link_width);
 u64 get_xmit_wait_counters(struct hfi1_pportdata *ppd, u16 link_width,
 			   u16 link_speed, int vl);
+int hfi1_mad_init(struct hfi1_devdata *dd);
+int hfi1_mad_deinit(struct hfi1_devdata *dd);
+int get_sc2vlt_tables(struct hfi1_pportdata *ppd, void *data);
+
+int cport_send_recv_mad(struct hfi1_devdata *dd, u8 sb,
+			const void *mad, int len,
+			void *omad, size_t *omad_len);
+int update_from_opa_portinfo(struct hfi1_pportdata *ppd,
+			     struct opa_smp *smp,
+			     struct opa_port_info *pi);
+
 /**
  * get_link_speed - determine whether 12.5G or 25G speed
  * @link_speed: the speed of active link

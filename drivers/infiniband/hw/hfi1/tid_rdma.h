@@ -227,6 +227,7 @@ static inline void trdma_clean_swqe(struct rvt_qp *qp, struct rvt_swqe *wqe)
 
 void hfi1_kern_read_tid_flow_free(struct rvt_qp *qp);
 
+struct hfi1_ctxtdata *qp_to_rcd(struct rvt_qp *qp);
 int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 		      struct ib_qp_init_attr *init_attr);
 void hfi1_qp_priv_tid_free(struct rvt_dev_info *rdi, struct rvt_qp *qp);

@@ -362,7 +362,7 @@ enum link_tuning_encoding {
 #define CHECKSUM_SMASK			(CHECKSUM_MASK << CHECKSUM_SHIFT)
 
 /* platform.c */
-void get_platform_config(struct hfi1_devdata *dd);
+void get_platform_config(struct hfi1_pportdata *ppd);
 void free_platform_config(struct hfi1_devdata *dd);
 void get_port_type(struct hfi1_pportdata *ppd);
 int set_qsfp_tx(struct hfi1_pportdata *ppd, int on);

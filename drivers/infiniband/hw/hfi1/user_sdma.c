@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright(c) 2020 - 2023 Cornelis Networks, Inc.
+ * Copyright(c) 2020-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015 - 2018 Intel Corporation.
  */
 
@@ -40,7 +40,7 @@ static void user_sdma_txreq_cb(struct sdma_txreq *txreq, int status);
 static inline void pq_update(struct hfi1_user_sdma_pkt_q *pq);
 static void user_sdma_free_request(struct user_sdma_request *req);
 static int check_header_template(struct user_sdma_request *req,
-				 struct hfi1_pkt_header *hdr, u32 lrhlen,
+				 struct user_sdma_txreq *tx, u32 lrhlen,
 				 u32 datalen);
 static int set_txreq_header(struct user_sdma_request *req,
 			    struct user_sdma_txreq *tx, u32 datalen);
@@ -51,7 +51,7 @@ static inline void set_comp_state(struct hfi1_user_sdma_pkt_q *pq,
 				  u16 idx, enum hfi1_sdma_comp_state state,
 				  int ret);
 static inline u32 set_pkt_bth_psn(__be32 bthpsn, u8 expct, u32 frags);
-static inline u32 get_lrh_len(struct hfi1_pkt_header, u32 len);
+static inline u32 get_lrh_len(struct user_sdma_request *req, u32 len);
 
 static int defer_packet_queue(
 	struct sdma_engine *sde,
@@ -133,7 +133,6 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 
 	iowait_init(&pq->busy, 0, NULL, NULL, defer_packet_queue,
 		    activate_packet_queue, NULL, NULL);
-	pq->reqidx = 0;
 
 	pq->reqs = kcalloc(hfi1_sdma_comp_ring_size,
 			   sizeof(*pq->reqs),
@@ -169,7 +168,7 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 
 	cq->nentries = hfi1_sdma_comp_ring_size;
 
-	ret = hfi1_init_system_pinning(pq);
+	ret = init_pinning_interfaces(pq);
 	if (ret)
 		goto pq_mmu_fail;
 
@@ -230,7 +229,7 @@ int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd,
 			pq->wait,
 			!atomic_read(&pq->n_reqs));
 		kfree(pq->reqs);
-		hfi1_free_system_pinning(pq);
+		free_pinning_interfaces(pq);
 		bitmap_free(pq->req_in_use);
 		kmem_cache_destroy(pq->txreq_cache);
 		flush_pq_iowait(pq);
@@ -267,6 +266,97 @@ static u8 dlid_to_selector(u16 dlid)
 	return mapping[hash];
 }
 
+#ifdef NVIDIA_GPU_DIRECT
+/*
+ * For PSM2-CUDA backwards compat.
+ *
+ * Fill in m as if all data iovs are for CUDA buffers.
+ */
+static void fill_in_cuda_meminfo(struct sdma_req_meminfo *m, u16 data_iovs)
+{
+	u16 i;
+
+	m->types = 0;
+	for (i = 0; i < data_iovs; i++) {
+		HFI1_MEMINFO_TYPE_ENTRY_SET(m->types, i, HFI1_MEMINFO_TYPE_NVIDIA);
+		/*
+		 * The device ID that hfi1/pin_nvidia will use as a key into
+		 * its hash table of nvidia_pintrees.
+		 * Give it a fake, non-zero context so if program mixes old
+		 * sdma_req_info + .flags and new sdma_req_info +
+		 * sdma_req_meminfo that it is unlikely that the fake context
+		 * will match any real context from an sdma_req_meminfo
+		 */
+		m->context[i] = 0xDEADBEEF;
+	}
+}
+#endif
+
+/* return the data length expressed in the template LRH */
+static inline u32 template_data_len(struct user_sdma_request *req)
+{
+	u32 len;
+
+	if (req->is16b) {
+		/*
+		 * The incoming LRH template length is:
+		 *   lrh_len = header_len + data_len + ICRC
+		 *   => data_len = lrh_len - header_len - ICRC
+		 *   header_len = req->hsize - sizeof(PBC)
+		 *   ICRC = 8 bytes (for 16B packets)
+		 */
+		len = req->lrh_len_bytes - (req->hsize - sizeof(req->h.pbc)) - 8;
+	} else {
+		/*
+		 * The minimum representable packet data length in a
+		 * header is 4 bytes, therefore, when the data length
+		 * request is less than 4 bytes, there's only one
+		 * packet, and the packet data length is equal to that
+		 * of the request data length.
+		 */
+		if (req->data_len < sizeof(u32))
+			len = req->data_len;
+		else
+			len = (req->lrh_len_bytes - (req->hsize - 4));
+	}
+
+	return len;
+}
+
+/*
+ * Decide if the PBC is for 9B or 16B packets.
+ * Expect the PBC to be endianized for the CPU.
+ *
+ * Return:
+ * 0       - PBC is 9B or 16B, set is_16b accordingly
+ * -EINVAL - PBC not 9B or 16B
+ *
+ */
+static int check_pbc_16b(struct hfi1_devdata *dd, u64 pbc, bool *is_16b)
+{
+	u32 l2type;
+
+	if (dd->params->chip_type == CHIP_WFR) {
+		/* WFR: if bypass is set, it is 16B, else 9B */
+		*is_16b = !!(pbc & PBC_PACKET_BYPASS);
+		return 0;
+	}
+
+	/* JKR and beyond */
+	l2type = (pbc >> PBC_L2_TYPE_SHIFT) & 0x3;
+	if (l2type == PBC_L2_16B) {
+		*is_16b = true;
+		return 0;
+	}
+	if (l2type == PBC_L2_9B) {
+		*is_16b = false;
+		return 0;
+	}
+	/* unexpected l2 type */
+
+	return -EINVAL;
+}
+
 /**
  * hfi1_user_sdma_process_request() - Process and start a user sdma request
  * @fd: valid file descriptor
@@ -280,6 +370,7 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 {
 	int ret = 0, i;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
+	struct hfi1_pportdata *ppd = uctxt->ppd;
 	struct hfi1_user_sdma_pkt_q *pq =
 		srcu_dereference(fd->pq, &fd->pq_srcu);
 	struct hfi1_user_sdma_comp_q *cq = fd->cq;
@@ -287,27 +378,49 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	unsigned long idx = 0;
 	u8 pcount = initial_pkt_count;
 	struct sdma_req_info info;
+	u64 cpu_pbc;
+	unsigned long rsize;
+	void *rhdr; /* header remainder */
+	__be32 *bth;
+	struct hfi1_kdeth_header *kdeth;
+	bool lrh_grh;
+
+	/*
+	 * For PSM2-CUDA backwards compatibility.
+	 * Start by assuming u16 .flags not present.
+	 * Add sizeof(u16) back once determined that .flags is present.
+	 */
+	int infosz = sizeof(struct sdma_req_info);
+#ifdef NVIDIA_GPU_DIRECT
+	infosz -= sizeof(u16);
+#endif
+
 	struct user_sdma_request *req;
+	size_t header_offset;
 	u8 opcode, sc, vl;
 	u16 pkey;
 	u32 slid;
 	u16 dlid;
 	u32 selector;
 
-	if (iovec[idx].iov_len < sizeof(info) + sizeof(req->hdr)) {
-		hfi1_cdbg(
-		   SDMA,
-		   "[%u:%u:%u] First vector not big enough for header %lu/%lu",
-		   dd->unit, uctxt->ctxt, fd->subctxt,
-		   iovec[idx].iov_len, sizeof(info) + sizeof(req->hdr));
+	if (iovec[idx].iov_len < infosz) {
+		hfi1_cdbg(SDMA,
+			  "[%u:%u:%u] First vector not big enough for info %lu/%u",
+			  dd->unit, uctxt->ctxt, fd->subctxt,
+			  iovec[idx].iov_len, infosz);
 		return -EINVAL;
 	}
-	ret = copy_from_user(&info, iovec[idx].iov_base, sizeof(info));
+	ret = copy_from_user(&info, iovec[idx].iov_base, infosz);
 	if (ret) {
 		hfi1_cdbg(SDMA, "[%u:%u:%u] Failed to copy info QW (%d)",
 			  dd->unit, uctxt->ctxt, fd->subctxt, ret);
 		return -EFAULT;
 	}
+
+#ifdef NVIDIA_GPU_DIRECT
+	/* Assume .flags not present after sdma_req_info */
+	info.flags = 0;
+#endif
 
 	trace_hfi1_sdma_user_reqinfo(dd, uctxt->ctxt, fd->subctxt,
 				     (u16 *)&info);
@@ -362,7 +475,14 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	req->seqsubmitted = 0;
 	req->tids = NULL;
 	req->has_error = 0;
+	req->hsize = 0; /* set below */
+	req->lrh_len_bytes = 0; /* set below */
+	req->pad_mask = 0; /* set below */
+	req->tailsize = 0; /* set below */
+	req->is16b = false; /* set below */
 	INIT_LIST_HEAD(&req->txps);
+	req->n_pinrefs = 0;
+	req->pinref_seqnum = 0;
 
 	memcpy(&req->info, &info, sizeof(info));
 
@@ -372,36 +492,188 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	if (req_opcode(info.ctrl) == EXPECTED) {
 		/* expected must have a TID info and at least one data vector */
 		if (req->data_iovs < 2) {
-			SDMA_DBG(req,
-				 "Not enough vectors for expected request");
+			SDMA_DBG(req, "Not enough vectors for expected request: 0x%x", info.ctrl);
 			ret = -EINVAL;
 			goto free_req;
 		}
 		req->data_iovs--;
 	}
 
-	if (!info.npkts || req->data_iovs > MAX_VECTORS_PER_REQ) {
+	if (!info.npkts || req->data_iovs > ARRAY_SIZE(req->iovs)) {
 		SDMA_DBG(req, "Too many vectors (%u/%u)", req->data_iovs,
-			 MAX_VECTORS_PER_REQ);
+			 (u32)ARRAY_SIZE(req->iovs));
 		ret = -EINVAL;
 		goto free_req;
 	}
 
-	/* Copy the header from the user buffer */
-	ret = copy_from_user(&req->hdr, iovec[idx].iov_base + sizeof(info),
-			     sizeof(req->hdr));
+	if (req_has_meminfo(info.ctrl)) {
+		/* Copy the meminfo from the user buffer */
+		if (iovec[idx].iov_len < infosz + sizeof(req->meminfo)) {
+			SDMA_DBG(req, "First vector not big enough for meminfo %lu/%lu",
+				 iovec[idx].iov_len,
+				 infosz + sizeof(req->meminfo));
+			ret = -EINVAL;
+			goto free_req;
+		}
+		ret = copy_from_user(&req->meminfo,
+				     iovec[idx].iov_base + infosz,
+				     sizeof(req->meminfo));
+		if (ret) {
+			SDMA_DBG(req, "Failed to copy meminfo (%d)", ret);
+			ret = -EFAULT;
+			goto free_req;
+		}
+		header_offset = infosz + sizeof(req->meminfo);
+	} else {
+		req->meminfo.types = 0;
+		header_offset = infosz;
+	}
+
+#ifdef NVIDIA_GPU_DIRECT
+	/*
+	 * Map PSM2-CUDA request info.flags to req->meminfo.* values.
+	 *
+	 * .flags present only when req_version(info.ctrl) == 2
+	 */
+	if (req_version(info.ctrl) == 2) {
+		/* .flags and sdma_req_meminfo are mutually exclusive */
+		if (req_has_meminfo(info.ctrl)) {
+			ret = -EINVAL;
+			goto free_req;
+		}
+
+		/* cannot have more data iovs than there are meminfo entries */
+		if (req->data_iovs > HFI1_MAX_MEMINFO_ENTRIES) {
+			ret = -EINVAL;
+			goto free_req;
+		}
+
+		if (iovec[idx].iov_len < infosz + sizeof(info.flags)) {
+			SDMA_DBG(req, "First vector not big enough for info flags %lu/%lu",
+				 iovec[idx].iov_len,
+				 header_offset + sizeof(info.flags));
+			ret = -EINVAL;
+			goto free_req;
+		}
+		ret = copy_from_user(&info.flags,
+				     iovec[idx].iov_base + infosz,
+				     sizeof(info.flags));
+		if (ret) {
+			SDMA_DBG(req, "Failed to copy flags (%d)", ret);
+			ret = -EFAULT;
+			goto free_req;
+		}
+
+		if (info.flags & HFI1_BUF_GPU_MEM)
+			fill_in_cuda_meminfo(&req->meminfo, req->data_iovs);
+
+		infosz += sizeof(info.flags);
+		header_offset = infosz;
+	}
+#endif
+
+	/* copy in the PBC to find the packet type: 9B or 16B */
+	if (iovec[idx].iov_len < header_offset + sizeof(req->h.pbc)) {
+		SDMA_DBG(req, "First vector not big enough for pbc %lu/%lu",
+			 iovec[idx].iov_len,
+			 header_offset + sizeof(req->h.pbc));
+		ret = -EINVAL;
+		goto free_req;
+	}
+	ret = copy_from_user(&req->h.pbc, iovec[idx].iov_base + header_offset,
+			     sizeof(req->h.pbc));
+	if (ret) {
+		SDMA_DBG(req, "Failed to copy header template pbc (%d)", ret);
+		ret = -EFAULT;
+		goto free_req;
+	}
+	header_offset += sizeof(req->h.pbc);
+
+	cpu_pbc = le64_to_cpu(*(__le64 *)req->h.pbc);
+	vl = (cpu_pbc >> PBC_VL_SHIFT) & PBC_VL_MASK;
+
+	ret = check_pbc_16b(dd, cpu_pbc, &req->is16b);
+	if (ret) {
+		SDMA_DBG(req, "Bad header template PBC L2 type");
+		goto free_req;
+	}
+	if (req->is16b) {
+		/*
+		 * 16B not supported for WFR expected - all code here assumes
+		 * the ICRC QW does not land in memory.  Would require
+		 * coordination between library and driver.
+		 */
+		if (dd->params->chip_type == CHIP_WFR &&
+		    req_opcode(req->info.ctrl) == EXPECTED) {
+			SDMA_DBG(req, "WFR expected not supported");
+			ret = -EOPNOTSUPP;
+			goto free_req;
+		}
+
+		/* extra appended by the driver */
+		req->tailsize = 8; /* ICRC QW size */
+
+		req->hsize = sizeof(req->h.hdr16b);
+		rhdr = req->h.hdr16b.lrh; /* remainder of header */
+		bth = req->h.hdr16b.bth;
+		kdeth = &req->h.hdr16b.kdeth;
+	} else {
+		req->hsize = sizeof(req->h.hdr9b);
+		rhdr = req->h.hdr9b.lrh; /* remainder of header */
+		bth = req->h.hdr9b.bth;
+		kdeth = &req->h.hdr9b.kdeth;
+	}
+	rsize = req->hsize - sizeof(req->h.pbc); /* header remainder size */
+
+	/* copy in rest of header: LRH (9B or 16B), BTH, and KDETH */
+	if (iovec[idx].iov_len < header_offset + rsize) {
+		SDMA_DBG(req, "First vector not big enough for header %lu/%lu",
+			 iovec[idx].iov_len,
+			 header_offset + rsize);
+		ret = -EINVAL;
+		goto free_req;
+	}
+	ret = copy_from_user(rhdr, iovec[idx].iov_base + header_offset, rsize);
 	if (ret) {
 		SDMA_DBG(req, "Failed to copy header template (%d)", ret);
 		ret = -EFAULT;
 		goto free_req;
 	}
 
-	/* If Static rate control is not enabled, sanitize the header. */
-	if (!HFI1_CAP_IS_USET(STATIC_RATE_CTRL))
-		req->hdr.pbc[2] = 0;
+	if (req->is16b) {
+		struct hfi1_16b_header *hdr = rhdr;
+
+		if (hfi1_16B_get_l2(hdr) != PBC_L2_16B) {
+			SDMA_DBG(req, "Non-matching L2 (%d)",
+				 hfi1_16B_get_l2(hdr));
+			ret = -EINVAL;
+			goto free_req;
+		}
+
+		sc = hfi1_16B_get_sc(hdr);
+		slid = hfi1_16B_get_slid(hdr);
+		dlid = hfi1_16B_get_dlid(hdr);
+		lrh_grh = hfi1_16B_get_l4(hdr) == OPA_16B_L4_IB_GLOBAL;
+		req->lrh_len_bytes = hfi1_16B_get_len(hdr) << 3;
+		req->pad_mask = 0x7; /* round up to 8 bytes */
+	} else {
+		struct ib_header *hdr = rhdr;
+		bool sc4 = (le16_to_cpu(req->h.hdr9b.pbc[1]) >> 14) & 0x1;
+
+		/* sanitize the pbc if no rate control */
+		if (!HFI1_CAP_IS_USET(STATIC_RATE_CTRL))
+			req->h.hdr9b.pbc[2] = 0;
+
+		sc = hfi1_9B_get_sc5(hdr, sc4);
+		slid = ib_get_slid(hdr);
+		dlid = ib_get_dlid(hdr);
+		lrh_grh = ib_get_lnh(hdr) == HFI1_LRH_GRH;
+		req->lrh_len_bytes = ib_get_len(hdr) << 2;
+		req->pad_mask = 0x3; /* round up to 4 bytes */
+	}
 
 	/* Validate the opcode. Do not trust packets from user space blindly. */
-	opcode = (be32_to_cpu(req->hdr.bth[0]) >> 24) & 0xff;
+	opcode = (be32_to_cpu(bth[0]) >> 24) & 0xff;
 	if ((opcode & USER_OPCODE_CHECK_MASK) !=
 	     USER_OPCODE_CHECK_VAL) {
 		SDMA_DBG(req, "Invalid opcode (%d)", opcode);
@@ -413,21 +685,17 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	 * VL comes from PBC, SC comes from LRH, and the VL needs to
 	 * match the SC look up.
 	 */
-	vl = (le16_to_cpu(req->hdr.pbc[0]) >> 12) & 0xF;
-	sc = (((be16_to_cpu(req->hdr.lrh[0]) >> 12) & 0xF) |
-	      (((le16_to_cpu(req->hdr.pbc[1]) >> 14) & 0x1) << 4));
-	if (vl >= dd->pport->vls_operational ||
-	    vl != sc_to_vlt(dd, sc)) {
+	if (vl >= ppd->vls_operational || vl != sc_to_vlt(ppd, sc)) {
 		SDMA_DBG(req, "Invalid SC(%u)/VL(%u)", sc, vl);
 		ret = -EINVAL;
 		goto free_req;
 	}
 
 	/* Checking P_KEY for requests from user-space */
-	pkey = (u16)be32_to_cpu(req->hdr.bth[0]);
-	slid = be16_to_cpu(req->hdr.lrh[3]);
-	if (egress_pkey_check(dd->pport, slid, pkey, sc, PKEY_CHECK_INVALID)) {
+	pkey = (u16)be32_to_cpu(bth[0]);
+	if (egress_pkey_check(ppd, slid, pkey, sc, PKEY_CHECK_INVALID)) {
 		ret = -EINVAL;
+		SDMA_DBG(req, "P_KEY check failed\n");
 		goto free_req;
 	}
 
@@ -436,19 +704,19 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	 * the RXE parsing will be off and will land in the middle of the KDETH
 	 * or miss it entirely.
 	 */
-	if ((be16_to_cpu(req->hdr.lrh[0]) & 0x3) == HFI1_LRH_GRH) {
+	if (lrh_grh) {
 		SDMA_DBG(req, "User tried to pass in a GRH");
 		ret = -EINVAL;
 		goto free_req;
 	}
 
-	req->koffset = le32_to_cpu(req->hdr.kdeth.swdata[6]);
+	req->koffset = le32_to_cpu(kdeth->swdata[6]);
 	/*
 	 * Calculate the initial TID offset based on the values of
 	 * KDETH.OFFSET and KDETH.OM that are passed in.
 	 */
-	req->tidoffset = KDETH_GET(req->hdr.kdeth.ver_tid_offset, OFFSET) *
-		(KDETH_GET(req->hdr.kdeth.ver_tid_offset, OM) ?
+	req->tidoffset = KDETH_GET(kdeth->ver_tid_offset, OFFSET) *
+		(KDETH_GET(kdeth->ver_tid_offset, OM) ?
 		 KDETH_OM_LARGE : KDETH_OM_SMALL);
 	trace_hfi1_sdma_user_initial_tidoffset(dd, uctxt->ctxt, fd->subctxt,
 					       info.comp_idx, req->tidoffset);
@@ -456,8 +724,17 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 
 	/* Save all the IO vector structures */
 	for (i = 0; i < req->data_iovs; i++) {
+		req->iovs[i].type =
+			HFI1_MEMINFO_TYPE_ENTRY_GET(req->meminfo.types, i);
+		if (!pinning_type_supported(req->iovs[i].type)) {
+			SDMA_DBG(req, "Pinning type not supported: %u\n",
+				 req->iovs[i].type);
+			req->data_iovs = i;
+			ret = -EINVAL;
+			goto free_req;
+		}
+		req->iovs[i].context = req->meminfo.context[i];
 		req->iovs[i].offset = 0;
-		INIT_LIST_HEAD(&req->iovs[i].list);
 		memcpy(&req->iovs[i].iov,
 		       iovec + idx++,
 		       sizeof(req->iovs[i].iov));
@@ -469,6 +746,11 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	}
 	trace_hfi1_sdma_user_data_length(dd, uctxt->ctxt, fd->subctxt,
 					 info.comp_idx, req->data_len);
+	/* reject if not enough data provided for the template */
+	if (req->data_len < template_data_len(req)) {
+		ret = -EINVAL;
+		goto free_req;
+	}
 	if (pcount > req->info.npkts)
 		pcount = req->info.npkts;
 	/*
@@ -508,10 +790,9 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 		idx++;
 	}
 
-	dlid = be16_to_cpu(req->hdr.lrh[1]);
 	selector = dlid_to_selector(dlid);
 	selector += uctxt->ctxt + fd->subctxt;
-	req->sde = sdma_select_user_engine(dd, selector, vl);
+	req->sde = sdma_select_user_engine(ppd, selector, vl);
 
 	if (!req->sde || !sdma_running(req->sde)) {
 		ret = -ECOMM;
@@ -567,32 +848,23 @@ free_req:
 	return ret;
 }
 
-static inline u32 compute_data_length(struct user_sdma_request *req,
-				      struct user_sdma_txreq *tx)
+/*
+ * Determine the proper size of the packet data.
+ *
+ * The size of the data of the first packet is in the header template.
+ *
+ * The size of the remaining packets is the minimum of the frag size (MTU)
+ * or remaining data in the request.
+ */
+static inline u32 compute_data_length(struct user_sdma_request *req)
 {
-	/*
-	 * Determine the proper size of the packet data.
-	 * The size of the data of the first packet is in the header
-	 * template. However, it includes the header and ICRC, which need
-	 * to be subtracted.
-	 * The minimum representable packet data length in a header is 4 bytes,
-	 * therefore, when the data length request is less than 4 bytes, there's
-	 * only one packet, and the packet data length is equal to that of the
-	 * request data length.
-	 * The size of the remaining packets is the minimum of the frag
-	 * size (MTU) or remaining data in the request.
-	 */
 	u32 len;
 
 	if (!req->seqnum) {
-		if (req->data_len < sizeof(u32))
-			len = req->data_len;
-		else
-			len = ((be16_to_cpu(req->hdr.lrh[2]) << 2) -
-			       (sizeof(tx->hdr) - 4));
+		len = template_data_len(req);
 	} else if (req_opcode(req->info.ctrl) == EXPECTED) {
 		u32 tidlen = EXP_TID_GET(req->tids[req->tididx], LEN) *
-			PAGE_SIZE;
+			EXP_TID_ADDR_SIZE;
 		/*
 		 * Get the data length based on the remaining space in the
 		 * TID pair.
@@ -602,7 +874,7 @@ static inline u32 compute_data_length(struct user_sdma_request *req,
 		if (unlikely(!len) && ++req->tididx < req->n_tids &&
 		    req->tids[req->tididx]) {
 			tidlen = EXP_TID_GET(req->tids[req->tididx],
-					     LEN) * PAGE_SIZE;
+					     LEN) * EXP_TID_ADDR_SIZE;
 			req->tidoffset = 0;
 			len = min_t(u32, tidlen, req->info.fragsize);
 		}
@@ -623,17 +895,53 @@ static inline u32 compute_data_length(struct user_sdma_request *req,
 	return len;
 }
 
-static inline u32 pad_len(u32 len)
+static inline u32 pad_len(struct user_sdma_request *req, u32 len)
 {
-	if (len & (sizeof(u32) - 1))
-		len += sizeof(u32) - (len & (sizeof(u32) - 1));
-	return len;
+	return (len + req->pad_mask) & ~req->pad_mask;
 }
 
-static inline u32 get_lrh_len(struct hfi1_pkt_header hdr, u32 len)
+/*
+ * Return in bytes the size to be put into the LRH
+ */
+static inline u32 get_lrh_len(struct user_sdma_request *req, u32 len)
 {
+	if (req->is16b) {
+		/* header - PBC + data length + trailing ICRC QW */
+		return req->hsize - sizeof(u64) + len + 8;
+	}
+
 	/* (Size of complete header - size of PBC) + 4B ICRC + data length */
-	return ((sizeof(hdr) - sizeof(hdr.pbc)) + 4 + len);
+	return req->hsize - sizeof(u64) + 4 + len;
+}
+
+/*
+ * Convert a PBC length (DW) to an LRH length (bytes).  Important: incoming
+ * PBC length is whole bottom of PBC, be sure to mask.
+ */
+static inline u16 pbc2lrh(struct user_sdma_request *req, u16 pbclen)
+{
+	if (req->is16b) {
+		/*
+		 * 16B: Both PBC and LRH include QW ICRC, just subtract off PBC.
+		 */
+		return ((pbclen & 0xfff) - 2) << 2;
+	}
+	/* 9B: len - PBC + ICRC */
+	return ((pbclen & 0xfff) - 2 + 1) << 2;
+}
+
+/* convert a LRH length (bytes) to a PBC length (DW) */
+static inline u16 lrh2pbc(struct user_sdma_request *req, u16 lrhlen)
+{
+	if (req->is16b) {
+		/* 16B: to DW, ICRC QW already included, add 2 for PBC */
+		return ((lrhlen >> 2) + 2) & 0xfff;
+	}
+	/*
+	 * 9B: to DW, len includes ICRC use that for half of PBC, add 1 for
+	 * second half of PBC
+	 */
+	return ((lrhlen >> 2) + 1) & 0xfff;
 }
 
 static int user_sdma_txadd_ahg(struct user_sdma_request *req,
@@ -641,8 +949,8 @@ static int user_sdma_txadd_ahg(struct user_sdma_request *req,
 			       u32 datalen)
 {
 	int ret;
-	u16 pbclen = le16_to_cpu(req->hdr.pbc[0]);
-	u32 lrhlen = get_lrh_len(req->hdr, pad_len(datalen));
+	u16 pbclen = le16_to_cpu(req->h.pbc[0]);
+	u32 lrhlen = get_lrh_len(req, pad_len(req, datalen));
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
 
 	/*
@@ -653,23 +961,171 @@ static int user_sdma_txadd_ahg(struct user_sdma_request *req,
 	 * member of user_sdma_request were also
 	 * cacheline aligned.
 	 */
-	memcpy(&tx->hdr, &req->hdr, sizeof(tx->hdr));
-	if (PBC2LRH(pbclen) != lrhlen) {
-		pbclen = (pbclen & 0xf000) | LRH2PBC(lrhlen);
-		tx->hdr.pbc[0] = cpu_to_le16(pbclen);
+	memcpy(&tx->h, &req->h, req->hsize);
+	if (pbc2lrh(req, pbclen) != lrhlen) {
+		pbclen = (pbclen & 0xf000) | lrh2pbc(req, lrhlen);
+		tx->h.pbc[0] = cpu_to_le16(pbclen);
 	}
-	ret = check_header_template(req, &tx->hdr, lrhlen, datalen);
+	ret = check_header_template(req, tx, lrhlen, datalen);
 	if (ret)
 		return ret;
-	ret = sdma_txinit_ahg(&tx->txreq, SDMA_TXREQ_F_AHG_COPY,
-			      sizeof(tx->hdr) + datalen, req->ahg_idx,
+	ret = sdma_txinit_ahg(pq->dd, &tx->txreq, SDMA_TXREQ_F_AHG_COPY,
+			      req->hsize + datalen, req->ahg_idx,
 			      0, NULL, 0, user_sdma_txreq_cb);
 	if (ret)
 		return ret;
-	ret = sdma_txadd_kvaddr(pq->dd, &tx->txreq, &tx->hdr, sizeof(tx->hdr));
+	ret = sdma_txadd_kvaddr(pq->dd, &tx->txreq, &tx->h, req->hsize);
 	if (ret)
 		sdma_txclean(pq->dd, &tx->txreq);
 	return ret;
+}
+
+static void free_pinref(struct user_sdma_pinref *d)
+{
+	pinning_interfaces[d->memtype].put(d->ptr);
+}
+
+static void free_pinrefs(struct user_sdma_pinref *pinrefs, u16 n_pinrefs)
+{
+	u16 i;
+
+	if (!pinrefs)
+		return;
+	for (i = 0; i < n_pinrefs; i++)
+		free_pinref(&pinrefs[i]);
+}
+
+/**
+ * Evict + free a pinref last-used by a now-completed packet (user_sdma_txreq).
+ */
+static inline int evict_complete_pinref(struct user_sdma_request *req)
+{
+	u16 i;
+
+	for (i = 0; i < req->n_pinrefs; i++) {
+		if (req->pinrefs[i].req_seqnum > req->seqcomp)
+			continue;
+		free_pinref(&req->pinrefs[i]);
+		req->pinrefs[i].ptr = NULL;
+		req->n_pinrefs--;
+		return i;
+	}
+
+	return -ENOMEM;
+}
+
+/*
+ * @return:
+ * * 0 on success
+ * * -EINVAL or -ENOMEM on error
+ */
+static int request_add_ref(struct user_sdma_request *req, void *ptr,
+			   u16 memtype)
+{
+	int ret;
+	u16 i;
+
+	if (req->n_pinrefs >= ARRAY_SIZE(req->pinrefs)) {
+		ret = evict_complete_pinref(req);
+		if (ret < 0)
+			return ret;
+		i = (u16)ret;
+	} else {
+		i = req->n_pinrefs;
+	}
+	req->n_pinrefs++;
+	req->pinrefs[i].ptr = ptr;
+	req->pinrefs[i].memtype = memtype;
+	req->pinrefs[i].req_seqnum = req->seqnum;
+	req->pinrefs[i].pinref_seqnum = req->pinref_seqnum++;
+	return 0;
+}
+
+/*
+ * Add pinref made from (@ptr,@put) to @tx->pinrefs.
+ */
+static int txreq_add_ref(struct user_sdma_txreq *tx, void *ptr,
+			 u16 memtype)
+{
+	u16 i;
+
+	/* Should not happen; internal error, check just in case */
+	if (WARN_ON_ONCE(tx->n_pinrefs >= MAX_DESC))
+		return -ENOMEM;
+	if (!tx->pinrefs) {
+		size_t bytes;
+
+		bytes = array_size(MAX_DESC, sizeof(tx->pinrefs[0]));
+		tx->pinrefs = kmalloc(bytes, GFP_KERNEL);
+		if (!tx->pinrefs)
+			return -ENOMEM;
+	}
+	i = tx->n_pinrefs++;
+	tx->pinrefs[i].ptr = ptr;
+	tx->pinrefs[i].memtype = memtype;
+	/* .req_seqnum and .pinref_seqnum are N/A for pinrefs in tx->pinrefs */
+	return 0;
+}
+
+/**
+ * Try adding @ptr to @tx->req->pinrefs first but add to @tx->pinrefs if
+ * there is no space in @tx->req->pinrefs.
+ */
+int hfi1_user_sdma_add_ref(struct user_sdma_txreq *tx, void *ptr,
+			   u16 memtype)
+{
+	int ret;
+
+	/* Should not happen; internal error, check just in case */
+	if (WARN_ON_ONCE(!ptr || !pinning_type_supported(memtype)))
+		return -EINVAL;
+	if (WARN_ON_ONCE(!pinning_interfaces[memtype].put))
+		return -EINVAL;
+	ret = request_add_ref(tx->req, ptr, memtype);
+	if (!ret)
+		return 0;
+	if (ret != -ENOMEM)
+		return ret;
+	/* No space in req->pinrefs and no entries could be evicted */
+	return txreq_add_ref(tx, ptr, memtype);
+}
+
+/**
+ * @return most-recently used pinref for @memtype from @tx->req. Most-recent
+ *         determined by &user_sdma_pinref->pinref_seqnum.
+ */
+struct user_sdma_pinref *
+hfi1_user_sdma_mru_ref(struct user_sdma_txreq *tx, u16 memtype)
+{
+	struct user_sdma_request *req = tx->req;
+	struct user_sdma_pinref *mru = NULL;
+	u16 i;
+
+	for (i = 0; i < req->n_pinrefs; i++) {
+		if (req->pinrefs[i].memtype != memtype)
+			continue;
+		if (!mru || req->pinrefs[i].pinref_seqnum > mru->pinref_seqnum)
+			mru = &req->pinrefs[i];
+	}
+
+	return mru;
+}
+
+/**
+ * Update @d->req_seqnum and @d->pinref_seqnum from @tx->req.
+ */
+void hfi1_user_sdma_touch_ref(struct user_sdma_txreq *tx,
+			      struct user_sdma_pinref *d)
+{
+	d->req_seqnum = tx->req->seqnum;
+	d->pinref_seqnum = tx->req->pinref_seqnum++;
+}
+
+static void user_sdma_free_txreq(struct user_sdma_txreq *tx)
+{
+	free_pinrefs(tx->pinrefs, tx->n_pinrefs);
+	kfree(tx->pinrefs);
+	kmem_cache_free(tx->req->pq->txreq_cache, tx);
 }
 
 static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
@@ -678,13 +1134,15 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 	u16 count;
 	unsigned npkts = 0;
 	struct user_sdma_txreq *tx = NULL;
-	struct hfi1_user_sdma_pkt_q *pq = NULL;
+	struct hfi1_user_sdma_pkt_q *pq;
+	struct hfi1_devdata *dd;
 	struct user_sdma_iovec *iovec = NULL;
 
 	if (!req->pq)
 		return -EINVAL;
 
 	pq = req->pq;
+	dd = pq->dd;
 
 	/* If tx completion has reported an error, we are done. */
 	if (READ_ONCE(req->has_error))
@@ -716,11 +1174,10 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 		tx = kmem_cache_alloc(pq->txreq_cache, GFP_KERNEL);
 		if (!tx)
 			return -ENOMEM;
-
+		tx->pinrefs = NULL;
+		tx->n_pinrefs = 0;
 		tx->flags = 0;
 		tx->req = req;
-		INIT_LIST_HEAD(&tx->list);
-
 		/*
 		 * For the last packet set the ACK request
 		 * and disable header suppression.
@@ -745,7 +1202,7 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 				WARN_ON(iovec->offset);
 			}
 
-			datalen = compute_data_length(req, tx);
+			datalen = compute_data_length(req);
 
 			/*
 			 * Disable header suppression for the payload <= 8DWS.
@@ -773,16 +1230,16 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 			} else {
 				int changes;
 
-				changes = set_txreq_header_ahg(req, tx,
-							       datalen);
+				changes = set_txreq_header_ahg(req, tx, datalen);
 				if (changes < 0) {
 					ret = changes;
 					goto free_tx;
 				}
 			}
 		} else {
-			ret = sdma_txinit(&tx->txreq, 0, sizeof(req->hdr) +
-					  datalen, user_sdma_txreq_cb);
+			ret = sdma_txinit(dd, &tx->txreq, 0,
+					  req->hsize + datalen + req->tailsize,
+					  user_sdma_txreq_cb);
 			if (ret)
 				goto free_tx;
 			/*
@@ -801,11 +1258,18 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 			req->tidoffset += datalen;
 		req->sent += datalen;
 		while (datalen) {
-			ret = hfi1_add_pages_to_sdma_packet(req, tx, iovec,
-							    &datalen);
+			ret = add_to_sdma_packet(iovec->type, req, tx, iovec,
+						 &datalen);
 			if (ret)
 				goto free_txreq;
 			iovec = &req->iovs[req->iov_idx];
+		}
+		/* 16B requests need to have the ICRC QW added */
+		if (req->is16b) {
+			ret = sdma_txadd_daddr(dd, &tx->txreq,
+					       dd->sdma_pad_phys, 8);
+			if (ret)
+				goto free_txreq;
 		}
 		list_add_tail(&tx->txreq.list, &req->txps);
 		/*
@@ -834,28 +1298,28 @@ dosend:
 	return ret;
 
 free_txreq:
-	sdma_txclean(pq->dd, &tx->txreq);
+	sdma_txclean(dd, &tx->txreq);
 free_tx:
-	kmem_cache_free(pq->txreq_cache, tx);
+	user_sdma_free_txreq(tx);
 	return ret;
 }
 
 static int check_header_template(struct user_sdma_request *req,
-				 struct hfi1_pkt_header *hdr, u32 lrhlen,
+				 struct user_sdma_txreq *tx, u32 lrhlen,
 				 u32 datalen)
 {
 	/*
 	 * Perform safety checks for any type of packet:
 	 *    - transfer size is multiple of 64bytes
-	 *    - packet length is multiple of 4 bytes
+	 *    - packet length is multiple of pad_mask+1 (4 or 8) bytes
 	 *    - packet length is not larger than MTU size
 	 *
 	 * These checks are only done for the first packet of the
 	 * transfer since the header is "given" to us by user space.
 	 * For the remainder of the packets we compute the values.
 	 */
-	if (req->info.fragsize % PIO_BLOCK_SIZE || lrhlen & 0x3 ||
-	    lrhlen > get_lrh_len(*hdr, req->info.fragsize))
+	if (req->info.fragsize % PIO_BLOCK_SIZE || lrhlen & req->pad_mask ||
+	    lrhlen > get_lrh_len(req, req->info.fragsize))
 		return -EINVAL;
 
 	if (req_opcode(req->info.ctrl) == EXPECTED) {
@@ -866,14 +1330,22 @@ static int check_header_template(struct user_sdma_request *req,
 		 * tididx points to something sane.
 		 */
 		u32 tidval = req->tids[req->tididx],
-			tidlen = EXP_TID_GET(tidval, LEN) * PAGE_SIZE,
+			tidlen = EXP_TID_GET(tidval, LEN) * EXP_TID_ADDR_SIZE,
 			tididx = EXP_TID_GET(tidval, IDX),
 			tidctrl = EXP_TID_GET(tidval, CTRL),
 			tidoff;
-		__le32 kval = hdr->kdeth.ver_tid_offset;
+		__le32 kval;
+		struct hfi1_kdeth_header *kdeth;
 
+		if (req->is16b) {
+			kval = tx->h.hdr16b.kdeth.ver_tid_offset;
+			kdeth = &req->h.hdr16b.kdeth;
+		} else {
+			kval = tx->h.hdr9b.kdeth.ver_tid_offset;
+			kdeth = &req->h.hdr9b.kdeth;
+		}
 		tidoff = KDETH_GET(kval, OFFSET) *
-			  (KDETH_GET(req->hdr.kdeth.ver_tid_offset, OM) ?
+			  (KDETH_GET(kdeth->ver_tid_offset, OM) ?
 			   KDETH_OM_LARGE : KDETH_OM_SMALL);
 		/*
 		 * Expected receive packets have the following
@@ -910,28 +1382,43 @@ static inline u32 set_pkt_bth_psn(__be32 bthpsn, u8 expct, u32 frags)
 	return psn & mask;
 }
 
+/* set the length field of a 16B LRH header */
+static inline void hfi1_16B_set_len(__le32 *lrh, u32 len)
+{
+	u32 value;
+
+	value = le32_to_cpu(lrh[0]);
+	value &= ~OPA_16B_LEN_MASK;
+	value |= OPA_16B_LEN_MASK & (len << OPA_16B_LEN_SHIFT);
+	lrh[0] = cpu_to_le32(value);
+}
+
 static int set_txreq_header(struct user_sdma_request *req,
 			    struct user_sdma_txreq *tx, u32 datalen)
 {
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
-	struct hfi1_pkt_header *hdr = &tx->hdr;
+	struct hfi1_kdeth_header *kdeth;
+	__be32 *bth;
 	u8 omfactor; /* KDETH.OM */
 	u16 pbclen;
 	int ret;
-	u32 tidval = 0, lrhlen = get_lrh_len(*hdr, pad_len(datalen));
+	u32 tidval = 0, lrhlen = get_lrh_len(req, pad_len(req, datalen));
 
 	/* Copy the header template to the request before modification */
-	memcpy(hdr, &req->hdr, sizeof(*hdr));
+	memcpy(&tx->h, &req->h, req->hsize);
 
 	/*
 	 * Check if the PBC and LRH length are mismatched. If so
 	 * adjust both in the header.
 	 */
-	pbclen = le16_to_cpu(hdr->pbc[0]);
-	if (PBC2LRH(pbclen) != lrhlen) {
-		pbclen = (pbclen & 0xf000) | LRH2PBC(lrhlen);
-		hdr->pbc[0] = cpu_to_le16(pbclen);
-		hdr->lrh[2] = cpu_to_be16(lrhlen >> 2);
+	pbclen = le16_to_cpu(tx->h.pbc[0]);
+	if (pbc2lrh(req, pbclen) != lrhlen) {
+		pbclen = (pbclen & 0xf000) | lrh2pbc(req, lrhlen);
+		tx->h.pbc[0] = cpu_to_le16(pbclen);
+		if (req->is16b)
+			hfi1_16B_set_len(tx->h.hdr16b.lrh, lrhlen >> 3);
+		else
+			tx->h.hdr9b.lrh[2] = cpu_to_be16(lrhlen >> 2);
 		/*
 		 * Third packet
 		 * This is the first packet in the sequence that has
@@ -946,8 +1433,11 @@ static int set_txreq_header(struct user_sdma_request *req,
 			 * Adjust the template so we don't have to update
 			 * every packet
 			 */
-			req->hdr.pbc[0] = hdr->pbc[0];
-			req->hdr.lrh[2] = hdr->lrh[2];
+			req->h.pbc[0] = tx->h.pbc[0];
+			if (req->is16b)
+				hfi1_16B_set_len(req->h.hdr16b.lrh, lrhlen >> 3);
+			else
+				req->h.hdr9b.lrh[2] = tx->h.hdr9b.lrh[2];
 		}
 	}
 	/*
@@ -956,23 +1446,30 @@ static int set_txreq_header(struct user_sdma_request *req,
 	 * header given to us.
 	 */
 	if (unlikely(!req->seqnum)) {
-		ret = check_header_template(req, hdr, lrhlen, datalen);
+		ret = check_header_template(req, tx, lrhlen, datalen);
 		if (ret)
 			return ret;
 		goto done;
 	}
 
-	hdr->bth[2] = cpu_to_be32(
-		set_pkt_bth_psn(hdr->bth[2],
-				(req_opcode(req->info.ctrl) == EXPECTED),
-				req->seqnum));
+	if (req->is16b) {
+		bth = tx->h.hdr16b.bth;
+		kdeth = &tx->h.hdr16b.kdeth;
+	} else {
+		bth = tx->h.hdr9b.bth;
+		kdeth = &tx->h.hdr9b.kdeth;
+	}
+
+	bth[2] = cpu_to_be32(set_pkt_bth_psn(bth[2],
+			     (req_opcode(req->info.ctrl) == EXPECTED),
+			     req->seqnum));
 
 	/* Set ACK request on last packet */
 	if (unlikely(tx->flags & TXREQ_FLAGS_REQ_ACK))
-		hdr->bth[2] |= cpu_to_be32(1UL << 31);
+		bth[2] |= cpu_to_be32(1UL << 31);
 
 	/* Set the new offset */
-	hdr->kdeth.swdata[6] = cpu_to_le32(req->koffset);
+	kdeth->swdata[6] = cpu_to_le32(req->koffset);
 	/* Expected packets have to fill in the new TID information */
 	if (req_opcode(req->info.ctrl) == EXPECTED) {
 		tidval = req->tids[req->tididx];
@@ -981,7 +1478,7 @@ static int set_txreq_header(struct user_sdma_request *req,
 		 * advance everything.
 		 */
 		if ((req->tidoffset) == (EXP_TID_GET(tidval, LEN) *
-					 PAGE_SIZE)) {
+					 EXP_TID_ADDR_SIZE)) {
 			req->tidoffset = 0;
 			/*
 			 * Since we don't copy all the TIDs, all at once,
@@ -993,18 +1490,18 @@ static int set_txreq_header(struct user_sdma_request *req,
 			}
 			tidval = req->tids[req->tididx];
 		}
-		omfactor = EXP_TID_GET(tidval, LEN) * PAGE_SIZE >=
+		omfactor = EXP_TID_GET(tidval, LEN) * EXP_TID_ADDR_SIZE >=
 			KDETH_OM_MAX_SIZE ? KDETH_OM_LARGE_SHIFT :
 			KDETH_OM_SMALL_SHIFT;
 		/* Set KDETH.TIDCtrl based on value for this TID. */
-		KDETH_SET(hdr->kdeth.ver_tid_offset, TIDCTRL,
+		KDETH_SET(kdeth->ver_tid_offset, TIDCTRL,
 			  EXP_TID_GET(tidval, CTRL));
 		/* Set KDETH.TID based on value for this TID */
-		KDETH_SET(hdr->kdeth.ver_tid_offset, TID,
+		KDETH_SET(kdeth->ver_tid_offset, TID,
 			  EXP_TID_GET(tidval, IDX));
 		/* Clear KDETH.SH when DISABLE_SH flag is set */
 		if (unlikely(tx->flags & TXREQ_FLAGS_REQ_DISABLE_SH))
-			KDETH_SET(hdr->kdeth.ver_tid_offset, SH, 0);
+			KDETH_SET(kdeth->ver_tid_offset, SH, 0);
 		/*
 		 * Set the KDETH.OFFSET and KDETH.OM based on size of
 		 * transfer.
@@ -1013,15 +1510,22 @@ static int set_txreq_header(struct user_sdma_request *req,
 			pq->dd, pq->ctxt, pq->subctxt, req->info.comp_idx,
 			req->tidoffset, req->tidoffset >> omfactor,
 			omfactor != KDETH_OM_SMALL_SHIFT);
-		KDETH_SET(hdr->kdeth.ver_tid_offset, OFFSET,
+		KDETH_SET(kdeth->ver_tid_offset, OFFSET,
 			  req->tidoffset >> omfactor);
-		KDETH_SET(hdr->kdeth.ver_tid_offset, OM,
+		KDETH_SET(kdeth->ver_tid_offset, OM,
 			  omfactor != KDETH_OM_SMALL_SHIFT);
 	}
 done:
-	trace_hfi1_sdma_user_header(pq->dd, pq->ctxt, pq->subctxt,
-				    req->info.comp_idx, hdr, tidval);
-	return sdma_txadd_kvaddr(pq->dd, &tx->txreq, hdr, sizeof(*hdr));
+	if (req->is16b) {
+		trace_hfi1_sdma_user_header16b(pq->dd, pq->ctxt, pq->subctxt,
+					       req->info.comp_idx,
+					       &tx->h.hdr16b, tidval);
+	} else {
+		trace_hfi1_sdma_user_header(pq->dd, pq->ctxt, pq->subctxt,
+					    req->info.comp_idx,
+					    &tx->h.hdr9b, tidval);
+	}
+	return sdma_txadd_kvaddr(pq->dd, &tx->txreq, &tx->h, req->hsize);
 }
 
 static int set_txreq_header_ahg(struct user_sdma_request *req,
@@ -1030,52 +1534,71 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 	u32 ahg[AHG_KDETH_ARRAY_SIZE];
 	int idx = 0;
 	u8 omfactor; /* KDETH.OM */
+	u8 off;
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
-	struct hfi1_pkt_header *hdr = &req->hdr;
-	u16 pbclen = le16_to_cpu(hdr->pbc[0]);
-	u32 val32, tidval = 0, lrhlen = get_lrh_len(*hdr, pad_len(datalen));
+	__be32 *bth;
+	struct hfi1_kdeth_header *kdeth;
+	u16 pbclen = le16_to_cpu(req->h.pbc[0]);
+	u32 val32, tidval = 0, lrhlen = get_lrh_len(req, pad_len(req, datalen));
 	size_t array_size = ARRAY_SIZE(ahg);
 
-	if (PBC2LRH(pbclen) != lrhlen) {
+	if (pbc2lrh(req, pbclen) != lrhlen) {
 		/* PBC.PbcLengthDWs */
 		idx = ahg_header_set(ahg, idx, array_size, 0, 0, 12,
-				     (__force u16)cpu_to_le16(LRH2PBC(lrhlen)));
+				     (__force u16)cpu_to_le16(lrh2pbc(req, lrhlen)));
 		if (idx < 0)
 			return idx;
-		/* LRH.PktLen (we need the full 16 bits due to byte swap) */
-		idx = ahg_header_set(ahg, idx, array_size, 3, 0, 16,
-				     (__force u16)cpu_to_be16(lrhlen >> 2));
+		/* LRH.PktLen */
+		if (req->is16b) {
+			idx = ahg_header_set(ahg, idx, array_size, 3, 4, 11,
+					     (__force u16)cpu_to_le16(lrhlen >> 3));
+		} else {
+			/* 9B: need the full 16 bits due to byte swap */
+			idx = ahg_header_set(ahg, idx, array_size, 3, 0, 16,
+					     (__force u16)cpu_to_be16(lrhlen >> 2));
+		}
 		if (idx < 0)
 			return idx;
+	}
+
+	if (req->is16b) {
+		bth = tx->h.hdr16b.bth;
+		kdeth = &tx->h.hdr16b.kdeth;
+		off = 2; /* BTH and KDETH are 2 DW further in */
+	} else {
+		bth = tx->h.hdr9b.bth;
+		kdeth = &tx->h.hdr9b.kdeth;
+		off = 0; /* no extra DW offset */
 	}
 
 	/*
 	 * Do the common updates
 	 */
 	/* BTH.PSN and BTH.A */
-	val32 = (be32_to_cpu(hdr->bth[2]) + req->seqnum) &
+	val32 = (be32_to_cpu(bth[2]) + req->seqnum) &
 		(HFI1_CAP_IS_KSET(EXTENDED_PSN) ? 0x7fffffff : 0xffffff);
 	if (unlikely(tx->flags & TXREQ_FLAGS_REQ_ACK))
 		val32 |= 1UL << 31;
-	idx = ahg_header_set(ahg, idx, array_size, 6, 0, 16,
+	idx = ahg_header_set(ahg, idx, array_size, 6 + off, 0, 16,
 			     (__force u16)cpu_to_be16(val32 >> 16));
 	if (idx < 0)
 		return idx;
-	idx = ahg_header_set(ahg, idx, array_size, 6, 16, 16,
+	idx = ahg_header_set(ahg, idx, array_size, 6 + off, 16, 16,
 			     (__force u16)cpu_to_be16(val32 & 0xffff));
 	if (idx < 0)
 		return idx;
 	/* KDETH.Offset */
-	idx = ahg_header_set(ahg, idx, array_size, 15, 0, 16,
+	idx = ahg_header_set(ahg, idx, array_size, 15 + off, 0, 16,
 			     (__force u16)cpu_to_le16(req->koffset & 0xffff));
 	if (idx < 0)
 		return idx;
-	idx = ahg_header_set(ahg, idx, array_size, 15, 16, 16,
+	idx = ahg_header_set(ahg, idx, array_size, 15 + off, 16, 16,
 			     (__force u16)cpu_to_le16(req->koffset >> 16));
 	if (idx < 0)
 		return idx;
 	if (req_opcode(req->info.ctrl) == EXPECTED) {
 		__le16 val;
+		u16 tidoff;
 
 		tidval = req->tids[req->tididx];
 
@@ -1084,7 +1607,7 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 		 * advance everything.
 		 */
 		if ((req->tidoffset) == (EXP_TID_GET(tidval, LEN) *
-					 PAGE_SIZE)) {
+					 EXP_TID_ADDR_SIZE)) {
 			req->tidoffset = 0;
 			/*
 			 * Since we don't copy all the TIDs, all at once,
@@ -1096,15 +1619,14 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 			tidval = req->tids[req->tididx];
 		}
 		omfactor = ((EXP_TID_GET(tidval, LEN) *
-				  PAGE_SIZE) >=
+				  EXP_TID_ADDR_SIZE) >=
 				 KDETH_OM_MAX_SIZE) ? KDETH_OM_LARGE_SHIFT :
 				 KDETH_OM_SMALL_SHIFT;
 		/* KDETH.OM and KDETH.OFFSET (TID) */
-		idx = ahg_header_set(
-				ahg, idx, array_size, 7, 0, 16,
-				((!!(omfactor - KDETH_OM_SMALL_SHIFT)) << 15 |
-				((req->tidoffset >> omfactor)
-				& 0x7fff)));
+		tidoff = ((!!(omfactor - KDETH_OM_SMALL_SHIFT)) << 15) |
+			 ((req->tidoffset >> omfactor) & 0x7fff);
+		idx = ahg_header_set(ahg, idx, array_size, 7 + off, 0, 16,
+				     tidoff);
 		if (idx < 0)
 			return idx;
 		/* KDETH.TIDCtrl, KDETH.TID, KDETH.Intr, KDETH.SH */
@@ -1112,19 +1634,19 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 				   (EXP_TID_GET(tidval, IDX) & 0x3ff));
 
 		if (unlikely(tx->flags & TXREQ_FLAGS_REQ_DISABLE_SH)) {
-			val |= cpu_to_le16((KDETH_GET(hdr->kdeth.ver_tid_offset,
+			val |= cpu_to_le16((KDETH_GET(kdeth->ver_tid_offset,
 						      INTR) <<
 					    AHG_KDETH_INTR_SHIFT));
 		} else {
-			val |= KDETH_GET(hdr->kdeth.ver_tid_offset, SH) ?
+			val |= KDETH_GET(kdeth->ver_tid_offset, SH) ?
 			       cpu_to_le16(0x1 << AHG_KDETH_SH_SHIFT) :
-			       cpu_to_le16((KDETH_GET(hdr->kdeth.ver_tid_offset,
+			       cpu_to_le16((KDETH_GET(kdeth->ver_tid_offset,
 						      INTR) <<
 					     AHG_KDETH_INTR_SHIFT));
 		}
 
 		idx = ahg_header_set(ahg, idx, array_size,
-				     7, 16, 14, (__force u16)val);
+				     7 + off, 16, 14, (__force u16)val);
 		if (idx < 0)
 			return idx;
 	}
@@ -1132,10 +1654,10 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 	trace_hfi1_sdma_user_header_ahg(pq->dd, pq->ctxt, pq->subctxt,
 					req->info.comp_idx, req->sde->this_idx,
 					req->ahg_idx, ahg, idx, tidval);
-	sdma_txinit_ahg(&tx->txreq,
+	sdma_txinit_ahg(pq->dd, &tx->txreq,
 			SDMA_TXREQ_F_USE_AHG,
 			datalen, req->ahg_idx, idx,
-			ahg, sizeof(req->hdr),
+			ahg, req->hsize,
 			user_sdma_txreq_cb);
 
 	return idx;
@@ -1175,7 +1697,7 @@ static void user_sdma_txreq_cb(struct sdma_txreq *txreq, int status)
 	}
 
 	req->seqcomp = tx->seqnum;
-	kmem_cache_free(pq->txreq_cache, tx);
+	user_sdma_free_txreq(tx);
 
 	/* sequence isn't complete?  We are done */
 	if (req->seqcomp != req->info.npkts - 1)
@@ -1202,10 +1724,11 @@ static void user_sdma_free_request(struct user_sdma_request *req)
 				container_of(t, struct user_sdma_txreq, txreq);
 			list_del_init(&t->list);
 			sdma_txclean(req->pq->dd, t);
-			kmem_cache_free(req->pq->txreq_cache, tx);
+			user_sdma_free_txreq(tx);
 		}
 	}
 
+	free_pinrefs(req->pinrefs, req->n_pinrefs);
 	kfree(req->tids);
 	clear_bit(req->info.comp_idx, req->pq->req_in_use);
 }

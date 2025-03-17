@@ -408,7 +408,7 @@ int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 
 	trace_hfi1_sender_make_rc_req(qp);
 	lockdep_assert_held(&qp->s_lock);
-	ps->s_txreq = get_txreq(ps->dev, qp);
+	ps->s_txreq = alloc_txreq(ps->dev, qp);
 	if (!ps->s_txreq)
 		goto bail_no_tx;
 
@@ -1220,7 +1220,7 @@ static inline void hfi1_make_rc_ack_9B(struct hfi1_packet *packet,
 				       struct hfi1_opa_header *opa_hdr,
 				       u8 sc5, bool is_fecn,
 				       u64 *pbc_flags, u32 *hwords,
-				       u32 *nwords)
+				       u32 *nwords, u32 *l2)
 {
 	struct rvt_qp *qp = packet->qp;
 	struct hfi1_ibport *ibp = rcd_to_iport(packet->rcd);
@@ -1243,8 +1243,9 @@ static inline void hfi1_make_rc_ack_9B(struct hfi1_packet *packet,
 		ohdr = &hdr->u.l.oth;
 		lrh0 = HFI1_LRH_GRH;
 	}
-	/* set PBC_DC_INFO bit (aka SC[4]) in pbc_flags */
-	*pbc_flags |= ((!!(sc5 & 0x10)) << PBC_DC_INFO_SHIFT);
+	/* set sc[4] in PBC flags */
+	*pbc_flags |= pbc_sc4_flag(sc5);
+	*l2 = PBC_L2_9B;
 
 	/* read pkey_index w/o lock (its atomic) */
 	pkey = hfi1_get_pkey(ibp, qp->s_pkey_index);
@@ -1273,7 +1274,7 @@ static inline void hfi1_make_rc_ack_16B(struct hfi1_packet *packet,
 					struct hfi1_opa_header *opa_hdr,
 					u8 sc5, bool is_fecn,
 					u64 *pbc_flags, u32 *hwords,
-					u32 *nwords)
+					u32 *nwords, u32 *l2)
 {
 	struct rvt_qp *qp = packet->qp;
 	struct hfi1_ibport *ibp = rcd_to_iport(packet->rcd);
@@ -1290,8 +1291,14 @@ static inline void hfi1_make_rc_ack_16B(struct hfi1_packet *packet,
 	ohdr = &hdr->u.oth;
 	/* header size in 32-bit words 16B LRH+BTH+AETH = (16+12+4)/4 */
 	*hwords = 8;
-	extra_bytes = hfi1_get_16b_padding(*hwords << 2, 0);
-	*nwords = SIZE_OF_CRC + ((extra_bytes + SIZE_OF_LT) >> 2);
+	if (ppd->dd->params->chip_type == CHIP_WFR) {
+		extra_bytes = hfi1_get_16b_padding(*hwords << 2, 0);
+		*nwords = SIZE_OF_CRC + ((extra_bytes + SIZE_OF_LT) >> 2);
+	} else {
+		extra_bytes = hfi1_pad8(*hwords << 2);
+		/* add CRC QW */
+		*nwords = (extra_bytes + 8) >> 2;
+	}
 
 	if (unlikely(rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH) &&
 	    hfi1_check_mcast(rdma_ah_get_dlid(&qp->remote_ah_attr))) {
@@ -1301,7 +1308,8 @@ static inline void hfi1_make_rc_ack_16B(struct hfi1_packet *packet,
 		ohdr = &hdr->u.l.oth;
 		l4 = OPA_16B_L4_IB_GLOBAL;
 	}
-	*pbc_flags |= PBC_PACKET_BYPASS | PBC_INSERT_BYPASS_ICRC;
+	/* pbc_flags: no extra flags added */
+	*l2 = PBC_L2_16B;
 
 	/* read pkey_index w/o lock (its atomic) */
 	pkey = hfi1_get_pkey(ibp, qp->s_pkey_index);
@@ -1326,7 +1334,7 @@ typedef void (*hfi1_make_rc_ack)(struct hfi1_packet *packet,
 				 struct hfi1_opa_header *opa_hdr,
 				 u8 sc5, bool is_fecn,
 				 u64 *pbc_flags, u32 *hwords,
-				 u32 *nwords);
+				 u32 *nwords, u32 *l2);
 
 /* We support only two types - 9B and 16B for now */
 static const hfi1_make_rc_ack hfi1_make_rc_ack_tbl[2] = {
@@ -1348,8 +1356,10 @@ void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn)
 	struct hfi1_ibport *ibp = rcd_to_iport(rcd);
 	struct hfi1_qp_priv *priv = qp->priv;
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
+	struct hfi1_devdata *dd = ppd->dd;
 	u8 sc5 = ibp->sl_to_sc[rdma_ah_get_sl(&qp->remote_ah_attr)];
 	u64 pbc, pbc_flags = 0;
+	u32 l2 = PBC_L2_9B; /* will be overridden */
 	u32 hwords = 0;
 	u32 nwords = 0;
 	u32 plen;
@@ -1377,11 +1387,13 @@ void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn)
 
 	/* Make the appropriate header */
 	hfi1_make_rc_ack_tbl[priv->hdr_type](packet, &opa_hdr, sc5, is_fecn,
-					     &pbc_flags, &hwords, &nwords);
+					     &pbc_flags, &hwords, &nwords,
+					     &l2);
 
 	plen = 2 /* PBC */ + hwords + nwords;
-	pbc = create_pbc(ppd, pbc_flags, qp->srate_mbps,
-			 sc_to_vlt(ppd->dd, sc5), plen);
+	pbc = dd->params->create_pbc(ppd, pbc_flags, qp->srate_mbps,
+				     sc_to_vlt(ppd, sc5), plen, l2,
+				     packet->dlid, rcd->sc->hw_context);
 	pbuf = sc_buffer_alloc(rcd->sc, plen, NULL, NULL);
 	if (IS_ERR_OR_NULL(pbuf)) {
 		/*
@@ -1393,14 +1405,13 @@ void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn)
 		hfi1_queue_rc_ack(packet, is_fecn);
 		return;
 	}
-	trace_ack_output_ibhdr(dd_from_ibdev(qp->ibqp.device),
-			       &opa_hdr, ib_is_sc5(sc5));
+	trace_ack_output_ibhdr(dd, &opa_hdr, ib_is_sc5(sc5), 0);
 
 	/* write the pbc and data */
-	ppd->dd->pio_inline_send(ppd->dd, pbuf, pbc,
-				 (priv->hdr_type == HFI1_PKT_TYPE_9B ?
-				 (void *)&opa_hdr.ibh :
-				 (void *)&opa_hdr.opah), hwords);
+	dd->pio_inline_send(dd, pbuf, pbc,
+			    (priv->hdr_type == HFI1_PKT_TYPE_9B ?
+			    (void *)&opa_hdr.ibh :
+			    (void *)&opa_hdr.opah), hwords);
 	return;
 }
 
@@ -2705,6 +2716,10 @@ void process_becn(struct hfi1_pportdata *ppd, u8 sl, u32 rlid, u32 lqpn,
 	u8 trigger_threshold;
 	struct cc_state *cc_state;
 	unsigned long flags;
+
+	/* no direct driver congestion control involvement after WFR */
+	if (ppd->dd->params->chip_type != CHIP_WFR)
+		return;
 
 	if (sl >= OPA_MAX_SLS)
 		return;
