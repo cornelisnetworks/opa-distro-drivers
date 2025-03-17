@@ -16,6 +16,7 @@
 #include "trace_ibhdrs.h"
 #include "ipoib.h"
 #include "trace_tx.h"
+#include "qp.h"
 
 /* Add a convenience helper */
 #define CIRC_ADD(val, add, size) (((val) + (add)) & ((size) - 1))
@@ -217,9 +218,8 @@ static int hfi1_ipoib_build_ulp_payload(struct ipoib_txreq *tx,
 		ret = sdma_txadd_page(dd,
 				      txreq,
 				      skb_frag_page(frag),
-				      skb_frag_off(frag),
-				      skb_frag_size(frag),
-				      NULL, NULL, NULL);
+				      frag->offset,
+				      skb_frag_size(frag));
 		if (unlikely(ret))
 			break;
 	}
@@ -237,7 +237,7 @@ static int hfi1_ipoib_build_tx_desc(struct ipoib_txreq *tx,
 		sizeof(sdma_hdr->pbc) + (txp->hdr_dwords << 2) + tx->skb->len;
 	int ret;
 
-	ret = sdma_txinit(txreq, 0, pkt_bytes, hfi1_ipoib_sdma_complete);
+	ret = sdma_txinit(dd, txreq, 0, pkt_bytes, hfi1_ipoib_sdma_complete);
 	if (unlikely(ret))
 		return ret;
 
@@ -257,12 +257,15 @@ static void hfi1_ipoib_build_ib_tx_headers(struct ipoib_txreq *tx,
 					   struct ipoib_txparms *txp)
 {
 	struct hfi1_ipoib_dev_priv *priv = tx->txq->priv;
+	struct send_context *sc = qp_to_send_context(priv->qp, txp->flow.sc5);
 	struct hfi1_sdma_header *sdma_hdr = tx->sdma_hdr;
 	struct sk_buff *skb = tx->skb;
 	struct hfi1_pportdata *ppd = ppd_from_ibp(txp->ibp);
+	struct hfi1_devdata *dd = ppd->dd;
 	struct rdma_ah_attr *ah_attr = txp->ah_attr;
 	struct ib_other_headers *ohdr;
 	struct ib_grh *grh;
+	u64 pbc;
 	u16 dwords;
 	u16 slid;
 	u16 dlid;
@@ -335,20 +338,20 @@ static void hfi1_ipoib_build_ib_tx_headers(struct ipoib_txreq *tx,
 					  HFI1_IPOIB_ENTROPY_SHIFT) | sqpn);
 
 	/* Construct the pbc. */
-	sdma_hdr->pbc =
-		cpu_to_le64(create_pbc(ppd,
-				       ib_is_sc5(txp->flow.sc5) <<
-							      PBC_DC_INFO_SHIFT,
-				       0,
-				       sc_to_vlt(priv->dd, txp->flow.sc5),
-				       dwords - SIZE_OF_CRC +
-						(sizeof(sdma_hdr->pbc) >> 2)));
+	pbc = dd->params->create_pbc(ppd, pbc_sc4_flag(txp->flow.sc5), 0,
+				     sc_to_vlt(ppd, txp->flow.sc5),
+				     dwords - SIZE_OF_CRC +
+					(sizeof(sdma_hdr->pbc) >> 2),
+				     PBC_L2_9B, dlid,
+				     sc->hw_context);
+	sdma_hdr->pbc = cpu_to_le64(pbc);
 }
 
 static struct ipoib_txreq *hfi1_ipoib_send_dma_common(struct net_device *dev,
 						      struct sk_buff *skb,
 						      struct ipoib_txparms *txp)
 {
+	struct hfi1_pportdata *ppd = ppd_from_ibp(txp->ibp);
 	struct hfi1_ipoib_dev_priv *priv = hfi1_ipoib_priv(dev);
 	struct hfi1_ipoib_txq *txq = txp->txq;
 	struct ipoib_txreq *tx;
@@ -386,10 +389,9 @@ static struct ipoib_txreq *hfi1_ipoib_send_dma_common(struct net_device *dev,
 		if (txq->flow.as_int != txp->flow.as_int) {
 			txq->flow.tx_queue = txp->flow.tx_queue;
 			txq->flow.sc5 = txp->flow.sc5;
-			txq->sde =
-				sdma_select_engine_sc(priv->dd,
-						      txp->flow.tx_queue,
-						      txp->flow.sc5);
+			txq->sde = sdma_select_engine_sc(ppd,
+							 txp->flow.tx_queue,
+							 txp->flow.sc5);
 			trace_hfi1_flow_switch(txq);
 		}
 
@@ -481,11 +483,11 @@ static int hfi1_ipoib_send_dma_single(struct net_device *dev,
 	/* consume tx */
 	smp_store_release(&tx_ring->tail, CIRC_NEXT(tx_ring->tail, tx_ring->max_items));
 	ret = hfi1_ipoib_submit_tx(txq, tx);
+	trace_sdma_output_ibhdr(txq->priv->dd,
+				&tx->sdma_hdr->hdr,
+				ib_is_sc5(txp->flow.sc5), ret);
 	if (likely(!ret)) {
 tx_ok:
-		trace_sdma_output_ibhdr(txq->priv->dd,
-					&tx->sdma_hdr->hdr,
-					ib_is_sc5(txp->flow.sc5));
 		hfi1_ipoib_check_queue_depth(txq);
 		return NETDEV_TX_OK;
 	}
@@ -549,7 +551,7 @@ static int hfi1_ipoib_send_dma_list(struct net_device *dev,
 
 	trace_sdma_output_ibhdr(txq->priv->dd,
 				&tx->sdma_hdr->hdr,
-				ib_is_sc5(txp->flow.sc5));
+				ib_is_sc5(txp->flow.sc5), 0);
 
 	if (!netdev_xmit_more())
 		(void)hfi1_ipoib_flush_tx_list(dev, txq);
@@ -631,7 +633,8 @@ static int hfi1_ipoib_sdma_sleep(struct sdma_engine *sde,
 			/* came from non-list submit */
 			list_add_tail(&txreq->list, &txq->tx_list);
 		if (list_empty(&txq->wait.list)) {
-			struct hfi1_ibport *ibp = &sde->ppd->ibport_data;
+			struct hfi1_ibport *ibp = to_iport(txq->priv->device,
+							   txq->priv->port_num);
 
 			if (!atomic_xchg(&txq->tx_ring.no_desc, 1)) {
 				trace_hfi1_txq_queued(txq);

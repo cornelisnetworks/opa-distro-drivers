@@ -38,66 +38,60 @@ struct hfi1_netdev_rxq {
  * struct hfi1_netdev_rx: data required to setup and run HFI netdev.
  * @rx_napi:	the dummy netdevice to support "polling" the receive contexts
  * @dd:		hfi1_devdata
+ * @ppd:	hfi1_pportdata
  * @rxq:	pointer to dummy netdev receive queues.
  * @num_rx_q:	number of receive queues
- * @rmt_index:	first free index in RMT Array
- * @msix_start: first free MSI-X interrupt vector.
+ * @rmt_start:	first allocated index in the RMT
  * @dev_tbl:	netdev table for unique identifier VNIC and IPoIb VLANs.
  * @enabled:	atomic counter of netdevs enabling receive queues.
  *		When 0 NAPI will be disabled.
- * @netdevs:	atomic counter of netdevs using dummy netdev.
+ * @netdevs:	count of netdev_rx users, protected by hfi1_mutex.
  *		When 0 receive queues will be freed.
  */
 struct hfi1_netdev_rx {
 	struct net_device *rx_napi;
 	struct hfi1_devdata *dd;
+	struct hfi1_pportdata *ppd;
 	struct hfi1_netdev_rxq *rxq;
 	int num_rx_q;
 	int rmt_start;
 	struct xarray dev_tbl;
 	/* count of enabled napi polls */
 	atomic_t enabled;
-	/* count of netdevs on top */
-	atomic_t netdevs;
+	int netdevs;
 };
 
 static inline
-int hfi1_netdev_ctxt_count(struct hfi1_devdata *dd)
+int hfi1_netdev_ctxt_count(struct hfi1_pportdata *ppd)
 {
-	return dd->netdev_rx->num_rx_q;
+	return ppd->netdev_rx->num_rx_q;
 }
 
 static inline
-struct hfi1_ctxtdata *hfi1_netdev_get_ctxt(struct hfi1_devdata *dd, int ctxt)
+struct hfi1_ctxtdata *hfi1_netdev_get_ctxt(struct hfi1_pportdata *ppd, int ctxt)
 {
-	return dd->netdev_rx->rxq[ctxt].rcd;
+	return ppd->netdev_rx->rxq[ctxt].rcd;
 }
 
 static inline
-int hfi1_netdev_get_free_rmt_idx(struct hfi1_devdata *dd)
+int hfi1_netdev_get_free_rmt_idx(struct hfi1_pportdata *ppd)
 {
-	return dd->netdev_rx->rmt_start;
-}
-
-static inline
-void hfi1_netdev_set_free_rmt_idx(struct hfi1_devdata *dd, int rmt_idx)
-{
-	dd->netdev_rx->rmt_start = rmt_idx;
+	return ppd->netdev_rx->rmt_start;
 }
 
 u32 hfi1_num_netdev_contexts(struct hfi1_devdata *dd, u32 available_contexts,
 			     struct cpumask *cpu_mask);
 
-void hfi1_netdev_enable_queues(struct hfi1_devdata *dd);
-void hfi1_netdev_disable_queues(struct hfi1_devdata *dd);
-int hfi1_netdev_rx_init(struct hfi1_devdata *dd);
-int hfi1_netdev_rx_destroy(struct hfi1_devdata *dd);
+void hfi1_netdev_enable_queues(struct hfi1_pportdata *ppd);
+void hfi1_netdev_disable_queues(struct hfi1_pportdata *ppd);
+int hfi1_netdev_rx_init(struct hfi1_pportdata *ppd);
+int hfi1_netdev_rx_destroy(struct hfi1_pportdata *ppd);
 int hfi1_alloc_rx(struct hfi1_devdata *dd);
 void hfi1_free_rx(struct hfi1_devdata *dd);
-int hfi1_netdev_add_data(struct hfi1_devdata *dd, int id, void *data);
-void *hfi1_netdev_remove_data(struct hfi1_devdata *dd, int id);
-void *hfi1_netdev_get_data(struct hfi1_devdata *dd, int id);
-void *hfi1_netdev_get_first_data(struct hfi1_devdata *dd, int *start_id);
+int hfi1_netdev_add_data(struct hfi1_pportdata *ppd, int id, void *data);
+void *hfi1_netdev_remove_data(struct hfi1_pportdata *ppd, int id);
+void *hfi1_netdev_get_data(struct hfi1_pportdata *ppd, int id);
+void *hfi1_netdev_get_first_data(struct hfi1_pportdata *ppd, int *start_id);
 
 /* chip.c  */
 int hfi1_netdev_rx_napi(struct napi_struct *napi, int budget);

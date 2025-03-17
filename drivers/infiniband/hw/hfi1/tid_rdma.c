@@ -124,7 +124,7 @@ static int make_tid_rdma_ack(struct rvt_qp *qp,
 			     struct ib_other_headers *ohdr,
 			     struct hfi1_pkt_state *ps);
 static void hfi1_do_tid_send(struct rvt_qp *qp);
-static u32 read_r_next_psn(struct hfi1_devdata *dd, u8 ctxt, u8 fidx);
+static u32 read_r_next_psn(struct hfi1_devdata *dd, u16 ctxt, u8 fidx);
 static void tid_rdma_rcv_err(struct hfi1_packet *packet,
 			     struct ib_other_headers *ohdr,
 			     struct rvt_qp *qp, u32 psn, int diff, bool fecn);
@@ -309,29 +309,31 @@ int hfi1_kern_exp_rcv_init(struct hfi1_ctxtdata *rcd, int reinit)
 
 /**
  * qp_to_rcd - determine the receive context used by a qp
- * @rdi: rvt dev struct
  * @qp: the qp
  *
- * This routine returns the receive context associated
- * with a a qp's qpn.
+ * Return the receive context associated with the qp's qpn.  There may not yet
+ * be an associated port.  If not, return NULL.  It is expected that the port
+ * will be updated later.
  *
- * Return: the context.
+ * This is called at QP creation time or when the QP is updated with a port
+ * number.  When called during a port update, qp->port_num has the new port,
+ * but qp->ibqp.port is not yet updated.
  */
-static struct hfi1_ctxtdata *qp_to_rcd(struct rvt_dev_info *rdi,
-				       struct rvt_qp *qp)
+struct hfi1_ctxtdata *qp_to_rcd(struct rvt_qp *qp)
 {
-	struct hfi1_ibdev *verbs_dev = container_of(rdi,
-						    struct hfi1_ibdev,
-						    rdi);
-	struct hfi1_devdata *dd = container_of(verbs_dev,
-					       struct hfi1_devdata,
-					       verbs_dev);
+	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+	struct hfi1_pportdata *ppd;
 	unsigned int ctxt;
 
+	/* find the associated port, return NULL if not available */
+	if (qp->port_num == 0)
+		return NULL;
+	ppd = &dd->pport[qp->port_num - 1];
+
 	if (qp->ibqp.qp_num == 0)
-		ctxt = 0;
+		ctxt = ppd->rcv_context_base; /* control context */
 	else
-		ctxt = hfi1_get_qp_map(dd, qp->ibqp.qp_num >> dd->qos_shift);
+		ctxt = hfi1_get_qp_map(ppd, qp->ibqp.qp_num >> ppd->qos_shift);
 	return dd->rcd[ctxt];
 }
 
@@ -341,7 +343,7 @@ int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 	struct hfi1_qp_priv *qpriv = qp->priv;
 	int i, ret;
 
-	qpriv->rcd = qp_to_rcd(rdi, qp);
+	qpriv->rcd = qp_to_rcd(qp);
 
 	spin_lock_init(&qpriv->opfn.lock);
 	INIT_WORK(&qpriv->opfn.opfn_work, opfn_send_conn_request);
@@ -366,6 +368,14 @@ int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 	INIT_LIST_HEAD(&qpriv->tid_wait);
 
 	if (init_attr->qp_type == IB_QPT_RC && HFI1_CAP_IS_KSET(TID_RDMA)) {
+		// FIXME: This is not going to work if there is no rcd.
+		// Maybe use another way to get dd?  This, for example:
+		//struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+		// FIXME: does anything else in this sequence need qpriv->rcd?
+		// Yes, dammit:
+		// 1. hfi1_init_trdma_req() [in both loops!] assigns rcd in
+		//    each priv->tid_req in loop.
+		//
 		struct hfi1_devdata *dd = qpriv->rcd->dd;
 
 		qpriv->pages = kzalloc_node(TID_RDMA_MAX_PAGES *
@@ -627,7 +637,7 @@ static void tid_rdma_schedule_tid_wakeup(struct rvt_qp *qp)
 	rval = queue_work_on(priv->s_sde ?
 			     priv->s_sde->cpu :
 			     cpumask_first(cpumask_of_node(dd->node)),
-			     ppd->hfi1_wq,
+			     dd->hfi1_wq,
 			     &priv->tid_rdma.trigger_work);
 	if (!rval)
 		rvt_put_qp(qp);
@@ -691,6 +701,14 @@ void hfi1_tid_rdma_flush_wait(struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 
+	if (!priv->rcd) {
+		struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+		/* if no context, then nothing to flush */
+		// FIXME: should I print anything at all?
+		dd_dev_err(dd, "%s: no rcd for QP 0x%x\n", __func__,
+			   qp->ibqp.qp_num);
+		return;
+	}
 	_tid_rdma_flush_wait(qp, &priv->rcd->flow_queue);
 	_tid_rdma_flush_wait(qp, &priv->rcd->rarr_queue);
 }
@@ -748,7 +766,7 @@ static void kern_set_hw_flow(struct hfi1_ctxtdata *rcd, u32 generation,
 		reg |= RCV_TID_FLOW_TABLE_CTRL_HDR_SUPP_EN_SMASK;
 
 	write_uctxt_csr(rcd->dd, rcd->ctxt,
-			RCV_TID_FLOW_TABLE + 8 * flow_idx, reg);
+			rcd->dd->params->rcv_tid_flow_table_reg + 8 * flow_idx, reg);
 }
 
 static u32 kern_setup_hw_flow(struct hfi1_ctxtdata *rcd, u32 flow_idx)
@@ -1301,7 +1319,6 @@ static void kern_program_rcv_group(struct tid_rdma_flow *flow, int grp_num,
 				   u32 *pset_idx)
 {
 	struct hfi1_ctxtdata *rcd = flow->req->rcd;
-	struct hfi1_devdata *dd = rcd->dd;
 	struct kern_tid_node *node = &flow->tnode[grp_num];
 	struct tid_group *grp = node->grp;
 	struct tid_rdma_pageset *pset;
@@ -1313,19 +1330,21 @@ static void kern_program_rcv_group(struct tid_rdma_flow *flow, int grp_num,
 		rcventry = grp->base + i;
 
 		if (node->map & BIT(i) || cnt >= node->cnt) {
-			rcv_array_wc_fill(dd, rcventry);
+			rcd->dd->params->rcv_array_wc_fill(rcd, rcventry,
+							   PT_EXPECTED);
 			continue;
 		}
 		pset = &flow->pagesets[(*pset_idx)++];
 		if (pset->count) {
-			hfi1_put_tid(dd, rcventry, PT_EXPECTED,
-				     pset->addr, trdma_pset_order(pset));
+			rcd->dd->params->put_tid(rcd, rcventry, PT_EXPECTED,
+						 pset->addr,
+						 trdma_pset_order(pset), false);
 		} else {
-			hfi1_put_tid(dd, rcventry, PT_INVALID, 0, 0);
+			rcd->dd->params->put_tid(rcd, rcventry, PT_EXPECTED,
+						 0, 0, false);
 		}
 		npages += pset->count;
 
-		rcventry -= rcd->expected_base;
 		tidctrl = pair ? 0x3 : rcventry & 0x1 ? 0x2 : 0x1;
 		/*
 		 * A single TID entry will be used to use a rcvarr pair (with
@@ -1368,7 +1387,6 @@ static void kern_program_rcv_group(struct tid_rdma_flow *flow, int grp_num,
 static void kern_unprogram_rcv_group(struct tid_rdma_flow *flow, int grp_num)
 {
 	struct hfi1_ctxtdata *rcd = flow->req->rcd;
-	struct hfi1_devdata *dd = rcd->dd;
 	struct kern_tid_node *node = &flow->tnode[grp_num];
 	struct tid_group *grp = node->grp;
 	u32 rcventry;
@@ -1378,11 +1396,12 @@ static void kern_unprogram_rcv_group(struct tid_rdma_flow *flow, int grp_num)
 		rcventry = grp->base + i;
 
 		if (node->map & BIT(i) || cnt >= node->cnt) {
-			rcv_array_wc_fill(dd, rcventry);
+			rcd->dd->params->rcv_array_wc_fill(rcd, rcventry, PT_EXPECTED);
 			continue;
 		}
 
-		hfi1_put_tid(dd, rcventry, PT_INVALID, 0, 0);
+		rcd->dd->params->put_tid(rcd, rcventry, PT_EXPECTED, 0, 0,
+					 false);
 
 		grp->used--;
 		grp->map &= ~BIT(i);
@@ -2850,7 +2869,7 @@ bool hfi1_handle_kdeth_eflags(struct hfi1_ctxtdata *rcd,
 	struct hfi1_devdata *dd = ppd->dd;
 	struct rvt_dev_info *rdi = &dd->verbs_dev.rdi;
 	u8 rcv_type = rhf_rcv_type(packet->rhf);
-	u8 rte = rhf_rcv_type_err(packet->rhf);
+	u8 rte = rhe_rcv_type_err(packet);
 	struct ib_header *hdr = packet->hdr;
 	struct ib_other_headers *ohdr = NULL;
 	int lnh = be16_to_cpu(hdr->lrh[0]) & 3;
@@ -2868,12 +2887,12 @@ bool hfi1_handle_kdeth_eflags(struct hfi1_ctxtdata *rcd,
 
 	trace_hfi1_msg_handle_kdeth_eflags(NULL, "Kdeth error: rhf ",
 					   packet->rhf);
-	if (packet->rhf & RHF_ICRC_ERR)
+	if (rhe_icrc_err(packet))
 		return ret;
 
 	packet->ohdr = &hdr->u.oth;
 	ohdr = packet->ohdr;
-	trace_input_ibhdr(rcd->dd, packet, !!(rhf_dc_info(packet->rhf)));
+	trace_input_ibhdr(rcd->dd, packet, packet->sc4);
 
 	/* Get the destination QP number. */
 	qp_num = be32_to_cpu(ohdr->u.tid_rdma.r_rsp.verbs_qp) &
@@ -2898,7 +2917,7 @@ bool hfi1_handle_kdeth_eflags(struct hfi1_ctxtdata *rcd,
 		goto r_unlock;
 	}
 
-	if (packet->rhf & RHF_TID_ERR) {
+	if (rhe_tid_err(packet)) {
 		/* For TIDERR and RC QPs preemptively schedule a NAK */
 		u32 tlen = rhf_pkt_len(packet->rhf); /* in bytes */
 
@@ -5040,7 +5059,7 @@ int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		}
 	}
 
-	ps->s_txreq = get_txreq(ps->dev, qp);
+	ps->s_txreq = alloc_txreq(ps->dev, qp);
 	if (!ps->s_txreq)
 		goto bail_no_tx;
 
@@ -5424,7 +5443,7 @@ static bool _hfi1_schedule_tid_send(struct rvt_qp *qp)
 	if ((dd->flags & HFI1_SHUTDOWN))
 		return true;
 
-	return iowait_tid_schedule(&priv->s_iowait, ppd->hfi1_wq,
+	return iowait_tid_schedule(&priv->s_iowait, dd->hfi1_wq,
 				   priv->s_sde ?
 				   priv->s_sde->cpu :
 				   cpumask_first(cpumask_of_node(dd->node)));
@@ -5487,7 +5506,7 @@ bool hfi1_tid_rdma_ack_interlock(struct rvt_qp *qp, struct rvt_ack_entry *e)
 	return false;
 }
 
-static u32 read_r_next_psn(struct hfi1_devdata *dd, u8 ctxt, u8 fidx)
+static u32 read_r_next_psn(struct hfi1_devdata *dd, u16 ctxt, u8 fidx)
 {
 	u64 reg;
 
@@ -5495,7 +5514,7 @@ static u32 read_r_next_psn(struct hfi1_devdata *dd, u8 ctxt, u8 fidx)
 	 * The only sane way to get the amount of
 	 * progress is to read the HW flow state.
 	 */
-	reg = read_uctxt_csr(dd, ctxt, RCV_TID_FLOW_TABLE + (8 * fidx));
+	reg = read_uctxt_csr(dd, ctxt, dd->params->rcv_tid_flow_table_reg + (8 * fidx));
 	return mask_psn(reg);
 }
 

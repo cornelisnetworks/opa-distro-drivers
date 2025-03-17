@@ -8,11 +8,21 @@
 #
 obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
 
+ccflags-$(CONFIG_SDMA_VERBOSITY) += -DCONFIG_SDMA_VERBOSITY
+
+# Now that interrupts are working, do not enable polling.  This ensures
+# polling is off no matter what the .config file says.
+ccflags-$(CONFIG_HFI_CPORT_POLLING) += -DCONFIG_HFI_CPORT_POLLING
+
 hfi1-y := \
 	affinity.o \
 	aspm.o \
 	chip.o \
+	chip_gen.o \
+	chip_jkr.o \
+	cport.o \
 	device.o \
+	diag.o \
 	driver.o \
 	efivar.o \
 	eprom.o \
@@ -31,6 +41,7 @@ hfi1-y := \
 	netdev_rx.o \
 	opfn.o \
 	pcie.o \
+	pinning.o \
 	pin_system.o \
 	pio.o \
 	pio_copy.o \
@@ -42,12 +53,14 @@ hfi1-y := \
 	sdma.o \
 	sysfs.o \
 	tid_rdma.o \
+	tid_system.o \
 	trace.o \
 	uc.o \
 	ud.o \
 	user_exp_rcv.o \
 	user_pages.o \
 	user_sdma.o \
+	uverbs.o \
 	verbs.o \
 	verbs_txreq.o \
 	vnic_main.o \
@@ -66,3 +79,30 @@ CFLAGS_trace.o = -I$(src)
 ifdef MVERSION
 CFLAGS_driver.o = -DHFI_DRIVER_VERSION_BASE=\"$(MVERSION)\"
 endif
+
+ifdef CONFIG_HFI1_NVIDIA
+ifndef NVIDIA_DRIVER_SOURCE
+# E.g. from nvidia-driver:open-dkms
+#   $ rpm -ql --whatprovides nvidia-kmod | grep 'nv-p2p.h'
+#   /usr/src/nvidia-open-560.28.03/nvidia-peermem/nv-p2p.h
+#   /usr/src/nvidia-open-560.28.03/nvidia/nv-p2p.h
+# From nvidia-driver:latest-dkms
+#   $ rpm -ql --whatprovides nvidia-kmod | grep 'nv-p2p.h'
+#   /usr/src/nvidia-555.42.06/nvidia-peermem/nv-p2p.h
+#   /usr/src/nvidia-555.42.06/nvidia/nv-p2p.h
+NVIDIA_DRIVER_SOURCE := $(realpath $(dir $(shell rpm -ql --whatprovides nvidia-kmod | grep 'nvidia/nv-p2p.h'))/..)
+endif
+endif
+
+hfi1-$(CONFIG_HFI1_NVIDIA) += pin_nvidia.o tid_nvidia.o gdr_ops.o
+ccflags-$(CONFIG_HFI1_NVIDIA) += -I$(NVIDIA_DRIVER_SOURCE) -DNVIDIA_GPU_DIRECT
+
+ifdef CONFIG_HFI1_AMD
+ifndef AMDGPU_DRIVER_SOURCE
+AMDGPU_DRIVER_SOURCE := $(shell rpm -ql amdgpu-dkms | grep -E '/usr/src/amdgpu-[^/]+/include/drm/amd_rdma.h$$' | head -n1)
+AMDGPU_DRIVER_SOURCE := $(subst /include/drm/amd_rdma.h,,$(AMDGPU_DRIVER_SOURCE))
+endif
+endif
+hfi1-$(CONFIG_HFI1_AMD) += pin_amd.o tid_amd.o
+ccflags-$(CONFIG_HFI1_AMD) += -I$(AMDGPU_DRIVER_SOURCE)/include
+ccflags-$(CONFIG_HFI1_AMD) += -DCONFIG_HFI1_AMD

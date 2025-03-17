@@ -68,6 +68,7 @@ struct hfi1_vnic_rx_queue {
 /**
  * struct hfi1_vnic_vport_info - HFI1 VNIC virtual port information
  * @dd: device data pointer
+ * @dd: port data pointer
  * @netdev: net device pointer
  * @flags: state flags
  * @lock: vport lock
@@ -80,6 +81,7 @@ struct hfi1_vnic_rx_queue {
  */
 struct hfi1_vnic_vport_info {
 	struct hfi1_devdata *dd;
+	struct hfi1_pportdata *ppd;
 	struct net_device   *netdev;
 	unsigned long        flags;
 

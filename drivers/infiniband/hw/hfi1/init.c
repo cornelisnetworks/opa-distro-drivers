@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2020 Intel Corporation.
- * Copyright(c) 2021 Cornelis Networks.
+ * Copyright(c) 2021-2024 Cornelis Networks.
  */
 
 #include <linux/pci.h>
@@ -17,6 +17,7 @@
 #include <rdma/rdma_vt.h>
 
 #include "hfi.h"
+#include "file_ops.h"
 #include "device.h"
 #include "common.h"
 #include "trace.h"
@@ -29,9 +30,19 @@
 #include "vnic.h"
 #include "exp_rcv.h"
 #include "netdev.h"
+#include "chip_jkr.h"
+#include "chip_gen.h"
+#include "pinning.h"
+#include "cport_traps.h"
+
+#ifdef NVIDIA_GPU_DIRECT
+#include "gdr_ops.h"
+#endif
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
+
+#undef CPORT_TRAP_DEBUG	/* all MCTXT TRAP events from CPORT */
 
 /*
  * min buffers we want to have per context, after driver
@@ -41,16 +52,459 @@
 #define HFI1_MIN_EAGER_BUFFER_SIZE (4 * 1024) /* 4KB */
 #define HFI1_MAX_EAGER_BUFFER_SIZE (256 * 1024) /* 256KB */
 
-#define NUM_IB_PORTS 1
+static void wfr_start_port(struct hfi1_pportdata *ppd);
+static void wfr_stop_port(struct hfi1_pportdata *ppd);
+static void destroy_workqueues(struct hfi1_devdata *dd);
+
+/* parameters for the WFR ASIC */
+static const struct chip_params wfr_params = {
+	.chip_type = CHIP_WFR,
+	.num_ports = 1,
+
+	/* BAR0 map: rcv array splits kreg1 and kreg2 */
+	.bar0_size = TXE_PIO_SEND + TXE_PIO_SIZE,
+	.kreg1_size = RCV_ARRAY,
+	.kreg2_offset = RCV_ARRAY + RCV_ARRAY_SIZE,
+	.kreg2_size = TXE_PIO_SEND - (RCV_ARRAY + RCV_ARRAY_SIZE),
+	.rcv_array_offset = RCV_ARRAY,
+	.rcv_array_size = RCV_ARRAY_SIZE,
+
+	.link_speed_supported = OPA_LINK_SPEED_25G,
+	.link_speed_active = OPA_LINK_SPEED_25G,
+	.asic_cclock_ps = ASIC_CCLOCK_PS,
+	.rsm_rule_size = RXE_NUM_RSM_INSTANCES,
+	.pkey_table_size = WFR_MAX_PKEY_VALUES,
+	.generic_boardname = "Cornelis Omni-Path Host Fabric Interface Adapter 100 Series",
+	.max_eager_entries = MAX_EAGER_ENTRIES,
+	.pio_base_bits = WFR_PIO_BASE_BITS,
+	.egress_err_info_data = &wfr_egress_err_info_data,
+	.send_ctrl_flush = 0, /* no flush flag available */
+	.port_discard_egress_errs = WFR_PORT_DISCARD_EGRESS_ERRS,
+
+	/* interrupt sources */
+	.num_int_csrs = CCE_NUM_INT_CSRS,
+	.num_int_map_csrs = CCE_NUM_INT_MAP_CSRS,
+	.is_rcvavail_start = IS_RCVAVAIL_START,
+	.is_rcvurgent_start = IS_RCVURGENT_START,
+	.is_sdmaeng_err_start = IS_SDMAENG_ERR_START,
+	.is_sdma_idle_start = IS_SDMA_IDLE_START,
+	.is_sdma_progress_start = IS_SDMA_PROGRESS_START,
+	.is_sdma_start = IS_SDMA_START,
+	.is_last_source = IS_LAST_SOURCE,
+	.is_table = is_table,
+	.gi_enable_table = wfr_gi_enable_table,
+
+	/* counters */
+	.chip_dev_cntrs = wfr_dev_cntrs,
+	.chip_dev_cntr_first = WFR_DEV_CNTR_FIRST,
+	.chip_num_dev_cntrs = WFR_NUM_DEV_CNTRS,
+	.chip_port_cntrs = wfr_port_cntrs,
+	.chip_port_cntr_first = WFR_PORT_CNTR_FIRST,
+	.chip_num_port_cntrs = WFR_NUM_PORT_CNTRS,
+
+	/* ingress port registers */
+	.rxe_iport_stride = 0,
+	.rcv_iport_ctrl_reg = RCV_CTRL,
+	.rcv_iport_status_reg = RCV_STATUS,
+	.rcv_bth_qp_reg = RCV_BTH_QP,
+	.rcv_multicast_reg = RCV_MULTICAST,
+	.rcv_bypass_reg = RCV_BYPASS,
+	.rcv_vl15_reg = RCV_VL15,
+	.rcv_err_info_reg = RCV_ERR_INFO,
+	.rcv_err_status_reg = RCV_ERR_STATUS,
+	.rcv_err_mask_reg = RCV_ERR_MASK,
+	.rcv_err_clear_reg = RCV_ERR_CLEAR,
+	.rcv_qp_map_table_reg = RCV_QP_MAP_TABLE,
+	.rcv_partition_key_reg = RCV_PARTITION_KEY,
+	.rcv_counter_array32_reg = RCV_COUNTER_ARRAY32,
+	.rcv_counter_array64_reg = RCV_COUNTER_ARRAY64,
+
+	/* ingress port receive context registers */
+	.rxe_iprc_stride = WFR_RXE_IPRC_STRIDE,
+	.rcv_jkey_ctrl_reg = RCV_KEY_CTRL,
+
+	/* RXE restricted context registers */
+	.rxe_rctxt_stride = WFR_RXE_RCTXT_STRIDE,
+	.rcv_rctxt_ctrl_reg = RCV_CTXT_CTRL,
+	.rcv_egr_ctrl_reg = RCV_EGR_CTRL,
+	.rcv_tid_ctrl_reg = RCV_TID_CTRL,
+
+	/* RXE kernel context registers */
+	.rxe_kctxt_stride = WFR_RXE_KCTXT_STRIDE,
+	.rcv_kctxt_ctrl_reg = RCV_CTXT_CTRL,
+	.rcv_hdr_addr_reg = RCV_HDR_ADDR,
+	.rcv_hdr_cnt_reg = RCV_HDR_CNT,
+	.rcv_hdr_ent_size_reg = RCV_HDR_ENT_SIZE,
+	.rcv_hdr_tail_addr_reg = RCV_HDR_TAIL_ADDR,
+	.rcv_avail_time_out_reg = RCV_AVAIL_TIME_OUT,
+	.rcv_hdr_ovfl_cnt_reg = RCV_HDR_OVFL_CNT,
+
+	/* RXE kernel/user registers */
+	.rxe_ku_stride = WFR_RXE_KCTXT_STRIDE,
+	.rcv_ctxt_status_reg = RCV_CTXT_STATUS,
+
+	/* RXE user registers */
+	.rxe_uctxt_stride = WFR_RXE_UCTXT_STRIDE,
+	.rcv_hdr_tail_reg = RCV_HDR_TAIL,
+	.rcv_hdr_head_reg = RCV_HDR_HEAD,
+	.rcv_egr_index_head_reg = RCV_EGR_INDEX_HEAD,
+	.rcv_tid_flow_table_reg = RCV_TID_FLOW_TABLE,
+
+	/* TXE kernel registers */
+	.send_contexts_reg = SEND_CONTEXTS,
+	.send_dma_engines_reg = SEND_DMA_ENGINES,
+	.send_pio_mem_size_reg = SEND_PIO_MEM_SIZE,
+	.send_dma_mem_size_reg = SEND_DMA_MEM_SIZE,
+	.send_pio_init_ctxt_reg = SEND_PIO_INIT_CTXT,
+
+	/* send context_registers */
+	.txe_sctxt_stride = WFR_TXE_SCTXT_STRIDE,
+	.send_ctxt_status_reg = SEND_CTXT_STATUS,
+	.send_ctxt_credit_ctrl_reg = SEND_CTXT_CREDIT_CTRL,
+	.send_ctxt_credit_status_reg = SEND_CTXT_CREDIT_STATUS,
+	.send_ctxt_credit_return_addr_reg = SEND_CTXT_CREDIT_RETURN_ADDR,
+	.send_ctxt_credit_force_reg = SEND_CTXT_CREDIT_FORCE,
+	.send_ctxt_err_status_reg = SEND_CTXT_ERR_STATUS,
+	.send_ctxt_err_mask_reg = SEND_CTXT_ERR_MASK,
+	.send_ctxt_err_clear_reg = SEND_CTXT_ERR_CLEAR,
+
+	/* TXE send context registers */
+	.txe_tctxt_stride = WFR_TXE_TCTXT_STRIDE,
+	.send_ctxt_ctrl_reg = SEND_CTXT_CTRL,
+
+	/* SDMA registers */
+	.txe_sdma_stride = WFR_TXE_SDMA_STRIDE,
+	.send_dma_ctrl_reg = SEND_DMA_CTRL,
+	.send_dma_status_reg = SEND_DMA_STATUS,
+	.send_dma_base_addr_reg = SEND_DMA_BASE_ADDR,
+	.send_dma_len_gen_reg = SEND_DMA_LEN_GEN,
+	.send_dma_tail_reg = SEND_DMA_TAIL,
+	.send_dma_head_reg = SEND_DMA_HEAD,
+	.send_dma_head_addr_reg = SEND_DMA_HEAD_ADDR,
+	.send_dma_priority_thld_reg = SEND_DMA_PRIORITY_THLD,
+	.send_dma_idle_cnt_reg = SEND_DMA_IDLE_CNT,
+	.send_dma_reload_cnt_reg = SEND_DMA_RELOAD_CNT,
+	.send_dma_desc_cnt_reg = SEND_DMA_DESC_CNT,
+	.send_dma_desc_fetched_cnt_reg = SEND_DMA_DESC_FETCHED_CNT,
+	.send_dma_eng_err_status_reg = SEND_DMA_ENG_ERR_STATUS,
+	.send_dma_eng_err_mask_reg = SEND_DMA_ENG_ERR_MASK,
+	.send_dma_eng_err_clear_reg = SEND_DMA_ENG_ERR_CLEAR,
+
+	/* SDMA Config registers */
+	.txe_sdmacfg_stride = WFR_TXE_SDMACFG_STRIDE,
+	.send_dma_cfg_memory_reg = SEND_DMA_MEMORY,
+
+	/* egress port registers */
+	.txe_eport_stride = 0,
+	.send_ctrl_reg = SEND_CTRL,
+	.send_high_priority_limit_reg = SEND_HIGH_PRIORITY_LIMIT,
+	.send_egress_err_status_reg = SEND_EGRESS_ERR_STATUS,
+	.send_egress_err_mask_reg = SEND_EGRESS_ERR_MASK,
+	.send_egress_err_clear_reg = SEND_EGRESS_ERR_CLEAR,
+	.send_bth_qp_reg = SEND_BTH_QP,
+	.send_static_rate_control_reg = SEND_STATIC_RATE_CONTROL,
+	.send_sc2vlt0_reg = SEND_SC2VLT0,
+	.send_sc2vlt1_reg = SEND_SC2VLT1,
+	.send_sc2vlt2_reg = SEND_SC2VLT2,
+	.send_sc2vlt3_reg = SEND_SC2VLT3,
+	.send_len_check0_reg = SEND_LEN_CHECK0,
+	.send_len_check1_reg = SEND_LEN_CHECK1,
+	.send_low_priority_list_reg = SEND_LOW_PRIORITY_LIST,
+	.send_high_priority_list_reg = SEND_HIGH_PRIORITY_LIST,
+	.send_counter_array32_reg = SEND_COUNTER_ARRAY32,
+	.send_counter_array64_reg = SEND_COUNTER_ARRAY64,
+	.send_cm_ctrl_reg = SEND_CM_CTRL,
+	.send_cm_global_credit_reg = SEND_CM_GLOBAL_CREDIT,
+	.send_cm_credit_used_status_reg = SEND_CM_CREDIT_USED_STATUS,
+	.send_cm_timer_ctrl_reg = SEND_CM_TIMER_CTRL,
+	.send_cm_local_au_table0_to3_reg = SEND_CM_LOCAL_AU_TABLE0_TO3,
+	.send_cm_local_au_table4_to7_reg = SEND_CM_LOCAL_AU_TABLE4_TO7,
+	.send_cm_remote_au_table0_to3_reg = SEND_CM_REMOTE_AU_TABLE0_TO3,
+	.send_cm_remote_au_table4_to7_reg = SEND_CM_REMOTE_AU_TABLE4_TO7,
+	.send_cm_credit_vl_reg = SEND_CM_CREDIT_VL,
+	.send_cm_credit_vl15_reg = SEND_CM_CREDIT_VL15,
+	.send_egress_err_info_reg = SEND_EGRESS_ERR_INFO,
+	.send_egress_err_source_reg = SEND_EGRESS_ERR_SOURCE,
+	.send_egress_ctxt_status_reg = SEND_EGRESS_CTXT_STATUS,
+	.send_egress_send_dma_status_reg = SEND_EGRESS_SEND_DMA_STATUS,
+
+	/* egress port send context registers */
+	.txe_epsc_stride = WFR_TXE_EPSC_STRIDE,
+	.send_ctxt_check_enable_reg = SEND_CTXT_CHECK_ENABLE,
+	.send_ctxt_check_vl_reg = SEND_CTXT_CHECK_VL,
+	.send_ctxt_check_job_key_reg = SEND_CTXT_CHECK_JOB_KEY,
+	.send_ctxt_check_partition_key_reg = SEND_CTXT_CHECK_PARTITION_KEY,
+	.send_ctxt_check_slid_reg = SEND_CTXT_CHECK_SLID,
+	.send_ctxt_check_opcode_reg = SEND_CTXT_CHECK_OPCODE,
+
+	/* SI registers */
+	.cce_msix_int_map_vec_reg = CCE_INT_MAP,
+	.send_pio_err_status_reg = SEND_PIO_ERR_STATUS,
+	.send_pio_err_mask_reg = SEND_PIO_ERR_MASK,
+	.send_pio_err_clear_reg = SEND_PIO_ERR_CLEAR,
+	.send_dma_err_status_reg = SEND_DMA_ERR_STATUS,
+	.send_dma_err_mask_reg = SEND_DMA_ERR_MASK,
+	.send_dma_err_clear_reg = SEND_DMA_ERR_CLEAR,
+	.csr_err_status_reg = SEND_ERR_STATUS,
+	.csr_err_mask_reg = SEND_ERR_MASK,
+	.csr_err_clear_reg = SEND_ERR_CLEAR,
+
+	.setextled = setextled,
+	.start_led_override = hfi1_start_led_override,
+	.shutdown_led_override = shutdown_led_override,
+	.read_guid = read_guid,
+	.early_per_chip_init = wfr_early_per_chip_init,
+	.mid_per_chip_init = wfr_mid_per_chip_init,
+	.init_other = init_other,
+	.late_per_chip_init = wfr_late_per_chip_init,
+	.start_port = wfr_start_port,
+	.stop_port = wfr_stop_port,
+	.init_tids = wfr_init_tids,
+	.put_tid = wfr_put_tid,
+	.rcv_array_wc_fill = wfr_rcv_array_wc_fill,
+	.set_port_tid_count = wfr_set_port_tid_count,
+	.set_port_max_mtu = wfr_set_port_max_mtu,
+	.update_rcv_hdr_size = wfr_update_rcv_hdr_size,
+	.check_synth_status = wfr_check_synth_status,
+	.update_synth_status = wfr_update_synth_status,
+	.create_pbc = wfr_create_pbc,
+	.set_pio_integrity = wfr_set_pio_integrity,
+	.find_used_resources = wfr_find_used_resources,
+	.read_link_quality = wfr_read_link_quality,
+	.set_rheq_addr = NULL,
+	.handle_link_bounce = wfr_handle_link_bounce,
+	.enable_rcv_context = wfr_enable_rcv_context,
+};
+
+/* parameters for the JKR ASIC */
+static const struct chip_params jkr_params = {
+	.chip_type = CHIP_JKR,
+	.num_ports = 2,
+
+	/* BAR0 map: see comments where KREG values are defined */
+	.bar0_size = JKR_BAR0_SIZE,
+	.kreg1_size = JKR_KREG1_SIZE,
+	.kreg2_offset = JKR_KREG2_OFFSET,
+	.kreg2_size = JKR_KREG2_SIZE,
+	.rcv_array_offset = JKR_RCV_ARRAY,
+	.rcv_array_size = JKR_RCV_ARRAY_SIZE,
+
+	.link_speed_supported = OPA_LINK_SPEED_100G | OPA_LINK_SPEED_25G,
+	.link_speed_active = OPA_LINK_SPEED_100G,
+	.asic_cclock_ps = JKR_ASIC_CCLOCK_PS,
+	.rsm_rule_size = JKR_C_RXE_NUM_RSM_INSTANCES,
+	.pkey_table_size = JKR_MAX_PKEY_VALUES,
+	.generic_boardname = "Cornelis Networks 5000 Host Fabric Interface Adapter",
+	.max_eager_entries = JKR_MAX_EAGER_ENTRIES,
+	.pio_base_bits = JKR_PIO_BASE_BITS,
+	.egress_err_info_data = &jkr_egress_err_info_data,
+	.send_ctrl_flush = JKR_SEND_CTRL_FLUSH_WRONG_LINK_STATE_SMASK,
+	.port_discard_egress_errs = JKR_PORT_DISCARD_EGRESS_ERRS,
+
+	/* interrupt sources */
+	.num_int_csrs = JKR_C_CCE_NUM_INT_CSRS,
+	.num_int_map_csrs = JKR_C_CCE_NUM_INT_MAP_CSRS,
+	.is_rcvavail_start = JKR_IS_RCVAVAIL_START,
+	.is_rcvurgent_start = JKR_IS_RCVURGENT_START,
+	.is_sdmaeng_err_start = JKR_IS_SDMAENG_ERR_START,
+	.is_sdma_idle_start = JKR_IS_SDMA_IDLE_START,
+	.is_sdma_progress_start = JKR_IS_SDMA_PROGRESS_START,
+	.is_sdma_start = JKR_IS_SDMA_START,
+	.is_last_source = JKR_IS_LAST_SOURCE,
+	.is_table = jkr_is_table,
+	.gi_enable_table = jkr_gi_enable_table,
+
+	/* counters */
+	.chip_dev_cntrs = jkr_dev_cntrs,
+	.chip_dev_cntr_first = JKR_DEV_CNTR_FIRST,
+	.chip_num_dev_cntrs = JKR_NUM_DEV_CNTRS,
+	.chip_port_cntrs = jkr_port_cntrs,
+	.chip_port_cntr_first = JKR_PORT_CNTR_FIRST,
+	.chip_num_port_cntrs = JKR_NUM_PORT_CNTRS,
+
+	/* ingress port registers */
+	.rxe_iport_stride = JKR_C_RXE_IPORT_STRIDE,
+	.rcv_iport_ctrl_reg = JKR_RCV_IPORT_CTRL,
+	.rcv_iport_status_reg = JKR_RCV_IPORT_STATUS,
+	.rcv_bth_qp_reg = JKR_RCV_BTH_QP,
+	.rcv_multicast_reg = JKR_RCV_MULTICAST,
+	.rcv_bypass_reg = JKR_RCV_BYPASS,
+	.rcv_vl15_reg = JKR_RCV_VL15,
+	.rcv_err_info_reg = JKR_RCV_ERR_INFO,
+	.rcv_err_status_reg = JKR_RCV_ERR_STATUS,
+	.rcv_err_mask_reg = JKR_RCV_ERR_MASK,
+	.rcv_err_clear_reg = JKR_RCV_ERR_CLEAR,
+	.rcv_qp_map_table_reg = JKR_RCV_QP_MAP_TABLE,
+	.rcv_partition_key_reg = JKR_RCV_PARTITION_KEY,
+	.rcv_counter_array32_reg = JKR_RCV_COUNTER_ARRAY32,
+	.rcv_counter_array64_reg = JKR_RCV_COUNTER_ARRAY64,
+
+	/* ingress port receive context registers */
+	.rxe_iprc_stride = JKR_C_RXE_IPRC_STRIDE,
+	.rcv_jkey_ctrl_reg = JKR_RCV_JKEY_CTRL,
+
+	/* RXE restricted context registers */
+	.rxe_rctxt_stride = JKR_C_RXE_RCTXT_STRIDE,
+	.rcv_rctxt_ctrl_reg = JKR_RCV_RCTXT_CTRL,
+	.rcv_egr_ctrl_reg = JKR_RCV_EGR_CTRL,
+	.rcv_tid_ctrl_reg = JKR_RCV_TID_CTRL,
+
+	/* RXE kernel context registers */
+	.rxe_kctxt_stride = JKR_C_RXE_KCTXT_STRIDE,
+	.rcv_kctxt_ctrl_reg = JKR_RCV_KCTXT_CTRL,
+	.rcv_hdr_addr_reg = JKR_RCV_HDR_ADDR,
+	.rcv_hdr_cnt_reg = JKR_RCV_HDR_CNT,
+	.rcv_hdr_ent_size_reg = JKR_RCV_HDR_ENT_SIZE,
+	.rcv_hdr_tail_addr_reg = JKR_RCV_HDR_TAIL_ADDR,
+	.rcv_avail_time_out_reg = JKR_RCV_AVAIL_TIME_OUT,
+	.rcv_hdr_ovfl_cnt_reg = JKR_RCV_HDR_OVFL_CNT,
+
+	/* RXE kernel/user registers */
+	.rxe_ku_stride = JKR_C_RXE_UCTXT_STRIDE,
+	.rcv_ctxt_status_reg = JKR_RCV_CTXT_STATUS,
+
+	/* RXE user registers */
+	.rxe_uctxt_stride = JKR_C_RXE_UCTXT_STRIDE,
+	.rcv_hdr_tail_reg = JKR_RCV_HDR_TAIL,
+	.rcv_hdr_head_reg = JKR_RCV_HDR_HEAD,
+	.rcv_egr_index_head_reg = JKR_RCV_EGR_INDEX_HEAD,
+	.rcv_tid_flow_table_reg = JKR_RCV_TID_FLOW_TABLE,
+
+	/* TXE kernel registers */
+	.send_contexts_reg = JKR_SEND_CONTEXTS,
+	.send_dma_engines_reg = JKR_SEND_DMA_ENGINES,
+	.send_pio_mem_size_reg = JKR_SEND_PIO_MEM_SIZE,
+	.send_dma_mem_size_reg = JKR_SEND_DMA_MEM_SIZE,
+	.send_pio_init_ctxt_reg = JKR_SEND_PIO_INIT_CTXT,
+
+	/* send context_registers */
+	.txe_sctxt_stride = JKR_C_TXE_SCTXT_STRIDE,
+	.send_ctxt_status_reg = JKR_SEND_CTXT_STATUS,
+	.send_ctxt_credit_ctrl_reg = JKR_SEND_CTXT_CREDIT_CTRL,
+	.send_ctxt_credit_status_reg = JKR_SEND_CTXT_CREDIT_STATUS,
+	.send_ctxt_credit_return_addr_reg = JKR_SEND_CTXT_CREDIT_RETURN_ADDR,
+	.send_ctxt_credit_force_reg = JKR_SEND_CTXT_CREDIT_FORCE,
+	.send_ctxt_err_status_reg = JKR_SEND_CTXT_ERR_STATUS,
+	.send_ctxt_err_mask_reg = JKR_SEND_CTXT_ERR_MASK,
+	.send_ctxt_err_clear_reg = JKR_SEND_CTXT_ERR_CLEAR,
+
+	/* TXE send context registers */
+	.txe_tctxt_stride = JKR_C_TXE_TCTXT_STRIDE,
+	.send_ctxt_ctrl_reg = JKR_SEND_CTXT_CTRL,
+
+	/* SDMA registers */
+	.txe_sdma_stride = JKR_C_TXE_SDMA_STRIDE,
+	.send_dma_ctrl_reg = JKR_SEND_DMA_CTRL,
+	.send_dma_status_reg = JKR_SEND_DMA_STATUS,
+	.send_dma_base_addr_reg = JKR_SEND_DMA_BASE_ADDR,
+	.send_dma_len_gen_reg = JKR_SEND_DMA_LEN_GEN,
+	.send_dma_tail_reg = JKR_SEND_DMA_TAIL,
+	.send_dma_head_reg = JKR_SEND_DMA_HEAD,
+	.send_dma_head_addr_reg = JKR_SEND_DMA_HEAD_ADDR,
+	.send_dma_priority_thld_reg = JKR_SEND_DMA_PRIORITY_THLD,
+	.send_dma_idle_cnt_reg = JKR_SEND_DMA_IDLE_CNT,
+	.send_dma_reload_cnt_reg = JKR_SEND_DMA_RELOAD_CNT,
+	.send_dma_desc_cnt_reg = JKR_SEND_DMA_DESC_CNT,
+	.send_dma_desc_fetched_cnt_reg = JKR_SEND_DMA_DESC_FETCHED_CNT,
+	.send_dma_eng_err_status_reg = JKR_SEND_DMA_ENG_ERR_STATUS,
+	.send_dma_eng_err_mask_reg = JKR_SEND_DMA_ENG_ERR_MASK,
+	.send_dma_eng_err_clear_reg = JKR_SEND_DMA_ENG_ERR_CLEAR,
+
+	/* SDMA Config registers */
+	.txe_sdmacfg_stride = JKR_C_TXE_SDMACFG_STRIDE,
+	.send_dma_cfg_memory_reg = JKR_SEND_DMA_CFG_MEMORY,
+
+	/* egress port registers */
+	.txe_eport_stride = JKR_C_TXE_EPORT_STRIDE,
+	.send_ctrl_reg = JKR_SEND_CTRL,
+	.send_high_priority_limit_reg = JKR_SEND_HIGH_PRIORITY_LIMIT,
+	.send_egress_err_status_reg = JKR_SEND_EGRESS_ERR_STATUS,
+	.send_egress_err_mask_reg = JKR_SEND_EGRESS_ERR_MASK,
+	.send_egress_err_clear_reg = JKR_SEND_EGRESS_ERR_CLEAR,
+	.send_bth_qp_reg = JKR_SEND_BTH_QP,
+	.send_static_rate_control_reg = JKR_SEND_STATIC_RATE_CONTROL,
+	.send_sc2vlt0_reg = JKR_SEND_SC2VLT0,
+	.send_sc2vlt1_reg = JKR_SEND_SC2VLT1,
+	.send_sc2vlt2_reg = JKR_SEND_SC2VLT2,
+	.send_sc2vlt3_reg = JKR_SEND_SC2VLT3,
+	.send_len_check0_reg = JKR_SEND_LEN_CHECK0,
+	.send_len_check1_reg = JKR_SEND_LEN_CHECK1,
+	.send_low_priority_list_reg = JKR_SEND_LOW_PRIORITY_LIST,
+	.send_high_priority_list_reg = JKR_SEND_HIGH_PRIORITY_LIST,
+	.send_counter_array32_reg = JKR_SEND_COUNTER_ARRAY32,
+	.send_counter_array64_reg = JKR_SEND_COUNTER_ARRAY64,
+	.send_cm_ctrl_reg = JKR_SEND_CM_CTRL,
+	.send_cm_global_credit_reg = JKR_SEND_CM_GLOBAL_CREDIT,
+	.send_cm_credit_used_status_reg = JKR_SEND_CM_CREDIT_USED_STATUS,
+	.send_cm_timer_ctrl_reg = JKR_SEND_CM_TIMER_CTRL,
+	.send_cm_local_au_table0_to3_reg = JKR_SEND_CM_LOCAL_AU_TABLE0_TO3,
+	.send_cm_local_au_table4_to7_reg = JKR_SEND_CM_LOCAL_AU_TABLE4_TO7,
+	.send_cm_remote_au_table0_to3_reg = JKR_SEND_CM_REMOTE_AU_TABLE0_TO3,
+	.send_cm_remote_au_table4_to7_reg = JKR_SEND_CM_REMOTE_AU_TABLE4_TO7,
+	.send_cm_credit_vl_reg = JKR_SEND_CM_CREDIT_VL,
+	.send_cm_credit_vl15_reg = JKR_SEND_CM_CREDIT_VL15,
+	.send_egress_err_info_reg = JKR_SEND_EGRESS_ERR_INFO,
+	.send_egress_err_source_reg = JKR_SEND_EGRESS_ERR_SOURCE,
+	.send_egress_ctxt_status_reg = JKR_SEND_EGRESS_CTXT_STATUS,
+	.send_egress_send_dma_status_reg = JKR_SEND_EGRESS_SEND_DMA_STATUS,
+
+	/* egress port send context registers */
+	.txe_epsc_stride = JKR_C_TXE_EPSC_STRIDE,
+	.send_ctxt_check_enable_reg = JKR_SEND_CTXT_CHECK_ENABLE,
+	.send_ctxt_check_vl_reg = JKR_SEND_CTXT_CHECK_VL,
+	.send_ctxt_check_job_key_reg = JKR_SEND_CTXT_CHECK_JOB_KEY,
+	.send_ctxt_check_partition_key_reg = JKR_SEND_CTXT_CHECK_PARTITION_KEY,
+	.send_ctxt_check_slid_reg = JKR_SEND_CTXT_CHECK_SLID,
+	.send_ctxt_check_opcode_reg = JKR_SEND_CTXT_CHECK_OPCODE,
+
+	/* SI registers */
+	.cce_msix_int_map_vec_reg = JKR_CCE_MSIX_INT_MAP_VEC,
+	.send_pio_err_status_reg = JKR_SEND_PIO_ERR_STATUS,
+	.send_pio_err_mask_reg = JKR_SEND_PIO_ERR_MASK,
+	.send_pio_err_clear_reg = JKR_SEND_PIO_ERR_CLEAR,
+	.send_dma_err_status_reg = JKR_SEND_DMA_ERR_STATUS,
+	.send_dma_err_mask_reg = JKR_SEND_DMA_ERR_MASK,
+	.send_dma_err_clear_reg = JKR_SEND_DMA_ERR_CLEAR,
+	.csr_err_status_reg = JKR_CSR_ERR_STATUS,
+	.csr_err_mask_reg = JKR_CSR_ERR_MASK,
+	.csr_err_clear_reg = JKR_CSR_ERR_CLEAR,
+
+	.setextled = gen_setextled,
+	.start_led_override = gen_start_led_override,
+	.shutdown_led_override = gen_shutdown_led_override,
+	.read_guid = jkr_read_guid,
+	.early_per_chip_init = jkr_early_per_chip_init,
+	.mid_per_chip_init = jkr_mid_per_chip_init,
+	.init_other = jkr_init_other,
+	.late_per_chip_init = gen_late_per_chip_init,
+	.start_port = gen_start_port,
+	.stop_port = gen_stop_port,
+	.init_tids = jkr_init_tids,
+	.put_tid = jkr_put_tid,
+	.rcv_array_wc_fill = jkr_rcv_array_wc_fill,
+	.set_port_tid_count = jkr_set_port_tid_count,
+	.set_port_max_mtu = gen_set_port_max_mtu,
+	.update_rcv_hdr_size = jkr_update_rcv_hdr_size,
+	.check_synth_status = jkr_check_synth_status,
+	.update_synth_status = jkr_update_synth_status,
+	.create_pbc = gen_create_pbc,
+	.set_pio_integrity = jkr_set_pio_integrity,
+	.find_used_resources = jkr_find_used_resources,
+	.read_link_quality = jkr_read_link_quality,
+	.set_rheq_addr = jkr_set_rheq_addr,
+	.handle_link_bounce = jkr_handle_link_bounce,
+	.enable_rcv_context = jkr_enable_rcv_context,
+};
 
 /*
- * Number of user receive contexts we are configured to use (to allow for more
- * pio buffers per ctxt, etc.)  Zero means use one user context per CPU.
+ * Number of user receive contexts each port configured to use (allow for more
+ * pio buffers per ctxt, etc).
  */
-int num_user_contexts = -1;
-module_param_named(num_user_contexts, num_user_contexts, int, 0444);
-MODULE_PARM_DESC(
-	num_user_contexts, "Set max number of user contexts to use (default: -1 will use the real (non-HT) CPU count)");
+static int num_user_contexts_array[32];
+static int num_user_contexts_count;
+module_param_array_named(num_user_contexts, num_user_contexts_array, int,
+			 &num_user_contexts_count, 0444);
+MODULE_PARM_DESC(num_user_contexts, "Set max number of user contexts to use per-hfi, per-port (unset or -1: use the real (non-HT) CPU count)");
 
 uint krcvqs[RXE_NUM_DATA_VL];
 int krcvqsset;
@@ -82,16 +536,209 @@ MODULE_PARM_DESC(user_credit_return_threshold, "Credit return threshold for user
 
 DEFINE_XARRAY_FLAGS(hfi1_dev_table, XA_FLAGS_ALLOC | XA_FLAGS_LOCK_IRQ);
 
-static int hfi1_create_kctxt(struct hfi1_devdata *dd,
-			     struct hfi1_pportdata *ppd)
+struct cport_trap_reg {
+	u32 mask;
+	cport_trap_handler func;
+};
+
+/* send, or resend, START message */
+static int cport_start(struct hfi1_devdata *dd)
 {
+	struct cport_start_payload start = {0};
+	u64 *resp = NULL;
+	int resp_len = 0;
+	int ret;
+
+	start.opts_ena = dd->cport->opts;
+	start.trap_ena = dd->cport->traps;
+
+	ret = cport_send_req(dd, CH_OP_START, 0, &start, sizeof(start),
+			     (void **)&resp, &resp_len, HZ);
+	if (ret)
+		dd_dev_err(dd, "CPORT start failed %d\n", ret);
+	else if (resp_len)
+		dd_dev_info(dd, "CPORT started %016llx\n", *resp);
+	else
+		dd_dev_info(dd, "CPORT started\n");
+	kfree(resp);
+	return ret;
+}
+
+int register_cport_trap(struct hfi1_devdata *dd, struct cport_trap_status traps,
+			cport_trap_handler func)
+{
+	union {
+		struct cport_trap_status traps;
+		u32 dw;
+	} trap_val, cur_traps;
+	struct cport_trap_reg *entry;
+	u32 index;
+	int ret;
+
+	if (!dd->cport)
+		return 0;
+
+	trap_val.traps = traps;
+	cur_traps.traps = dd->cport->traps;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	entry->mask = trap_val.dw;
+	entry->func = func;
+	ret = xa_alloc_irq(&dd->cport->trap_xa, &index, entry, xa_limit_32b, GFP_KERNEL);
+	if (ret < 0) {
+		kfree(entry);
+		return ret;
+	}
+
+	trap_val.dw |= cur_traps.dw;
+	if (trap_val.dw != cur_traps.dw) {
+		dd->cport->traps = trap_val.traps;
+		ret = cport_start(dd);
+	}
+	return ret;
+}
+
+int deregister_cport_trap(struct hfi1_devdata *dd, cport_trap_handler func)
+{
+	union {
+		struct cport_trap_status traps;
+		u32 dw;
+	} trap_val, cur_traps;
+	struct cport_trap_reg *entry;
+	unsigned long index;
+
+	if (!dd->cport)
+		return 0;
+
+	trap_val.dw = 0;
+	xa_lock_irq(&dd->cport->trap_xa);
+	xa_for_each(&dd->cport->trap_xa, index, entry) {
+		if (entry->func == func) {
+			__xa_erase(&dd->cport->trap_xa, index);
+			kfree(entry);
+		} else {
+			trap_val.dw |= entry->mask;
+		}
+	}
+	xa_unlock_irq(&dd->cport->trap_xa);
+	cur_traps.traps = dd->cport->traps;
+	if (trap_val.dw != cur_traps.dw) {
+		dd->cport->traps = trap_val.traps;
+		cport_start(dd);
+	}
+
+	return 0;
+}
+
+static void clearall_cport_trap(struct hfi1_devdata *dd)
+{
+	struct cport_trap_reg *entry;
+	unsigned long index;
+	struct cport_trap_status no_traps = {0};
+
+	if (!dd->cport)
+		return;
+
+	dd->cport->traps = no_traps;
+	cport_start(dd);
+	cport_register_cb(dd, CH_OP_TRAP, CH_OP_TRAP, NULL);
+	xa_lock_irq(&dd->cport->trap_xa);
+	/* there should be none left, but make certain */
+	xa_for_each(&dd->cport->trap_xa, index, entry) {
+		__xa_erase(&dd->cport->trap_xa, index);
+		dd_dev_info(dd, "removing latent TRAP handler %pS\n", entry->func);
+		kfree(entry);
+	}
+	xa_unlock_irq(&dd->cport->trap_xa);
+}
+
+static int handle_cport_trap(struct hfi1_devdata *dd, u8 op, u8 sideband,
+			     void *payload, int len, void *handle)
+{
+	struct cport_trap_payload *traps = payload;
+	struct cport_trap_payload repress = {0};
+	union {
+		struct cport_trap_status traps;
+		u32 dw;
+	} trap_val;
+	struct cport_trap_reg *entry;
+	unsigned long index;
+	int ret;
+
+	trap_val.traps = traps->trap_sts;
+
+	/* clear-down the traps we got */
+	repress.trap_sts = traps->trap_sts;
+	ret = cport_send_notif(dd, CH_OP_TRAP_REPRESS, 0, &repress, sizeof(repress));
+	if (ret)
+		dd_dev_warn(dd, "CPORT TRAP_REPRESS failed: %d\n", ret);
+#ifdef CPORT_TRAP_DEBUG
+	pr_warn("hfi1_%d: %s: CPORT TRAP %08x\n", dd->unit, __func__, trap_val.dw);
+#endif
+
+	xa_lock_irq(&dd->cport->trap_xa);
+	xa_for_each(&dd->cport->trap_xa, index, entry) {
+		if (entry->mask & trap_val.dw)
+			entry->func(dd, trap_val.traps);
+	}
+	xa_unlock_irq(&dd->cport->trap_xa);
+
+	return 0;
+}
+
+int start_cport(struct hfi1_devdata *dd)
+{
+	int ret;
+
+	ret = cport_init(dd);
+	if (ret || !dd->cport)
+		return ret;
+
+	cport_register_cb(dd, CH_OP_TRAP, CH_OP_TRAP, handle_cport_trap);
+
+	dd->cport->opts.bare_metal = 1;
+
+	ret = cport_start(dd);
+	if (ret)
+		cport_exit(dd);
+	return ret;
+}
+
+static void stop_cport(struct hfi1_devdata *dd)
+{
+	struct cport_stop_payload stop = {0};
+	u64 *resp = NULL;
+	int resp_len = 0;
+	int ret;
+
+	if (!dd->cport)
+		return;
+
+	ret = cport_send_req(dd, CH_OP_STOP, 0, &stop, sizeof(stop),
+			     (void **)&resp, &resp_len, HZ);
+	if (ret)
+		dd_dev_err(dd, "CPORT stop failed %d\n", ret);
+	else if (resp_len)
+		dd_dev_info(dd, "CPORT stopped %016llx\n", *resp);
+	else
+		dd_dev_info(dd, "CPORT stopped\n");
+	kfree(resp);
+
+	cport_exit(dd);
+}
+
+static int hfi1_create_kctxt(struct hfi1_pportdata *ppd, u16 ctxt)
+{
+	struct hfi1_devdata *dd = ppd->dd;
 	struct hfi1_ctxtdata *rcd;
 	int ret;
 
 	/* Control context has to be always 0 */
 	BUILD_BUG_ON(HFI1_CTRL_CTXT != 0);
 
-	ret = hfi1_create_ctxtdata(ppd, dd->node, &rcd);
+	ret = hfi1_create_ctxtdata(ppd, dd->node, ctxt, &rcd);
 	if (ret < 0) {
 		dd_dev_err(dd, "Kernel receive context allocation failed\n");
 		return ret;
@@ -108,7 +755,7 @@ static int hfi1_create_kctxt(struct hfi1_devdata *dd,
 		HFI1_CAP_KGET(DMA_RTAIL);
 
 	/* Control context must use DMA_RTAIL */
-	if (rcd->ctxt == HFI1_CTRL_CTXT)
+	if (is_control_context(rcd))
 		rcd->flags |= HFI1_CAP_DMA_RTAIL;
 	rcd->fast_handler = get_dma_rtail_setting(rcd) ?
 				handle_receive_interrupt_dma_rtail :
@@ -116,7 +763,7 @@ static int hfi1_create_kctxt(struct hfi1_devdata *dd,
 
 	hfi1_set_seq_cnt(rcd, 1);
 
-	rcd->sc = sc_alloc(dd, SC_ACK, rcd->rcvhdrqentsize, dd->node);
+	rcd->sc = sc_alloc(ppd, SC_ACK, rcd->rcvhdrqentsize, dd->node);
 	if (!rcd->sc) {
 		dd_dev_err(dd, "Kernel send context allocation failed\n");
 		return -ENOMEM;
@@ -132,27 +779,45 @@ static int hfi1_create_kctxt(struct hfi1_devdata *dd,
 int hfi1_create_kctxts(struct hfi1_devdata *dd)
 {
 	u16 i;
+	u16 j;
 	int ret;
 
-	dd->rcd = kcalloc_node(dd->num_rcv_contexts, sizeof(*dd->rcd),
+	dd->num_rcd = chip_rcv_contexts(dd);
+	dd->rcd = kcalloc_node(dd->num_rcd, sizeof(*dd->rcd),
 			       GFP_KERNEL, dd->node);
-	if (!dd->rcd)
+	if (!dd->rcd) {
+		dd->num_rcd = 0;
 		return -ENOMEM;
+	}
 
-	for (i = 0; i < dd->first_dyn_alloc_ctxt; ++i) {
-		ret = hfi1_create_kctxt(dd, dd->pport);
-		if (ret)
-			goto bail;
+	for (i = 0; i < dd->num_pports; i++) {
+		struct hfi1_pportdata *ppd = dd->pport + i;
+
+		for (j = 0; j < dd->n_krcv_queues; j++) {
+			u16 ctxt = ppd->rcv_context_base + j;
+
+			ret = hfi1_create_kctxt(ppd, ctxt);
+			if (ret)
+				goto bail;
+		}
 	}
 
 	return 0;
 bail:
-	for (i = 0; dd->rcd && i < dd->first_dyn_alloc_ctxt; ++i)
-		hfi1_free_ctxt(dd->rcd[i]);
+	for (i = 0; i < dd->num_pports; i++) {
+		struct hfi1_pportdata *ppd = dd->pport + i;
+
+		for (j = 0; j < dd->n_krcv_queues; j++) {
+			u16 ctxt = ppd->rcv_context_base + j;
+
+			hfi1_free_ctxt(dd->rcd[ctxt]);
+		}
+	}
 
 	/* All the contexts should be freed, free the array */
 	kfree(dd->rcd);
 	dd->rcd = NULL;
+	dd->num_rcd = 0;
 	return ret;
 }
 
@@ -214,33 +879,48 @@ int hfi1_rcd_get(struct hfi1_ctxtdata *rcd)
 
 /**
  * allocate_rcd_index - allocate an rcd index from the rcd array
- * @dd: pointer to a valid devdata structure
+ * @ppd: pointer to a valid port data structure
  * @rcd: rcd data structure to assign
- * @index: pointer to index that is allocated
+ * @index[in,out]: in, suggested context number; out, selected context number
  *
- * Find an empty index in the rcd array, and assign the given rcd to it.
- * If the array is full, we are EBUSY.
- *
+ * Allocate an rcd index, either at the given context number or any within
+ * a dynamic range.  If the fixed index is used or the dynamic range is full,
+ * return -EBUSY.
  */
-static int allocate_rcd_index(struct hfi1_devdata *dd,
+static int allocate_rcd_index(struct hfi1_pportdata *ppd,
 			      struct hfi1_ctxtdata *rcd, u16 *index)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	unsigned long flags;
-	u16 ctxt;
+	u16 ctxt = *index;
+	bool found;
 
 	spin_lock_irqsave(&dd->uctxt_lock, flags);
-	for (ctxt = 0; ctxt < dd->num_rcv_contexts; ctxt++)
+	found = false;
+	if (ctxt == DYNAMIC_CONTEXT) {
+		/* look for an unused dynamic context */
+		for (ctxt = ppd->first_dyn_alloc_ctxt;
+		     ctxt < ppd->rcv_context_base + ppd->num_rcv_contexts;
+		     ctxt++) {
+			if (!dd->rcd[ctxt]) {
+				found = true;
+				break;
+			}
+		}
+	} else {
+		/* use the context number given */
 		if (!dd->rcd[ctxt])
-			break;
+			found = true;
+	}
 
-	if (ctxt < dd->num_rcv_contexts) {
+	if (found) {
 		rcd->ctxt = ctxt;
 		dd->rcd[ctxt] = rcd;
 		hfi1_rcd_init(rcd);
 	}
 	spin_unlock_irqrestore(&dd->uctxt_lock, flags);
 
-	if (ctxt >= dd->num_rcv_contexts)
+	if (!found)
 		return -EBUSY;
 
 	*index = ctxt;
@@ -249,37 +929,15 @@ static int allocate_rcd_index(struct hfi1_devdata *dd,
 }
 
 /**
- * hfi1_rcd_get_by_index_safe - validate the ctxt index before accessing the
- * array
+ * hfi1_rcd_get_by_index - get rcd by index
  * @dd: pointer to a valid devdata structure
- * @ctxt: the index of an possilbe rcd
+ * @ctxt: the index of a possible rcd
  *
- * This is a wrapper for hfi1_rcd_get_by_index() to validate that the given
- * ctxt index is valid.
+ * Hold the protecting spinlock and increment the reference on the selected
+ * rcd element.
  *
- * The caller is responsible for making the _put().
- *
- */
-struct hfi1_ctxtdata *hfi1_rcd_get_by_index_safe(struct hfi1_devdata *dd,
-						 u16 ctxt)
-{
-	if (ctxt < dd->num_rcv_contexts)
-		return hfi1_rcd_get_by_index(dd, ctxt);
-
-	return NULL;
-}
-
-/**
- * hfi1_rcd_get_by_index - get by index
- * @dd: pointer to a valid devdata structure
- * @ctxt: the index of an possilbe rcd
- *
- * We need to protect access to the rcd array.  If access is needed to
- * one or more index, get the protecting spinlock and then increment the
- * kref.
- *
- * The caller is responsible for making the _put().
- *
+ * The caller is responsible for calling hfi1_rcd_put() on the returned
+ * pointer.
  */
 struct hfi1_ctxtdata *hfi1_rcd_get_by_index(struct hfi1_devdata *dd, u16 ctxt)
 {
@@ -287,9 +945,9 @@ struct hfi1_ctxtdata *hfi1_rcd_get_by_index(struct hfi1_devdata *dd, u16 ctxt)
 	struct hfi1_ctxtdata *rcd = NULL;
 
 	spin_lock_irqsave(&dd->uctxt_lock, flags);
-	if (dd->rcd[ctxt]) {
+	if (ctxt < dd->num_rcd) {
 		rcd = dd->rcd[ctxt];
-		if (!hfi1_rcd_get(rcd))
+		if (rcd && !hfi1_rcd_get(rcd))
 			rcd = NULL;
 	}
 	spin_unlock_irqrestore(&dd->uctxt_lock, flags);
@@ -301,25 +959,18 @@ struct hfi1_ctxtdata *hfi1_rcd_get_by_index(struct hfi1_devdata *dd, u16 ctxt)
  * Common code for user and kernel context create and setup.
  * NOTE: the initial kref is done here (hf1_rcd_init()).
  */
-int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
+int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa, u16 ctxt,
 			 struct hfi1_ctxtdata **context)
 {
 	struct hfi1_devdata *dd = ppd->dd;
 	struct hfi1_ctxtdata *rcd;
-	unsigned kctxt_ngroups = 0;
-	u32 base;
 
-	if (dd->rcv_entries.nctxt_extra >
-	    dd->num_rcv_contexts - dd->first_dyn_alloc_ctxt)
-		kctxt_ngroups = (dd->rcv_entries.nctxt_extra -
-			 (dd->num_rcv_contexts - dd->first_dyn_alloc_ctxt));
 	rcd = kzalloc_node(sizeof(*rcd), GFP_KERNEL, numa);
 	if (rcd) {
 		u32 rcvtids, max_entries;
-		u16 ctxt;
 		int ret;
 
-		ret = allocate_rcd_index(dd, rcd, &ctxt);
+		ret = allocate_rcd_index(ppd, rcd, &ctxt);
 		if (ret) {
 			*context = NULL;
 			kfree(rcd);
@@ -344,40 +995,17 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 
 		hfi1_cdbg(PROC, "setting up context %u", rcd->ctxt);
 
-		/*
-		 * Calculate the context's RcvArray entry starting point.
-		 * We do this here because we have to take into account all
-		 * the RcvArray entries that previous context would have
-		 * taken and we have to account for any extra groups assigned
-		 * to the static (kernel) or dynamic (vnic/user) contexts.
-		 */
-		if (ctxt < dd->first_dyn_alloc_ctxt) {
-			if (ctxt < kctxt_ngroups) {
-				base = ctxt * (dd->rcv_entries.ngroups + 1);
-				rcd->rcv_array_groups++;
-			} else {
-				base = kctxt_ngroups +
-					(ctxt * dd->rcv_entries.ngroups);
-			}
-		} else {
-			u16 ct = ctxt - dd->first_dyn_alloc_ctxt;
-
-			base = ((dd->n_krcv_queues * dd->rcv_entries.ngroups) +
-				kctxt_ngroups);
-			if (ct < dd->rcv_entries.nctxt_extra) {
-				base += ct * (dd->rcv_entries.ngroups + 1);
-				rcd->rcv_array_groups++;
-			} else {
-				base += dd->rcv_entries.nctxt_extra +
-					(ct * dd->rcv_entries.ngroups);
-			}
-		}
-		rcd->eager_base = base * dd->rcv_entries.group_size;
+		/* calculate the context's RcvArray entry starting point */
+		rcd->eager_base = ppd->rcv_array_base +
+				  ((ctxt - ppd->rcv_context_base) *
+				   dd->rcv_entries.ngroups *
+				   dd->rcv_entries.group_size);
 
 		rcd->rcvhdrq_cnt = rcvhdrcnt;
 		rcd->rcvhdrqentsize = hfi1_hdrq_entsize;
 		rcd->rhf_offset =
 			rcd->rcvhdrqentsize - sizeof(u64) / sizeof(u32);
+		rcd->kdeth_rcv_hdr = DEFAULT_RCVHDRSIZE;
 		/*
 		 * Simple Eager buffer allocation: we have already pre-allocated
 		 * the number of RcvArray entry groups. Each ctxtdata structure
@@ -394,10 +1022,10 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 		rcvtids = ((max_entries * hfi1_rcvarr_split) / 100);
 		rcd->egrbufs.count = round_down(rcvtids,
 						dd->rcv_entries.group_size);
-		if (rcd->egrbufs.count > MAX_EAGER_ENTRIES) {
+		if (rcd->egrbufs.count > dd->params->max_eager_entries) {
 			dd_dev_err(dd, "ctxt%u: requested too many RcvArray entries.\n",
 				   rcd->ctxt);
-			rcd->egrbufs.count = MAX_EAGER_ENTRIES;
+			rcd->egrbufs.count = dd->params->max_eager_entries;
 		}
 		hfi1_cdbg(PROC,
 			  "ctxt%u: max Eager buffer RcvArray entries: %u",
@@ -438,7 +1066,7 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 		rcd->egrbufs.rcvtid_size = HFI1_MAX_EAGER_BUFFER_SIZE;
 
 		/* Applicable only for statically created kernel contexts */
-		if (ctxt < dd->first_dyn_alloc_ctxt) {
+		if (ctxt < ppd->first_dyn_alloc_ctxt) {
 			rcd->opstats = kzalloc_node(sizeof(*rcd->opstats),
 						    GFP_KERNEL, numa);
 			if (!rcd->opstats)
@@ -529,7 +1157,7 @@ void set_link_ipg(struct hfi1_pportdata *ppd)
 	src &= SEND_STATIC_RATE_CONTROL_CSR_SRC_RELOAD_SMASK;
 	src <<= SEND_STATIC_RATE_CONTROL_CSR_SRC_RELOAD_SHIFT;
 
-	write_csr(dd, SEND_STATIC_RATE_CONTROL, src);
+	write_eport_csr(dd, ppd->hw_pidx, dd->params->send_static_rate_control_reg, src);
 }
 
 static enum hrtimer_restart cca_timer_fn(struct hrtimer *t)
@@ -615,22 +1243,20 @@ void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
 	INIT_WORK(&ppd->link_vc_work, handle_verify_cap);
 	INIT_WORK(&ppd->link_up_work, handle_link_up);
 	INIT_WORK(&ppd->link_down_work, handle_link_down);
-	INIT_WORK(&ppd->freeze_work, handle_freeze);
 	INIT_WORK(&ppd->link_downgrade_work, handle_link_downgrade);
 	INIT_WORK(&ppd->sma_message_work, handle_sma_message);
-	INIT_WORK(&ppd->link_bounce_work, handle_link_bounce);
+	INIT_WORK(&ppd->link_bounce_work, dd->params->handle_link_bounce);
 	INIT_DELAYED_WORK(&ppd->start_link_work, handle_start_link);
 	INIT_WORK(&ppd->linkstate_active_work, receive_interrupt_work);
 	INIT_WORK(&ppd->qsfp_info.qsfp_work, qsfp_event);
 
 	mutex_init(&ppd->hls_lock);
 	spin_lock_init(&ppd->qsfp_info.qsfp_lock);
+	seqlock_init(&ppd->sc2vl_lock);
 
 	ppd->qsfp_info.ppd = ppd;
 	ppd->sm_trap_qp = 0x0;
 	ppd->sa_qp = 0x1;
-
-	ppd->hfi1_wq = NULL;
 
 	spin_lock_init(&ppd->cca_timer_lock);
 
@@ -651,6 +1277,9 @@ void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
 	RCU_INIT_POINTER(ppd->cc_state, cc_state);
 	if (!cc_state)
 		goto bail;
+	atomic_set(&ppd->ipoib_rsm_usr_num, 0);
+	atomic_set(&ppd->vnic_rsm_usr_num, 0);
+	ppd->netdev_rsm_rule = -1;
 	return;
 
 bail:
@@ -677,20 +1306,26 @@ static int loadtime_init(struct hfi1_devdata *dd)
 static int init_after_reset(struct hfi1_devdata *dd)
 {
 	int i;
+	int j;
 	struct hfi1_ctxtdata *rcd;
 	/*
 	 * Ensure chip does no sends or receives, tail updates, or
 	 * pioavail updates while we re-initialize.  This is mostly
 	 * for the driver data structures, not chip registers.
 	 */
-	for (i = 0; i < dd->num_rcv_contexts; i++) {
-		rcd = hfi1_rcd_get_by_index(dd, i);
-		hfi1_rcvctrl(dd, HFI1_RCVCTRL_CTXT_DIS |
-			     HFI1_RCVCTRL_INTRAVAIL_DIS |
-			     HFI1_RCVCTRL_TAILUPD_DIS, rcd);
-		hfi1_rcd_put(rcd);
+	for (i = 0; i < dd->num_pports; i++) {
+		for (j = 0; j < dd->pport[i].num_rcv_contexts; j++) {
+			u16 ctxt = dd->pport[i].rcv_context_base + j;
+
+			rcd = hfi1_rcd_get_by_index(dd, ctxt);
+			hfi1_rcvctrl(dd, HFI1_RCVCTRL_CTXT_DIS |
+				     HFI1_RCVCTRL_INTRAVAIL_DIS |
+				     HFI1_RCVCTRL_TAILUPD_DIS, rcd);
+			hfi1_rcd_put(rcd);
+		}
 	}
-	pio_send_control(dd, PSC_GLOBAL_DISABLE);
+	for (i = 0; i < dd->num_pports; i++)
+		pio_send_control(&dd->pport[i], PSC_GLOBAL_DISABLE);
 	for (i = 0; i < dd->num_send_contexts; i++)
 		sc_disable(dd->send_contexts[i].sc);
 
@@ -702,32 +1337,43 @@ static void enable_chip(struct hfi1_devdata *dd)
 	struct hfi1_ctxtdata *rcd;
 	u32 rcvmask;
 	u16 i;
+	u16 j;
 
 	/* enable PIO send */
-	pio_send_control(dd, PSC_GLOBAL_ENABLE);
+	for (i = 0; i < dd->num_pports; i++)
+		pio_send_control(&dd->pport[i], PSC_GLOBAL_ENABLE);
 
 	/*
 	 * Enable kernel ctxts' receive and receive interrupt.
 	 * Other ctxts done as user opens and initializes them.
 	 */
-	for (i = 0; i < dd->first_dyn_alloc_ctxt; ++i) {
-		rcd = hfi1_rcd_get_by_index(dd, i);
-		if (!rcd)
-			continue;
-		rcvmask = HFI1_RCVCTRL_CTXT_ENB | HFI1_RCVCTRL_INTRAVAIL_ENB;
-		rcvmask |= HFI1_CAP_KGET_MASK(rcd->flags, DMA_RTAIL) ?
-			HFI1_RCVCTRL_TAILUPD_ENB : HFI1_RCVCTRL_TAILUPD_DIS;
-		if (!HFI1_CAP_KGET_MASK(rcd->flags, MULTI_PKT_EGR))
-			rcvmask |= HFI1_RCVCTRL_ONE_PKT_EGR_ENB;
-		if (HFI1_CAP_KGET_MASK(rcd->flags, NODROP_RHQ_FULL))
-			rcvmask |= HFI1_RCVCTRL_NO_RHQ_DROP_ENB;
-		if (HFI1_CAP_KGET_MASK(rcd->flags, NODROP_EGR_FULL))
-			rcvmask |= HFI1_RCVCTRL_NO_EGR_DROP_ENB;
-		if (HFI1_CAP_IS_KSET(TID_RDMA))
-			rcvmask |= HFI1_RCVCTRL_TIDFLOW_ENB;
-		hfi1_rcvctrl(dd, rcvmask, rcd);
-		sc_enable(rcd->sc);
-		hfi1_rcd_put(rcd);
+	for (i = 0; i < dd->num_pports; i++) {
+		struct hfi1_pportdata *ppd = dd->pport + i;
+
+		for (j = 0; j < dd->n_krcv_queues; j++) {
+			u16 ctxt = ppd->rcv_context_base + j;
+
+			rcd = hfi1_rcd_get_by_index(dd, ctxt);
+			if (!rcd)
+				continue;
+			rcvmask = HFI1_RCVCTRL_CTXT_ENB
+				  | HFI1_RCVCTRL_INTRAVAIL_ENB;
+			if (HFI1_CAP_KGET_MASK(rcd->flags, DMA_RTAIL))
+				rcvmask |= HFI1_RCVCTRL_TAILUPD_ENB;
+			else
+				rcvmask |= HFI1_RCVCTRL_TAILUPD_DIS;
+			if (!HFI1_CAP_KGET_MASK(rcd->flags, MULTI_PKT_EGR))
+				rcvmask |= HFI1_RCVCTRL_ONE_PKT_EGR_ENB;
+			if (HFI1_CAP_KGET_MASK(rcd->flags, NODROP_RHQ_FULL))
+				rcvmask |= HFI1_RCVCTRL_NO_RHQ_DROP_ENB;
+			if (HFI1_CAP_KGET_MASK(rcd->flags, NODROP_EGR_FULL))
+				rcvmask |= HFI1_RCVCTRL_NO_EGR_DROP_ENB;
+			if (HFI1_CAP_IS_KSET(TID_RDMA))
+				rcvmask |= HFI1_RCVCTRL_TIDFLOW_ENB;
+			hfi1_rcvctrl(dd, rcvmask, rcd);
+			sc_enable(rcd->sc);
+			hfi1_rcd_put(rcd);
+		}
 	}
 }
 
@@ -740,48 +1386,39 @@ static int create_workqueues(struct hfi1_devdata *dd)
 	int pidx;
 	struct hfi1_pportdata *ppd;
 
+	if (!dd->hfi1_wq) {
+		dd->hfi1_wq = alloc_workqueue("hfi%d",
+					      WQ_SYSFS | WQ_HIGHPRI |
+					      WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM,
+					      HFI1_MAX_ACTIVE_GEN_WQ_ENTRIES,
+					      dd->unit);
+		if (!dd->hfi1_wq)
+			goto wq_error;
+	}
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 		ppd = dd->pport + pidx;
-		if (!ppd->hfi1_wq) {
-			ppd->hfi1_wq =
-				alloc_workqueue(
-				    "hfi%d_%d",
-				    WQ_SYSFS | WQ_HIGHPRI | WQ_CPU_INTENSIVE |
-				    WQ_MEM_RECLAIM,
-				    HFI1_MAX_ACTIVE_WORKQUEUE_ENTRIES,
-				    dd->unit, pidx);
-			if (!ppd->hfi1_wq)
-				goto wq_error;
-		}
 		if (!ppd->link_wq) {
 			/*
 			 * Make the link workqueue single-threaded to enforce
 			 * serialization.
 			 */
-			ppd->link_wq =
-				alloc_workqueue(
-				    "hfi_link_%d_%d",
-				    WQ_SYSFS | WQ_MEM_RECLAIM | WQ_UNBOUND,
-				    1, /* max_active */
-				    dd->unit, pidx);
-			if (!ppd->link_wq)
+			ppd->link_wq = alloc_workqueue("hfi_link_%d_%d",
+						       WQ_SYSFS |
+						       WQ_MEM_RECLAIM |
+						       WQ_UNBOUND,
+						       1, /* max_active */
+						       dd->unit, pidx);
+			if (!ppd->link_wq) {
+				pr_err("alloc_workqueue failed for port %d\n",
+				       pidx + 1);
 				goto wq_error;
+			}
 		}
 	}
 	return 0;
+
 wq_error:
-	pr_err("alloc_workqueue failed for port %d\n", pidx + 1);
-	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
-		ppd = dd->pport + pidx;
-		if (ppd->hfi1_wq) {
-			destroy_workqueue(ppd->hfi1_wq);
-			ppd->hfi1_wq = NULL;
-		}
-		if (ppd->link_wq) {
-			destroy_workqueue(ppd->link_wq);
-			ppd->link_wq = NULL;
-		}
-	}
+	destroy_workqueues(dd);
 	return -ENOMEM;
 }
 
@@ -797,14 +1434,14 @@ static void destroy_workqueues(struct hfi1_devdata *dd)
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 		ppd = dd->pport + pidx;
 
-		if (ppd->hfi1_wq) {
-			destroy_workqueue(ppd->hfi1_wq);
-			ppd->hfi1_wq = NULL;
-		}
 		if (ppd->link_wq) {
 			destroy_workqueue(ppd->link_wq);
 			ppd->link_wq = NULL;
 		}
+	}
+	if (dd->hfi1_wq) {
+		destroy_workqueue(dd->hfi1_wq);
+		dd->hfi1_wq = NULL;
 	}
 }
 
@@ -816,13 +1453,36 @@ static void destroy_workqueues(struct hfi1_devdata *dd)
  */
 static void enable_general_intr(struct hfi1_devdata *dd)
 {
-	set_intr_bits(dd, CCE_ERR_INT, MISC_ERR_INT, true);
-	set_intr_bits(dd, PIO_ERR_INT, TXE_ERR_INT, true);
-	set_intr_bits(dd, IS_SENDCTXT_ERR_START, IS_SENDCTXT_ERR_END, true);
-	set_intr_bits(dd, PBC_INT, GPIO_ASSERT_INT, true);
-	set_intr_bits(dd, TCRIT_INT, TCRIT_INT, true);
-	set_intr_bits(dd, IS_DC_START, IS_DC_END, true);
-	set_intr_bits(dd, IS_SENDCREDIT_START, IS_SENDCREDIT_END, true);
+	const struct gi_enable_entry *entry = dd->params->gi_enable_table;
+
+	for (; entry->start <= entry->end; entry++)
+		set_intr_bits(dd, entry->start, entry->end, true);
+}
+
+static void wfr_start_port(struct hfi1_pportdata *ppd)
+{
+	int ret;
+
+	init_qsfp_int(ppd);
+
+	/*
+	 * start the serdes - must be after interrupts are
+	 * enabled so we are notified when the link goes up
+	 */
+	ret = bringup_serdes(ppd);
+	if (ret)
+		ppd_dev_info(ppd, "Failed to bring up port\n");
+}
+
+static void wfr_stop_port(struct hfi1_pportdata *ppd)
+{
+	/*
+	 * Clear SerdesEnable.
+	 * We can't count on interrupts since we are stopping.
+	 */
+	hfi1_quiet_serdes(ppd);
+	if (ppd->link_wq)
+		flush_workqueue(ppd->link_wq);
 }
 
 /**
@@ -876,29 +1536,34 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 		goto done;
 
 	/* dd->rcd can be NULL if early initialization failed */
-	for (i = 0; dd->rcd && i < dd->first_dyn_alloc_ctxt; ++i) {
-		/*
-		 * Set up the (kernel) rcvhdr queue and egr TIDs.  If doing
-		 * re-init, the simplest way to handle this is to free
-		 * existing, and re-allocate.
-		 * Need to re-create rest of ctxt 0 ctxtdata as well.
-		 */
-		rcd = hfi1_rcd_get_by_index(dd, i);
-		if (!rcd)
-			continue;
+	for (pidx = 0; dd->rcd && pidx < dd->num_pports; pidx++) {
+		ppd = dd->pport + pidx;
 
-		lastfail = hfi1_create_rcvhdrq(dd, rcd);
-		if (!lastfail)
-			lastfail = hfi1_setup_eagerbufs(rcd);
-		if (!lastfail)
-			lastfail = hfi1_kern_exp_rcv_init(rcd, reinit);
-		if (lastfail) {
-			dd_dev_err(dd,
-				   "failed to allocate kernel ctxt's rcvhdrq and/or egr bufs\n");
-			ret = lastfail;
+		for (i = 0; i < dd->n_krcv_queues; ++i) {
+			u16 ctxt = ppd->rcv_context_base + i;
+			/*
+			 * Set up the (kernel) rcvhdr queue and egr TIDs.  If
+			 * doing re-init, the simplest way to handle this is
+			 * to free existing, and re-allocate.
+			 * Need to re-create rest of ctxt 0 ctxtdata as well.
+			 */
+			rcd = hfi1_rcd_get_by_index(dd, ctxt);
+			if (!rcd)
+				continue;
+
+			lastfail = hfi1_create_rcvhdrq(dd, rcd);
+			if (!lastfail)
+				lastfail = hfi1_setup_eagerbufs(rcd);
+			if (!lastfail)
+				lastfail = hfi1_kern_exp_rcv_init(rcd, reinit);
+			if (lastfail) {
+				dd_dev_err(dd,
+					   "failed to allocate kernel ctxt's rcvhdrq and/or egr bufs\n");
+				ret = lastfail;
+			}
+			/* enable IRQ */
+			hfi1_rcd_put(rcd);
 		}
-		/* enable IRQ */
-		hfi1_rcd_put(rcd);
 	}
 
 	/* Allocate enough memory for user event notification. */
@@ -917,8 +1582,7 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 		ppd = dd->pport + pidx;
 		if (dd->status)
-			/* Currently, we only have one port */
-			ppd->statusp = &dd->status->port;
+			ppd->statusp = &dd->status->ports[pidx];
 
 		set_mtu(ppd);
 	}
@@ -937,21 +1601,12 @@ done:
 	if (!ret) {
 		/* enable all interrupts from the chip */
 		enable_general_intr(dd);
-		init_qsfp_int(dd);
 
 		/* chip is OK for user apps; mark it as initialized */
 		for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 			ppd = dd->pport + pidx;
 
-			/*
-			 * start the serdes - must be after interrupts are
-			 * enabled so we are notified when the link goes up
-			 */
-			lastfail = bringup_serdes(ppd);
-			if (lastfail)
-				dd_dev_info(dd,
-					    "Failed to bring up port %u\n",
-					    ppd->port);
+			dd->params->start_port(ppd);
 
 			/*
 			 * Set status even if port serdes is not initialized
@@ -960,8 +1615,6 @@ done:
 			if (ppd->statusp)
 				*ppd->statusp |= HFI1_STATUS_CHIP_PRESENT |
 							HFI1_STATUS_INITTED;
-			if (!ppd->link_speed_enabled)
-				continue;
 		}
 	}
 
@@ -988,6 +1641,9 @@ static void stop_timers(struct hfi1_devdata *dd)
 		if (ppd->led_override_timer.function) {
 			del_timer_sync(&ppd->led_override_timer);
 			atomic_set(&ppd->led_override_timer_active, 0);
+		}
+		if (ppd->ibport_data.rvp.trap_timer.function) {
+			del_timer_sync(&ppd->ibport_data.rvp.trap_timer);
 		}
 	}
 }
@@ -1022,13 +1678,31 @@ static void shutdown_device(struct hfi1_devdata *dd)
 	}
 	dd->flags &= ~HFI1_INITTED;
 
-	/* mask and clean up interrupts */
-	set_intr_bits(dd, IS_FIRST_SOURCE, IS_LAST_SOURCE, false);
-	msix_clean_up_interrupts(dd);
+	/*
+	 * Drop all traps.  After this point, there should be no more cport
+	 * handlers that depend on driver state.
+	 */
+	clearall_cport_trap(dd);
+
+	/* disable all interrupts except cport response */
+	if (dd->params->chip_type == CHIP_WFR) {
+		/* WFR has no cport */
+		set_intr_bits(dd, 0, dd->params->is_last_source, false);
+		msix_shut_down_interrupts(dd, false);
+	} else {
+		/* mask all but the cport interrupt source */
+		set_intr_bits(dd, 0, JKR_MCTXT_CPORT_TO_PCIE_INT - 1, false);
+		set_intr_bits(dd, JKR_MCTXT_CPORT_TO_PCIE_INT + 1,
+			      dd->params->is_last_source, false);
+		msix_shut_down_interrupts(dd, true);
+	}
 
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
-		for (i = 0; i < dd->num_rcv_contexts; i++) {
-			rcd = hfi1_rcd_get_by_index(dd, i);
+		ppd = dd->pport + pidx;
+		for (i = 0; i < ppd->num_rcv_contexts; i++) {
+			u16 ctxt = ppd->rcv_context_base + i;
+
+			rcd = hfi1_rcd_get_by_index(dd, ctxt);
 			hfi1_rcvctrl(dd, HFI1_RCVCTRL_TAILUPD_DIS |
 				     HFI1_RCVCTRL_CTXT_DIS |
 				     HFI1_RCVCTRL_INTRAVAIL_DIS |
@@ -1050,27 +1724,22 @@ static void shutdown_device(struct hfi1_devdata *dd)
 	 */
 	udelay(20);
 
+	/* disable all contexts */
+	for (i = 0; i < dd->num_send_contexts; i++)
+		sc_disable(dd->send_contexts[i].sc);
+
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 		ppd = dd->pport + pidx;
 
-		/* disable all contexts */
-		for (i = 0; i < dd->num_send_contexts; i++)
-			sc_disable(dd->send_contexts[i].sc);
 		/* disable the send device */
-		pio_send_control(dd, PSC_GLOBAL_DISABLE);
+		pio_send_control(ppd, PSC_GLOBAL_DISABLE);
 
-		shutdown_led_override(ppd);
+		dd->params->shutdown_led_override(ppd);
 
-		/*
-		 * Clear SerdesEnable.
-		 * We can't count on interrupts since we are stopping.
-		 */
-		hfi1_quiet_serdes(ppd);
-		if (ppd->hfi1_wq)
-			flush_workqueue(ppd->hfi1_wq);
-		if (ppd->link_wq)
-			flush_workqueue(ppd->link_wq);
+		dd->params->stop_port(ppd);
 	}
+	if (dd->hfi1_wq)
+		flush_workqueue(dd->hfi1_wq);
 	sdma_exit(dd);
 }
 
@@ -1099,6 +1768,11 @@ void hfi1_free_ctxtdata(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 					  rcd->rcvhdrqtailaddr_dma);
 			rcd->rcvhdrtail_kvaddr = NULL;
 		}
+	}
+	if (rcd->rheq) {
+		dma_free_coherent(&dd->pcidev->dev, rheq_size(rcd),
+				  rcd->rheq, rcd->rheq_dma);
+		rcd->rheq = NULL;
 	}
 
 	/* all the RcvArray entries should have been cleared by now */
@@ -1164,7 +1838,7 @@ static void finalize_asic_data(struct hfi1_devdata *dd,
  * It cleans up and frees all data structures set up by
  * by hfi1_alloc_devdata().
  */
-void hfi1_free_devdata(struct hfi1_devdata *dd)
+static void hfi1_free_devdata(struct hfi1_devdata *dd)
 {
 	struct hfi1_asic_data *ad;
 	unsigned long flags;
@@ -1206,22 +1880,24 @@ void hfi1_free_devdata(struct hfi1_devdata *dd)
  * "extra" is for chip-specific data.
  */
 static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
-					       size_t extra)
+					       const struct chip_params *params)
 {
 	struct hfi1_devdata *dd;
+	size_t extra;
 	int ret, nports;
 
-	/* extra is * number of ports */
-	nports = extra / sizeof(struct hfi1_pportdata);
-
+	nports = params->num_ports;
+	extra = nports * sizeof(struct hfi1_pportdata);
 	dd = (struct hfi1_devdata *)rvt_alloc_device(sizeof(*dd) + extra,
 						     nports);
 	if (!dd)
 		return ERR_PTR(-ENOMEM);
+	dd->params = params;
 	dd->num_pports = nports;
 	dd->pport = (struct hfi1_pportdata *)(dd + 1);
 	dd->pcidev = pdev;
 	pci_set_drvdata(pdev, dd);
+	hfi1_snoop_init(dd);
 
 	ret = xa_alloc_irq(&hfi1_dev_table, &dd->unit, dd, xa_limit_32b,
 			GFP_KERNEL);
@@ -1252,12 +1928,12 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 	spin_lock_init(&dd->hfi1_diag_trans_lock);
 	spin_lock_init(&dd->sc_init_lock);
 	spin_lock_init(&dd->dc8051_memlock);
-	seqlock_init(&dd->sc2vl_lock);
 	spin_lock_init(&dd->sde_map_lock);
 	spin_lock_init(&dd->pio_map_lock);
 	mutex_init(&dd->dc8051_lock);
 	init_waitqueue_head(&dd->event_queue);
 	spin_lock_init(&dd->irq_src_lock);
+	INIT_WORK(&dd->freeze_work, handle_freeze);
 
 	dd->int_counter = alloc_percpu(u64);
 	if (!dd->int_counter) {
@@ -1298,7 +1974,6 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 		goto bail;
 	}
 
-	atomic_set(&dd->ipoib_rsm_usr_num, 0);
 	return dd;
 
 bail:
@@ -1349,6 +2024,7 @@ static void shutdown_one(struct pci_dev *);
 const struct pci_device_id hfi1_pci_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL0) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL1) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_CORNELIS, PCI_DEVICE_ID_CORNELIS1) },
 	{ 0, }
 };
 
@@ -1379,9 +2055,23 @@ static int __init hfi1_mod_init(void)
 {
 	int ret;
 
+	register_system_pinning_interface();
+	register_system_tid_ops();
+#ifdef CONFIG_HFI1_AMD
+	ret = hfi1_pin_amd_init();
+	if (ret)
+		goto bail;
+#endif
+
 	ret = dev_init();
 	if (ret)
 		goto bail;
+
+#ifdef CONFIG_HFI1_NVIDIA
+	ret = hfi1_pin_nvidia_init();
+	if (ret)
+		goto bail_dev;
+#endif
 
 	ret = node_affinity_init();
 	if (ret)
@@ -1448,12 +2138,21 @@ static int __init hfi1_mod_init(void)
 		pr_err("Unable to register driver: error %d\n", -ret);
 		goto bail_dev;
 	}
-	goto bail; /* all OK */
 
+	return 0;
 bail_dev:
 	hfi1_dbg_exit();
+#ifdef CONFIG_HFI1_NVIDIA
+	hfi1_pin_nvidia_free();
+#endif
 	dev_cleanup();
 bail:
+#ifdef CONFIG_HFI1_AMD
+	hfi1_pin_amd_free();
+#endif
+	deregister_system_tid_ops();
+	deregister_system_pinning_interface();
+
 	return ret;
 }
 
@@ -1472,6 +2171,15 @@ static void __exit hfi1_mod_cleanup(void)
 	WARN_ON(!xa_empty(&hfi1_dev_table));
 	dispose_firmware();	/* asymmetric with obtain_firmware() */
 	dev_cleanup();
+
+#ifdef CONFIG_HFI1_NVIDIA
+	hfi1_pin_nvidia_free();
+#endif
+#ifdef CONFIG_HFI1_AMD
+	hfi1_pin_amd_free();
+#endif
+	deregister_system_tid_ops();
+	deregister_system_pinning_interface();
 }
 
 module_exit(hfi1_mod_cleanup);
@@ -1506,10 +2214,10 @@ static void cleanup_device_data(struct hfi1_devdata *dd)
 	free_credit_return(dd);
 
 	/*
-	 * Free any resources still in use (usually just kernel contexts)
-	 * at unload; we do for ctxtcnt, because that's what we allocate.
+	 * Free any receive resources still in use (usually just kernel
+	 * contexts) at unload.
 	 */
-	for (ctxt = 0; dd->rcd && ctxt < dd->num_rcv_contexts; ctxt++) {
+	for (ctxt = 0; dd->rcd && ctxt < dd->num_rcd; ctxt++) {
 		struct hfi1_ctxtdata *rcd = dd->rcd[ctxt];
 
 		if (rcd) {
@@ -1520,19 +2228,32 @@ static void cleanup_device_data(struct hfi1_devdata *dd)
 
 	kfree(dd->rcd);
 	dd->rcd = NULL;
+	dd->num_rcd = 0;
 
 	free_pio_map(dd);
 	/* must follow rcv context free - need to remove rcv's hooks */
-	for (ctxt = 0; ctxt < dd->num_send_contexts; ctxt++)
-		sc_free(dd->send_contexts[ctxt].sc);
+	if (dd->send_contexts) {
+		for (ctxt = 0; ctxt < dd->num_send_contexts; ctxt++)
+			sc_free(dd->send_contexts[ctxt].sc);
+	}
 	dd->num_send_contexts = 0;
 	kfree(dd->send_contexts);
 	dd->send_contexts = NULL;
 	kfree(dd->hw_to_sw);
 	dd->hw_to_sw = NULL;
+	/* free netdev data */
+	hfi1_free_rx(dd);
 	kfree(dd->boardname);
 	vfree(dd->events);
 	vfree(dd->status);
+
+	/* finalize the cport */
+	stop_cport(dd);
+	/* release interrupts */
+	msix_clean_up_interrupts(dd);
+
+	/* register reads and writes are invalid after this call */
+	hfi1_pcie_ddcleanup(dd);
 }
 
 /*
@@ -1544,12 +2265,12 @@ static void postinit_cleanup(struct hfi1_devdata *dd)
 	hfi1_start_cleanup(dd);
 	hfi1_comp_vectors_clean_up(dd);
 	hfi1_dev_affinity_clean_up(dd);
-
-	hfi1_pcie_ddcleanup(dd);
-	hfi1_pcie_cleanup(dd->pcidev);
+	release_rsm_rules(dd);
 
 	cleanup_device_data(dd);
 
+	destroy_workqueues(dd);
+	hfi1_pcie_cleanup(dd->pcidev);
 	hfi1_free_devdata(dd);
 }
 
@@ -1557,39 +2278,49 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int ret = 0, j, pidx, initfail;
 	struct hfi1_devdata *dd;
-	struct hfi1_pportdata *ppd;
+	const struct chip_params *params;
 
 	/* First, lock the non-writable module parameters */
 	HFI1_CAP_LOCK();
 
 	/* Validate dev ids */
-	if (!(ent->device == PCI_DEVICE_ID_INTEL0 ||
+	if (ent->vendor == PCI_VENDOR_ID_INTEL &&
+	    (ent->device == PCI_DEVICE_ID_INTEL0 ||
 	      ent->device == PCI_DEVICE_ID_INTEL1)) {
-		dev_err(&pdev->dev, "Failing on unknown Intel deviceid 0x%x\n",
-			ent->device);
-		ret = -ENODEV;
-		goto bail;
+		params = &wfr_params;
+	} else if (ent->vendor == PCI_VENDOR_ID_CORNELIS &&
+		   ent->device == PCI_DEVICE_ID_CORNELIS1) {
+		params = &jkr_params;
+	} else {
+		dev_err(&pdev->dev, "Failing on unknown device %04x:%04x\n",
+			ent->vendor, ent->device);
+		return -ENODEV;
+	}
+
+	/* verify arrays are large enough */
+	if (params->num_int_csrs > LARGEST_NUM_INT_CSRS ||
+	    params->num_ports > LARGEST_NUM_PORTS ||
+	    params->pkey_table_size > MAX_PKEY_VALUES) {
+		dev_err(&pdev->dev, "Source arrays are compiled too small\n");
+		return -EINVAL;
 	}
 
 	/* Allocate the dd so we can get to work */
-	dd = hfi1_alloc_devdata(pdev, NUM_IB_PORTS *
-				sizeof(struct hfi1_pportdata));
-	if (IS_ERR(dd)) {
-		ret = PTR_ERR(dd);
-		goto bail;
-	}
+	dd = hfi1_alloc_devdata(pdev, params);
+	if (IS_ERR(dd))
+		return PTR_ERR(dd);
 
 	/* Validate some global module parameters */
 	ret = hfi1_validate_rcvhdrcnt(dd, rcvhdrcnt);
 	if (ret)
-		goto bail;
+		goto free_dd;
 
 	/* use the encoding function as a sanitization check */
 	if (!encode_rcv_header_entry_size(hfi1_hdrq_entsize)) {
 		dd_dev_err(dd, "Invalid HdrQ Entry size %u\n",
 			   hfi1_hdrq_entsize);
 		ret = -EINVAL;
-		goto bail;
+		goto free_dd;
 	}
 
 	/* The receive eager buffer size must be set before the receive
@@ -1614,7 +2345,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	} else {
 		dd_dev_err(dd, "Invalid Eager buffer size of 0\n");
 		ret = -EINVAL;
-		goto bail;
+		goto free_dd;
 	}
 
 	/* restrict value of hfi1_rcvarr_split */
@@ -1622,24 +2353,32 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	ret = hfi1_pcie_init(dd);
 	if (ret)
-		goto bail;
-
-	/*
-	 * Do device-specific initialization, function table setup, dd
-	 * allocation, etc.
-	 */
-	ret = hfi1_init_dd(dd);
-	if (ret)
-		goto clean_bail; /* error already printed */
+		goto free_dd;
 
 	ret = create_workqueues(dd);
 	if (ret)
-		goto clean_bail;
+		goto pcie_cleanup;
+
+	/*
+	 * Do device-specific initialization.  If hfi1_init_dd() fails, it
+	 * cleans up after itself.
+	 */
+	ret = hfi1_init_dd(dd);
+	if (ret)
+		goto destroy_wqs; /* error already printed */
 
 	/* do the generic initialization */
-	initfail = hfi1_init(dd, 0);
+	if (!ret)
+		initfail = hfi1_init(dd, 0);
 
-	ret = hfi1_register_ib_device(dd);
+	if (!initfail && !ret)
+		ret = hfi1_mad_init(dd);
+
+	if (!initfail && !ret)
+		ret = hfi1_register_ib_device(dd);
+
+	if (!initfail && !ret)
+		ret = init_cport_trap128(dd); /* after IB device register */
 
 	/*
 	 * Now ready for use.  this should be cleared whenever we
@@ -1658,25 +2397,18 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		dd_dev_err(dd, "Failed to create /dev devices: %d\n", -j);
 
 	if (initfail || ret) {
+		stop_cport(dd);
 		msix_clean_up_interrupts(dd);
 		stop_timers(dd);
 		flush_workqueue(ib_wq);
-		for (pidx = 0; pidx < dd->num_pports; ++pidx) {
-			hfi1_quiet_serdes(dd->pport + pidx);
-			ppd = dd->pport + pidx;
-			if (ppd->hfi1_wq) {
-				destroy_workqueue(ppd->hfi1_wq);
-				ppd->hfi1_wq = NULL;
-			}
-			if (ppd->link_wq) {
-				destroy_workqueue(ppd->link_wq);
-				ppd->link_wq = NULL;
-			}
-		}
+		for (pidx = 0; pidx < dd->num_pports; ++pidx)
+			dd->params->stop_port(dd->pport + pidx);
 		if (!j)
 			hfi1_device_remove(dd);
-		if (!ret)
+		if (!ret) {
 			hfi1_unregister_ib_device(dd);
+			hfi1_mad_deinit(dd);
+		}
 		postinit_cleanup(dd);
 		if (initfail)
 			ret = initfail;
@@ -1687,8 +2419,12 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	return 0;
 
-clean_bail:
+destroy_wqs:
+	destroy_workqueues(dd);
+pcie_cleanup:
 	hfi1_pcie_cleanup(pdev);
+free_dd:
+	hfi1_free_devdata(dd);
 bail:
 	return ret;
 }
@@ -1721,15 +2457,14 @@ static void remove_one(struct pci_dev *pdev)
 	/* unregister from IB core */
 	hfi1_unregister_ib_device(dd);
 
-	/* free netdev data */
-	hfi1_free_rx(dd);
+	/* stop handling LOCAL_MAD_ from CPORT */
+	hfi1_mad_deinit(dd);
 
 	/*
 	 * Disable the IB link, disable interrupts on the device,
 	 * clear dma engines, etc.
 	 */
 	shutdown_device(dd);
-	destroy_workqueues(dd);
 
 	stop_timers(dd);
 
@@ -1757,11 +2492,9 @@ static void shutdown_one(struct pci_dev *pdev)
  */
 int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 {
-	unsigned amt;
+	u32 amt = rcvhdrq_size(rcd);
 
 	if (!rcd->rcvhdrq) {
-		amt = rcvhdrq_size(rcd);
-
 		rcd->rcvhdrq = dma_alloc_coherent(&dd->pcidev->dev, amt,
 						  &rcd->rcvhdrq_dma,
 						  GFP_KERNEL);
@@ -1772,6 +2505,7 @@ int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 				   amt, rcd->ctxt);
 			goto bail;
 		}
+		printk("%s: ctxt %d, rcvhdrq 0x%llx, rcvhdrq_dma 0x%llx, amt 0x%x\n", __func__, rcd->ctxt, (unsigned long long)rcd->rcvhdrq, (unsigned long long)rcd->rcvhdrq_dma, amt);
 
 		if (HFI1_CAP_KGET_MASK(rcd->flags, DMA_RTAIL) ||
 		    HFI1_CAP_UGET_MASK(rcd->flags, DMA_RTAIL)) {
@@ -1779,20 +2513,43 @@ int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 								    PAGE_SIZE,
 								    &rcd->rcvhdrqtailaddr_dma,
 								    GFP_KERNEL);
-			if (!rcd->rcvhdrtail_kvaddr)
-				goto bail_free;
+			if (!rcd->rcvhdrtail_kvaddr) {
+				dd_dev_err(dd,
+					   "attempt to allocate 1 page for ctxt %u rcvhdrqtailaddr failed\n",
+					   rcd->ctxt);
+				goto rhq_free;
+			}
+		}
+
+		if (dd->params->chip_type != CHIP_WFR) {
+			u32 rheq_amt = rheq_size(rcd);
+
+			rcd->rheq = dma_alloc_coherent(&dd->pcidev->dev,
+						       rheq_amt,
+						       &rcd->rheq_dma,
+						       GFP_KERNEL);
+			if (!rcd->rheq) {
+				dd_dev_err(dd,
+					   "attempt to allocate %d bytes for ctxt %u rheq failed\n",
+					   rheq_amt, rcd->ctxt);
+				goto tail_free;
+			}
 		}
 	}
 
-	set_hdrq_regs(rcd->dd, rcd->ctxt, rcd->rcvhdrqentsize,
-		      rcd->rcvhdrq_cnt);
+	set_hdrq_regs(rcd->ppd, rcd->ctxt, rcd->rcvhdrqentsize,
+		      rcd->rcvhdrq_cnt, rcd->kdeth_rcv_hdr);
 
 	return 0;
 
-bail_free:
-	dd_dev_err(dd,
-		   "attempt to allocate 1 page for ctxt %u rcvhdrqtailaddr failed\n",
-		   rcd->ctxt);
+tail_free:
+	if (rcd->rcvhdrtail_kvaddr) {
+		dma_free_coherent(&dd->pcidev->dev, PAGE_SIZE,
+				  (void *)hfi1_rcvhdrtail_kvaddr(rcd),
+				  rcd->rcvhdrqtailaddr_dma);
+		rcd->rcvhdrtail_kvaddr = NULL;
+	}
+rhq_free:
 	dma_free_coherent(&dd->pcidev->dev, amt, rcd->rcvhdrq,
 			  rcd->rcvhdrq_dma);
 	rcd->rcvhdrq = NULL;
@@ -1801,11 +2558,11 @@ bail:
 }
 
 /**
- * hfi1_setup_eagerbufs - llocate eager buffers, both kernel and user
+ * hfi1_setup_eagerbufs - allocate eager buffers, both kernel and user
  * contexts.
  * @rcd: the context we are setting up.
  *
- * Allocate the eager TID buffers and program them into hip.
+ * Allocate the eager TID buffers and program them into the chip.
  * They are no longer completely contiguous, we do multiple allocation
  * calls.  Otherwise we get the OOM code involved, by asking for too
  * much per call, with disastrous results on some kernels.
@@ -1954,9 +2711,20 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 		goto bail_rcvegrbuf_phys;
 	}
 
+	/*
+	 * Enable RcvArray access on JKR and later by configuring RcvEgrCtrl and
+	 * RcvTidCtrl before writing TIDs to the RcvArray.
+	 *
+	 * Call HFI1_RCVCTRL_TID_CONFIG only after eager_base, egrbufs.alloced,
+	 * expected_count, and expected_base are initialized in rcd.  The last
+	 * 3 of the 4 are initialized above in this function.
+	 */
+	hfi1_rcvctrl(dd, HFI1_RCVCTRL_TID_CONFIG, rcd);
+
 	for (idx = 0; idx < rcd->egrbufs.alloced; idx++) {
-		hfi1_put_tid(dd, rcd->eager_base + idx, PT_EAGER,
-			     rcd->egrbufs.rcvtids[idx].dma, order);
+		dd->params->put_tid(rcd, idx, PT_EAGER,
+				    rcd->egrbufs.rcvtids[idx].dma, order,
+				    false);
 		cond_resched();
 	}
 
@@ -1976,4 +2744,37 @@ bail_rcvegrbuf_phys:
 	}
 
 	return ret;
+}
+
+/*
+ * Return number of requested user ports for the given unit and port based
+ * on information given in the module parameter num_user_contexts.
+ * Return -1 (use non-HT cores) if the corresponding entry is not set.
+ */
+int get_num_user_contexts(struct hfi1_devdata *dd, int pidx)
+{
+	struct hfi1_devdata *xdd;
+	int start;
+	int i;
+
+	/* find the count of ports from earlier units */
+	start = 0;
+	for (i = 0; i < dd->unit; i++) {
+		xdd = hfi1_lookup(i);
+		/* previous units should exist - check anyway */
+		if (!xdd) {
+			dd_dev_err(dd, "%s: unit %d not found?\n", __func__, i);
+			return -1;
+		}
+		start += xdd->num_pports;
+	}
+
+	/* adjust for the port on this unit */
+	start += pidx;
+
+	/* check if enough elements are set for this unit's port */
+	if (start >= num_user_contexts_count)
+		return -1;
+
+	return num_user_contexts_array[start];
 }
