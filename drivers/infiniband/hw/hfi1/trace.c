@@ -147,11 +147,6 @@ void hfi1_trace_parse_16b_bth(struct ib_other_headers *ohdr,
 	*qpn = ib_bth_get_qpn(ohdr);
 }
 
-static u16 ib_get_len(const struct ib_header *hdr)
-{
-	return be16_to_cpu(hdr->lrh[2]);
-}
-
 void hfi1_trace_parse_9b_hdr(struct ib_header *hdr, bool sc5,
 			     u8 *lnh, u8 *lver, u8 *sl, u8 *sc,
 			     u16 *len, u32 *dlid, u32 *slid)
@@ -432,25 +427,23 @@ out:
 	return ret;
 }
 
-const char *parse_sdma_flags(
-	struct trace_seq *p,
-	u64 desc0, u64 desc1)
+const char *parse_sdma_flags(struct trace_seq *p, u64 *qw, u8 first, u8 last)
 {
 	const char *ret = trace_seq_buffer_ptr(p);
 	char flags[5] = { 'x', 'x', 'x', 'x', 0 };
 
-	flags[0] = (desc1 & SDMA_DESC1_INT_REQ_FLAG) ? 'I' : '-';
-	flags[1] = (desc1 & SDMA_DESC1_HEAD_TO_HOST_FLAG) ?  'H' : '-';
-	flags[2] = (desc0 & SDMA_DESC0_FIRST_DESC_FLAG) ? 'F' : '-';
-	flags[3] = (desc0 & SDMA_DESC0_LAST_DESC_FLAG) ? 'L' : '-';
+	flags[0] = (qw[1] & SDMA_DESC1_INT_REQ_FLAG) ? 'I' : '-';
+	flags[1] = (qw[1] & SDMA_DESC1_HEAD_TO_HOST_FLAG) ?  'H' : '-';
+	flags[2] = first ? 'F' : '-';
+	flags[3] = last ? 'L' : '-';
 	trace_seq_printf(p, "%s", flags);
-	if (desc0 & SDMA_DESC0_FIRST_DESC_FLAG)
+	if (first)
 		trace_seq_printf(p, " amode:%u aidx:%u alen:%u",
-				 (u8)((desc1 >> SDMA_DESC1_HEADER_MODE_SHIFT) &
+				 (u8)((qw[1] >> SDMA_DESC1_HEADER_MODE_SHIFT) &
 				      SDMA_DESC1_HEADER_MODE_MASK),
-				 (u8)((desc1 >> SDMA_DESC1_HEADER_INDEX_SHIFT) &
+				 (u8)((qw[1] >> SDMA_DESC1_HEADER_INDEX_SHIFT) &
 				      SDMA_DESC1_HEADER_INDEX_MASK),
-				 (u8)((desc1 >> SDMA_DESC1_HEADER_DWS_SHIFT) &
+				 (u8)((qw[1] >> SDMA_DESC1_HEADER_DWS_SHIFT) &
 				      SDMA_DESC1_HEADER_DWS_MASK));
 	return ret;
 }
@@ -513,6 +506,20 @@ const char *hfi1_trace_print_rsm_hist(struct trace_seq *p, unsigned int ctxt)
 	}
 	trace_seq_putc(p, 0);
 	return ret;
+}
+
+const char *hfi1_memtype_str(unsigned int mt)
+{
+	switch (mt) {
+	case HFI1_MEMINFO_TYPE_SYSTEM:
+		return "System";
+	case HFI1_MEMINFO_TYPE_AMD:
+		return "AMD";
+	case HFI1_MEMINFO_TYPE_NVIDIA:
+		return "NV";
+	}
+
+	return "<unknown>";
 }
 
 __hfi1_trace_fn(AFFINITY);

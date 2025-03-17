@@ -19,6 +19,7 @@
 #include "qp.h"
 #include "sdma.h"
 #include "fault.h"
+#include "cport.h"
 
 static struct dentry *hfi1_dbg_root;
 
@@ -95,14 +96,19 @@ static int _opcode_stats_seq_show(struct seq_file *s, void *v)
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
 	struct hfi1_ctxtdata *rcd;
+	int pidx;
 
-	for (j = 0; j < dd->first_dyn_alloc_ctxt; j++) {
-		rcd = hfi1_rcd_get_by_index(dd, j);
-		if (rcd) {
-			n_packets += rcd->opstats->stats[i].n_packets;
-			n_bytes += rcd->opstats->stats[i].n_bytes;
+	for (pidx = 0; pidx < dd->num_pports; pidx++) {
+		for (j = 0; j < dd->n_krcv_queues; j++) {
+			u16 ctxt = dd->pport[pidx].rcv_context_base + j;
+
+			rcd = hfi1_rcd_get_by_index(dd, ctxt);
+			if (rcd) {
+				n_packets += rcd->opstats->stats[i].n_packets;
+				n_bytes += rcd->opstats->stats[i].n_bytes;
+			}
+			hfi1_rcd_put(rcd);
 		}
-		hfi1_rcd_put(rcd);
 	}
 	return opcode_stats_show(s, i, n_packets, n_bytes);
 }
@@ -152,10 +158,12 @@ static void *_ctx_stats_seq_start(struct seq_file *s, loff_t *pos)
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
 
-	if (!*pos)
-		return SEQ_START_TOKEN;
-	if (*pos >= dd->first_dyn_alloc_ctxt)
+	/* plan: iterate through all rcds, looking for kernel contexts */
+
+	/* starting point must be in range */
+	if (*pos >= dd->num_rcd)
 		return NULL;
+
 	return pos;
 }
 
@@ -164,12 +172,10 @@ static void *_ctx_stats_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
 
-	if (v == SEQ_START_TOKEN)
-		return pos;
-
 	++*pos;
-	if (*pos >= dd->first_dyn_alloc_ctxt)
+	if (*pos >= dd->num_rcd)
 		return NULL;
+
 	return pos;
 }
 
@@ -187,25 +193,26 @@ static int _ctx_stats_seq_show(struct seq_file *s, void *v)
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
 	struct hfi1_ctxtdata *rcd;
 
-	if (v == SEQ_START_TOKEN) {
-		seq_puts(s, "Ctx:npkts\n");
-		return 0;
-	}
-
 	spos = v;
 	i = *spos;
 
-	rcd = hfi1_rcd_get_by_index_safe(dd, i);
-	if (!rcd)
-		return SEQ_SKIP;
+	if (i == 0)
+		seq_puts(s, "Ctx:npkts\n");
 
-	for (j = 0; j < ARRAY_SIZE(rcd->opstats->stats); j++)
-		n_packets += rcd->opstats->stats[j].n_packets;
+	rcd = hfi1_rcd_get_by_index(dd, i);
+	if (!rcd)
+		return 0;
+
+	/* only kernel contexts have opstats */
+	if (rcd->opstats) {
+		for (j = 0; j < ARRAY_SIZE(rcd->opstats->stats); j++)
+			n_packets += rcd->opstats->stats[j].n_packets;
+	}
 
 	hfi1_rcd_put(rcd);
 
 	if (!n_packets)
-		return SEQ_SKIP;
+		return 0;
 
 	seq_printf(s, "  %llu:%llu\n", i, n_packets);
 	return 0;
@@ -326,7 +333,7 @@ static void *_rcds_seq_start(struct seq_file *s, loff_t *pos)
 
 	ibd = (struct hfi1_ibdev *)s->private;
 	dd = dd_from_dev(ibd);
-	if (!dd->rcd || *pos >= dd->n_krcv_queues)
+	if (!dd->rcd || *pos >= dd->num_rcd)
 		return NULL;
 	return pos;
 }
@@ -337,7 +344,7 @@ static void *_rcds_seq_next(struct seq_file *s, void *v, loff_t *pos)
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
 
 	++*pos;
-	if (!dd->rcd || *pos >= dd->num_rcv_contexts)
+	if (!dd->rcd || *pos >= dd->num_rcd)
 		return NULL;
 	return pos;
 }
@@ -354,7 +361,7 @@ static int _rcds_seq_show(struct seq_file *s, void *v)
 	loff_t *spos = v;
 	loff_t i = *spos;
 
-	rcd = hfi1_rcd_get_by_index_safe(dd, i);
+	rcd = hfi1_rcd_get_by_index(dd, i);
 	if (rcd)
 		seqfile_dump_rcd(s, rcd);
 	hfi1_rcd_put(rcd);
@@ -500,7 +507,6 @@ static void check_dyn_flag(u64 scratch0, char *p, int size, int *used,
 static ssize_t asic_flags_read(struct file *file, char __user *buf,
 			       size_t count, loff_t *ppos)
 {
-	struct hfi1_pportdata *ppd;
 	struct hfi1_devdata *dd;
 	u64 scratch0;
 	char *tmp;
@@ -509,8 +515,7 @@ static ssize_t asic_flags_read(struct file *file, char __user *buf,
 	int used;
 	int i;
 
-	ppd = private2ppd(file);
-	dd = ppd->dd;
+	dd = private2dd(file);
 	size = PAGE_SIZE;
 	used = 0;
 	tmp = kmalloc(size, GFP_KERNEL);
@@ -549,7 +554,6 @@ static ssize_t asic_flags_read(struct file *file, char __user *buf,
 static ssize_t asic_flags_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
-	struct hfi1_pportdata *ppd;
 	struct hfi1_devdata *dd;
 	char *buff;
 	int ret;
@@ -557,8 +561,10 @@ static ssize_t asic_flags_write(struct file *file, const char __user *buf,
 	u64 scratch0;
 	u64 clear;
 
-	ppd = private2ppd(file);
-	dd = ppd->dd;
+	dd = private2dd(file);
+
+	if (!dd->asic_data)
+		return -EINVAL;
 
 	/* zero terminate and read the expected integer */
 	buff = memdup_user_nul(buf, count);
@@ -636,7 +642,6 @@ static ssize_t debugfs_lcb_read(struct file *file, char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	struct hfi1_pportdata *ppd = private2ppd(file);
-	struct hfi1_devdata *dd = ppd->dd;
 	unsigned long total, csr_off;
 	u64 data;
 
@@ -657,7 +662,7 @@ static ssize_t debugfs_lcb_read(struct file *file, char __user *buf,
 
 	csr_off = LCB_START + *ppos;
 	for (total = 0; total < count; total += 8, csr_off += 8) {
-		if (read_lcb_csr(dd, csr_off, (u64 *)&data))
+		if (read_lcb_csr(ppd, csr_off, (u64 *)&data))
 			break; /* failed */
 		if (put_user(data, (unsigned long __user *)(buf + total)))
 			break;
@@ -670,7 +675,6 @@ static ssize_t debugfs_lcb_write(struct file *file, const char __user *buf,
 				 size_t count, loff_t *ppos)
 {
 	struct hfi1_pportdata *ppd = private2ppd(file);
-	struct hfi1_devdata *dd = ppd->dd;
 	unsigned long total, csr_off, data;
 
 	if (*ppos < 0)
@@ -692,7 +696,7 @@ static ssize_t debugfs_lcb_write(struct file *file, const char __user *buf,
 	for (total = 0; total < count; total += 8, csr_off += 8) {
 		if (get_user(data, (unsigned long __user *)(buf + total)))
 			break;
-		if (write_lcb_csr(dd, csr_off, data))
+		if (write_lcb_csr(ppd, csr_off, data))
 			break; /* failed */
 	}
 	*ppos += total;
@@ -1121,8 +1125,15 @@ static const struct counter_info cntr_ops[] = {
 	DEBUGFS_OPS("portcounter_names", portnames_read, NULL),
 };
 
+static const struct counter_info wfr_cntr_ops[] = {
+	DEBUGFS_OPS("asic_flags", asic_flags_read, asic_flags_write),
+};
+
 static const struct counter_info port_cntr_ops[] = {
 	DEBUGFS_OPS("port%dcounters", portcntrs_debugfs_read, NULL),
+};
+
+static const struct counter_info wfr_port_cntr_ops[] = {
 	DEBUGFS_XOPS("i2c1", i2c1_debugfs_read, i2c1_debugfs_write,
 		     i2c1_debugfs_open, i2c1_debugfs_release),
 	DEBUGFS_XOPS("i2c2", i2c2_debugfs_read, i2c2_debugfs_write,
@@ -1135,7 +1146,6 @@ static const struct counter_info port_cntr_ops[] = {
 	DEBUGFS_XOPS("exprom_wp", exprom_wp_debugfs_read,
 		     exprom_wp_debugfs_write, exprom_wp_debugfs_open,
 		     exprom_wp_debugfs_release),
-	DEBUGFS_OPS("asic_flags", asic_flags_read, asic_flags_write),
 	DEBUGFS_OPS("dc8051_memory", dc8051_memory_read, NULL),
 	DEBUGFS_OPS("lcb", debugfs_lcb_read, debugfs_lcb_write),
 };
@@ -1177,6 +1187,205 @@ DEBUGFS_SEQ_FILE_OPS(sdma_cpu_list);
 DEBUGFS_SEQ_FILE_OPEN(sdma_cpu_list)
 DEBUGFS_FILE_OPS(sdma_cpu_list);
 
+static ssize_t link_debug_read(struct file *file,
+			       char __user *user_buf, size_t count,
+			       loff_t *ppos)
+{
+	//struct hfi1_devdata *dd = file->private_data;
+	return 0;
+}
+
+static void fake_linkup(struct hfi1_devdata *dd, int pidx)
+{
+	struct hfi1_pportdata *ppd;
+
+	if (pidx < 0 || pidx >= dd->num_pports) {
+		printk("%s: invalid port index %d\n", __func__, pidx);
+		return;
+	}
+	ppd = &dd->pport[pidx];
+
+	printk("%s: fake linkup port index %d\n", __func__, pidx);
+	ppd->host_link_state = HLS_UP_INIT;
+	handle_linkup_change(ppd, 1);
+}
+
+static void fake_linkdown(struct hfi1_devdata *dd, int pidx)
+{
+	struct hfi1_pportdata *ppd;
+
+	if (pidx < 0 || pidx >= dd->num_pports) {
+		printk("%s: invalid port index %d\n", __func__, pidx);
+		return;
+	}
+	ppd = &dd->pport[pidx];
+
+	printk("%s: fake linkdown port index %d\n", __func__, pidx);
+	ppd->host_link_state = HLS_DN_OFFLINE;
+	handle_linkup_change(ppd, 0);
+}
+
+static void fake_active(struct hfi1_devdata *dd, int pidx)
+{
+	struct hfi1_pportdata *ppd;
+	struct ib_event event = { 0 };
+	u32 lid;
+	u8 lmc;
+
+	if (pidx < 0 || pidx >= dd->num_pports) {
+		printk("%s: invalid port index %d\n", __func__, pidx);
+		return;
+	}
+	ppd = &dd->pport[pidx];
+
+	/* IB Port 1 = LID 1, IB Port 2 = LID 2 */
+	lid = pidx + 1;
+	lmc = 0x0;	// only allow 1
+
+	printk("%s: fake active port index %d, lid %d (with set_mtu call)\n",
+		__func__, pidx, lid);
+
+	/*
+	 * From __subn_set_opa_portinfo().  In there, this comes after
+	 * call to hfi1_set_lid().
+	 *
+	 * Need to set SendCtxtCreditCtrl.  Can be set after setting
+	 * host_link_state, but it may be simpler to do it before.
+	 */
+	set_mtu(ppd);
+
+	// swiped from __subn_set_opa_portinfo()
+	hfi1_set_lid(ppd, lid, lmc);
+
+	ppd->host_link_state = HLS_UP_ACTIVE;
+
+	event.device = &dd->verbs_dev.rdi.ibdev;
+	event.element.port_num = pidx + 1;
+	event.event = IB_EVENT_LID_CHANGE;
+	ib_dispatch_event(&event);
+	ppd->guids[HFI1_PORT_GUID_INDEX + 1] = be64_to_cpu(OPA_MAKE_ID(lid));
+	event.event = IB_EVENT_GID_CHANGE;
+	ib_dispatch_event(&event);
+
+	// swiped from set_link_state - sorta.  go_port_active() is new in this
+	// stack of patches
+	//can't call update_statusp() - static to chip.c, but may be needed
+	//for faking user libraries
+	//update_statusp(ppd, IB_PORT_ACTIVE);
+	go_port_active(ppd);
+}
+
+static ssize_t link_debug_write(struct file *file,
+				const char __user *user_buf,
+				size_t count, loff_t *ppos)
+{
+	struct hfi1_devdata *dd = file->private_data;
+	char buf[128];
+	size_t buf_size;
+
+	buf_size = min(count, (sizeof(buf) - 1));
+	if (copy_from_user(buf, user_buf, buf_size))
+		return -EFAULT;
+	buf[buf_size] = 0;
+
+	if (strcmp(buf, "linkup0\n") == 0) {
+		fake_linkup(dd, 0);
+	} else if (strcmp(buf, "linkup1\n") == 0) {
+		fake_linkup(dd, 1);
+	} else if (strcmp(buf, "linkdown0\n") == 0) {
+		fake_linkdown(dd, 0);
+	} else if (strcmp(buf, "linkdown1\n") == 0) {
+		fake_linkdown(dd, 1);
+	} else if (strcmp(buf, "active0\n") == 0) {
+		fake_active(dd, 0);
+	} else if (strcmp(buf, "active1\n") == 0) {
+		fake_active(dd, 1);
+	} else {
+		printk("%s: unknown command \"%s\"\n", __func__, buf);
+	}
+
+	return count;
+}
+
+static const struct file_operations _link_debug_ops = {
+	.open = simple_open,
+	.read = link_debug_read,
+	.write = link_debug_write,
+	.llseek = default_llseek,
+};
+
+static ssize_t cport_ping_read(struct file *file,
+			       char __user *user_buf, size_t count,
+			       loff_t *ppos)
+{
+	struct hfi1_devdata *dd = file->private_data;
+	char buf[16];
+	loff_t pos = *ppos;
+	int len;
+
+	if (pos < 0 || !count)
+		return -EINVAL;
+
+	len = snprintf(buf, sizeof(buf), "%u", atomic_read(&dd->cport->nping));
+	if (pos >= len)
+		return 0;
+	if (count > len - pos)
+		count = len - pos;
+	if (copy_to_user(user_buf, buf + *ppos, count))
+		return -EFAULT;
+
+	*ppos += count;
+	return count;
+}
+
+static ssize_t cport_ping_write(struct file *file,
+				const char __user *user_buf,
+				size_t count, loff_t *ppos)
+{
+	struct hfi1_devdata *dd = file->private_data;
+	char buf[16];
+	char *start = buf;
+	size_t buf_size;
+	unsigned int value;
+	int rc;
+
+	buf_size = min(count, (sizeof(buf) - 1));
+	if (copy_from_user(buf, user_buf, buf_size))
+		return -EFAULT;
+	buf[buf_size] = 0;
+	while (*start == ' ')
+		start++;
+
+	rc = kstrtouint(start, 0, &value);
+	if (rc)
+		return -EINVAL;
+
+	rc = cport_ping_start(dd, value);
+	if (rc)
+		return rc;
+	return count;
+}
+
+static const struct file_operations _cport_ping_ops = {
+	.open = simple_open,
+	.read = cport_ping_read,
+	.write = cport_ping_write,
+	.llseek = default_llseek,
+};
+
+static void add_port_files(struct dentry *root, struct hfi1_pportdata *ppd,
+		      const struct counter_info *port_ops, int num_ops)
+{
+	char name[64];
+	int i;
+
+	for (i = 0; i < num_ops; i++) {
+		snprintf(name, sizeof(name), port_ops[i].name, ppd->port);
+		debugfs_create_file(name, !port_ops[i].ops.write ? 0444 : 0644,
+				    root, ppd, &port_ops[i].ops);
+	}
+}
+
 void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 {
 	char name[sizeof("port0counters") + 1];
@@ -1185,7 +1394,7 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 	struct hfi1_pportdata *ppd;
 	struct dentry *root;
 	int unit = dd->unit;
-	int i, j;
+	int i;
 
 	if (!hfi1_dbg_root)
 		return;
@@ -1208,25 +1417,31 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 	debugfs_create_file("pios", 0444, root, ibd, &_pios_file_ops);
 	debugfs_create_file("sdma_cpu_list", 0444, root, ibd,
 			    &_sdma_cpu_list_file_ops);
+	if (dd->cport)
+		debugfs_create_file("cport_ping", 0644, root, dd, &_cport_ping_ops);
+	debugfs_create_file("link_debug", 0644, root, dd, &_link_debug_ops);
 
 	/* dev counter files */
 	for (i = 0; i < ARRAY_SIZE(cntr_ops); i++)
 		debugfs_create_file(cntr_ops[i].name, 0444, root, dd,
 				    &cntr_ops[i].ops);
 
-	/* per port files */
-	for (ppd = dd->pport, j = 0; j < dd->num_pports; j++, ppd++)
-		for (i = 0; i < ARRAY_SIZE(port_cntr_ops); i++) {
-			snprintf(name,
-				 sizeof(name),
-				 port_cntr_ops[i].name,
-				 j + 1);
-			debugfs_create_file(name,
-					    !port_cntr_ops[i].ops.write ?
-						    S_IRUGO :
-						    S_IRUGO | S_IWUSR,
-					    root, ppd, &port_cntr_ops[i].ops);
+	if (dd->params->chip_type == CHIP_WFR) {
+		for (i = 0; i < ARRAY_SIZE(wfr_cntr_ops); i++) {
+			debugfs_create_file(wfr_cntr_ops[i].name, 0444, root,
+					    dd, &wfr_cntr_ops[i].ops);
 		}
+	}
+
+	/* per port files */
+	for (ppd = dd->pport, i = 0; i < dd->num_pports; i++, ppd++) {
+		add_port_files(root, ppd, port_cntr_ops,
+			       ARRAY_SIZE(port_cntr_ops));
+		if (dd->params->chip_type == CHIP_WFR) {
+			add_port_files(root, ppd, wfr_port_cntr_ops,
+				       ARRAY_SIZE(wfr_port_cntr_ops));
+		}
+	}
 
 	hfi1_fault_init_debugfs(ibd);
 }

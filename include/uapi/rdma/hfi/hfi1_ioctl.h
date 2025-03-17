@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause) */
 /*
+ * Copyright(c) 2024 Cornelis Networks, Inc.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -52,6 +53,7 @@
 #ifndef _LINUX__HFI1_IOCTL_H
 #define _LINUX__HFI1_IOCTL_H
 #include <linux/types.h>
+#include <rdma/ib_user_ioctl_cmds.h>
 
 /*
  * This structure is passed to the driver to tell it where
@@ -106,6 +108,70 @@ struct hfi1_tid_info {
 	/* length of transfer buffer programmed by this request */
 	__u32 length;
 };
+
+/* HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_BITS should be the same as HFI1_MEMINFO_TYPE_ENTRY_BITS */
+#define HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_BITS 4
+#define HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_MASK ((1UL << HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_BITS) - 1)
+#define HFI1_TID_UPDATE_V3_FLAGS_RESERVED_MASK (~(__u64)(HFI1_TID_UPDATE_V3_FLAGS_MEMINFO_MASK))
+
+struct hfi1_tid_info_v3 {
+	/* virtual address of first page in transfer */
+	__aligned_u64 vaddr;
+	/* pointer to tid array. this array is big enough */
+	__aligned_u64 tidlist;
+	/* number of tids programmed by this request */
+	__u32 tidcnt;
+	/* length of transfer buffer programmed by this request */
+	__u32 length;
+
+	/*
+	 * bits 0-3 memory_type
+	 *   memory_type=0 will always mean system memory
+	 *   See HFI1_MEMINFO_TYPE* defines
+	 * bits 4-63 reserved; must be 0
+	 */
+	__aligned_u64 flags;
+	/* Reserved; must be 0 */
+	__aligned_u64 context;
+};
+
+#ifdef NVIDIA_GPU_DIRECT
+
+#define HFI1_TID_UPDATE_V2_FLAGS_GPU_BITS 1
+#define HFI1_TID_UPDATE_V2_FLAGS_GPU_MASK ((1UL << HFI1_TID_UPDATE_V2_FLAGS_GPU_BITS) - 1)
+#define HFI1_TID_UPDATE_V2_FLAGS_RESERVED_MASK (~(__u16)HFI1_TID_UPDATE_V2_FLAGS_GPU_MASK)
+/*
+ * TID info struct for HFI1_IOCTL_TID_UPDATE_V2.
+ *
+ * For backwards compatibility with PSM2-CUDA.
+ *
+ * New userspace code should use HFI1_IOCTL_TID_UPDATE_V3 for device memory
+ * TID-programming.
+ */
+
+/*
+ * struct hfi1_tid_info_v2 is a copy of struct hfi1_tid_info plus a flags field
+ * added at the end of the structure. A new structure is defined instead of
+ * adding the flags field to struct hfi1_tid_info to prevent changing the IOCTL
+ * command number and maintain backwards compatibility with older PSM versions.
+ */
+struct hfi1_tid_info_v2 {
+	/* virtual address of first page in transfer */
+	__aligned_u64 vaddr;
+	/* pointer to tid array. this array is big enough */
+	__aligned_u64 tidlist;
+	/* number of tids programmed by this request */
+	__u32 tidcnt;
+	/* length of transfer buffer programmed by this request */
+	__u32 length;
+	/*
+	 * bit 0 - BUF_GPU_MEM_BIT - legacy NVIDIA support for PSM2; should not
+	 *         have HFI1_BUF_MEMINFO
+	 * bit 1-15 - reserved
+	 */
+	__u16 flags;
+};
+#endif
 
 /*
  * This structure is returned by the driver immediately after
@@ -171,4 +237,421 @@ struct hfi1_base_info {
 	__aligned_u64 subctxt_rcvegrbuf;
 	__aligned_u64 subctxt_rcvhdrbuf;
 };
+
+struct hfi1_pin_stats {
+	int memtype;
+	/*
+	 * If -1, driver returns total number of stats entries for the given
+	 * memtype, otherwise returns stats for the given { memtype, index }.
+	 */
+	int index;
+	__u64 id;
+	__u64 cache_entries;
+	__u64 total_refcounts;
+	__u64 total_bytes;
+	__u64 hits;
+	__u64 misses;
+	__u64 hint_hits;
+	__u64 hint_misses;
+	__u64 internal_evictions; /* due to self-imposed size limit */
+	__u64 external_evictions; /* system-driven evictions */
+};
+
+#ifdef NVIDIA_GPU_DIRECT
+
+/*
+ * Use this for the version field in all the GDR related ioctl parameter
+ * structures.  We are starting with version 1.
+ */
+#define HFI1_GDR_VERSION 0x1UL
+
+/**
+ * struct hfi1_sdma_gpu_cache_evict_params - arguments for sdma cache evict
+ * @evict_params_in: Values passed into the ioctl
+ * @version: The version number for this ioctl.
+ * @pages_to_evict: The number of GPU pages we want evicted from this cache.
+ * @evict_params_out: Values returned from the ioctl
+ * @pages_evicted: The number of GPU pages that were actually evicted.
+ * @pages_in_cache: The number of GPU pages resident in this cache.
+ */
+struct hfi1_sdma_gpu_cache_evict_params {
+	union {
+		struct {
+			__u32 version;
+			__u32 pages_to_evict;
+		} evict_params_in;
+		struct {
+			__u32 pages_evicted;
+			__u32 pages_in_cache;
+		} evict_params_out;
+	};
+};
+
+/**
+ * struct hfi1_gdr_query_parms - argument for gdr driver ioctl command
+ * @query_parms_in: Union member containing values passed into the ioctl()
+ * @version: A way to pass in a version number for this interface.
+ * @gpu_buf_addr: The starting address of a gpu buffer to be operated upon
+ * @gpu_buf_size: The size of a gpu buffer to be operated upon
+ * @query_params_out: Union member containig values pass back from ioctl()
+ * @host_buf_addr: the host address of a pinned and mmaped gpu buffer.
+ *
+ * This structure is associated with the gdr_ops driver's ioctl commands;
+ *
+ *	HFI1_IOCTL_GDR_GPU_PIN_MMAP
+ *	HFI1_IOCTL_GDR_GPU_MUNMAP_UNPIN
+ *
+ * It is used to pass in GPU buffer descriptors into the hfi_ops
+ * driver.
+ *
+ * The driver will reject any gpu buffer address or gpu buffer size that
+ * is NOT rounded to GPU buffer boundaries.  GPU buffer addresses must
+ * start on a NV_GPU_PAGE_SIZE boundary, and a multiple of NV_GPU_PAGE_SIZE
+ * in length.
+ *
+ */
+struct hfi1_gdr_query_params {
+	union {
+		struct {
+			__u32 version;
+			__u32 gpu_buf_size;
+			__u64 gpu_buf_addr;
+		} query_params_in;
+		struct {
+			__u64 host_buf_addr;
+		} query_params_out;
+	};
+};
+
+/**
+ * struct hfi1_gdr_cache_evict_params - arguments for GDR cache evict ioctl
+ * @version: The version number for this ioctl.
+ * @evict_params_in: Values passed into the ioctl
+ * @pages_to_evict: The number of GPU pages we want evicted from this cache.
+ * @evict_params_out: Values returned from the ioctl
+ * @pages_evicted: The number of GPU pages that were actually evicted.
+ * @pages_in_cache: The number of GPU pages resident in this cache.
+ */
+struct hfi1_gdr_cache_evict_params {
+	union {
+		struct {
+			__u32 version;
+			__u32 pages_to_evict;
+		} evict_params_in;
+		struct {
+			__u32 pages_evicted;
+			__u32 pages_in_cache;
+		} evict_params_out;
+	};
+};
+#endif
+
+/*
+ * RDMA character device ioctls
+ */
+
+/* verbs objects */
+enum hfi1_objects {
+	HFI1_OBJECT_DV0 = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_OBJECT_DV1,
+};
+
+/* methods for custom objects dv0 and dv1 - max of 8 per object */
+enum hfi1_methods_dv0 {
+	HFI1_METHOD_ASSIGN_CTXT = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_METHOD_CTXT_INFO,
+	HFI1_METHOD_USER_INFO,
+	HFI1_METHOD_TID_UPDATE,
+	HFI1_METHOD_TID_FREE,
+	HFI1_METHOD_CREDIT_UPD,
+	HFI1_METHOD_RECV_CTRL,
+	HFI1_METHOD_POLL_TYPE,
+};
+
+enum hfi1_methods_dv1 {
+	HFI1_METHOD_ACK_EVENT = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_METHOD_SET_PKEY,
+	HFI1_METHOD_CTXT_RESET,
+	HFI1_METHOD_TID_INVAL_READ,
+	HFI1_METHOD_GET_VERS,
+	HFI1_METHOD_PIN_STATS,
+};
+
+/*
+ * assign_ctxt
+ */
+enum hfi1_attrs_assign_ctxt {
+	HFI1_ATTR_ASSIGN_CTXT_CMD = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+struct hfi1_assign_ctxt_cmd {
+	__u32 userversion;	/* user library version */
+	__u8 port;		/* target port number */
+	__u8 kdeth_rcvhdrsz;	/* 0 means default */
+	__u16 reserved1;
+	__u16 subctxt_cnt;
+	__u16 subctxt_id;
+	__u8 uuid[16];		/* 128bit UUID */
+	__u32 reserved2;
+};
+
+/*
+ * ctxt_info
+ */
+enum hfi1_attrs_ctxt_info {
+	HFI1_ATTR_CTXT_INFO_RSP = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+struct hfi1_ctxt_info_rsp {
+	__aligned_u64 runtime_flags; /* chip/drv runtime flags (HFI1_CAP_*) */
+
+	__u32 rcvegr_size;      /* size of each eager buffer */
+	__u16 num_active;       /* number of active units */
+	__u16 unit;             /* unit (chip) assigned to caller */
+
+	__u16 ctxt;             /* ctxt on unit assigned to caller */
+	__u16 subctxt;          /* subctxt on unit assigned to caller */
+	__u16 rcvtids;          /* number of Rcv TIDs for this context */
+	__u16 credits;          /* number of PIO credits for this context */
+
+	__u16 numa_node;        /* NUMA node of the assigned device */
+	__u16 rec_cpu;          /* cpu # for affinity (0xffff if none) */
+	__u16 send_ctxt;        /* send context in use by this user context */
+	__u16 egrtids;          /* number of RcvArray entries for Eager Rcvs */
+
+	__u16 rcvhdrq_cnt;      /* number of RcvHdrQ entries */
+	__u16 rcvhdrq_entsize;  /* size (in bytes) for each RcvHdrQ entry */
+	__u16 sdma_ring_size;   /* number of entries in SDMA request ring */
+	__u16 reserved;
+};
+
+/*
+ * user_info
+ */
+enum hfi1_attrs_user_info {
+	HFI1_ATTR_USER_INFO_RSP = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+/*
+ * Returns both general and specific information to this device open.
+ */
+struct hfi1_user_info_rsp {
+	/* version of hardware, for feature checking. */
+	__u32 hw_version;
+	/* version of software, for feature checking. */
+	__u32 sw_version;
+	/* Job key */
+	__u16 jkey;
+	__u16 reserved;
+	/*
+	 * The special QP (queue pair) value that identifies PSM/OPX
+	 * protocol packet from standard IB packets.
+	 */
+	__u32 bthqp;
+	/* PIO credit return address */
+	__aligned_u64 sc_credits_addr;
+	/*
+	 * Base address of write-only pio buffers for this process.
+	 * Each buffer has sendpio_credits*64 bytes.
+	 */
+	__aligned_u64 pio_bufbase_sop;
+	/*
+	 * Base address of write-only pio buffers for this process.
+	 * Each buffer has sendpio_credits*64 bytes.
+	 */
+	__aligned_u64 pio_bufbase;
+	/* address where receive buffer queue is mapped into */
+	__aligned_u64 rcvhdr_bufbase;
+	/* base address of Eager receive buffers. */
+	__aligned_u64 rcvegr_bufbase;
+	/* base address of SDMA completion ring */
+	__aligned_u64 sdma_comp_bufbase;
+	/*
+	 * User register base for init code, not to be used directly by
+	 * protocol or applications.  Always maps real chip register space.
+	 * the register addresses are:
+	 * ur_rcvhdrhead, ur_rcvhdrtail, ur_rcvegrhead, ur_rcvegrtail,
+	 * ur_rcvtidflow
+	 */
+	__aligned_u64 user_regbase;
+	/* notification events */
+	__aligned_u64 events_bufbase;
+	/* status page */
+	__aligned_u64 status_bufbase;
+	/* rcvhdrtail update */
+	__aligned_u64 rcvhdrtail_base;
+	/*
+	 * Shared memory pages for subctxts if ctxt is shared.  These cover
+	 * all the processes in the group sharing a single context.
+	 * All have enough space for the num_subcontexts value on this job.
+	 */
+	__aligned_u64 subctxt_uregbase;
+	__aligned_u64 subctxt_rcvegrbuf;
+	__aligned_u64 subctxt_rcvhdrbuf;
+	/* receive header error queue */
+	__aligned_u64 rheq_bufbase;
+};
+
+/*
+ * tid_update
+ */
+enum hfi1_attrs_tid_update {
+	HFI1_ATTR_TID_UPDATE_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_ATTR_TID_UPDATE_RSP,
+};
+
+struct hfi1_tid_update_cmd {
+	__aligned_u64 vaddr;	/* virtual address of buffer */
+	__aligned_u64 tidlist;	/* address of output tid array */
+	__u32 length;		/* buffer length, in bytes */
+	__u32 tidcnt;		/* tidlist size, in TIDs */
+	__aligned_u64 flags;	/* flags: [3:0] mem type, [63:4] reserved */
+	__aligned_u64 context;	/* reserved */
+};
+
+struct hfi1_tid_update_rsp {
+	__u32 length;		/* mapped buffer length */
+	__u32 tidcnt;		/* number of assigned TIDs */
+};
+
+/*
+ * tid_free
+ */
+enum hfi1_attrs_tid_free {
+	HFI1_ATTR_TID_FREE_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_ATTR_TID_FREE_RSP,
+};
+
+struct hfi1_tid_free_cmd {
+	__aligned_u64 tidlist;  /* user buffer pointer */
+	__u32 tidcnt;           /* number of TID entries in buffer */
+	__u32 reserved;
+};
+
+struct hfi1_tid_free_rsp {
+	__u32 tidcnt;		/* number actually freed */
+	__u32 reserved;
+};
+
+/*
+ * credit_upd
+ * (no arguments)
+ */
+
+/*
+ * recv_ctrl
+ */
+enum hfi1_attrs_recv_ctrl {
+	HFI1_ATTR_RECV_CTRL_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	/* no response */
+};
+
+struct hfi1_recv_ctrl_cmd {
+	__u8 start_stop;
+	__u8 reserved[7];
+};
+
+/*
+ * poll_type
+ */
+enum hfi1_attrs_poll_type {
+	HFI1_ATTR_POLL_TYPE_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	/* no response */
+};
+
+struct hfi1_poll_type_cmd {
+	__u32 poll_type;
+	__u32 reserved;
+};
+
+/*
+ * ack_event
+ */
+enum hfi1_attrs_ack_event {
+	HFI1_ATTR_ACK_EVENT_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	/* no response */
+};
+
+struct hfi1_ack_event_cmd {
+	__u64 event;
+};
+
+/*
+ * set_pkey
+ */
+enum hfi1_attrs_set_pkey {
+	HFI1_ATTR_SET_PKEY_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	/* no response */
+};
+
+struct hfi1_set_pkey_cmd {
+	__u16 pkey;
+	__u8 reserved[6];
+};
+
+/*
+ * ctxt_reset
+ * (no arguments)
+ */
+
+/*
+ * tid_inval_read
+ */
+enum hfi1_attrs_tid_inval_read {
+	HFI1_ATTR_TID_INVAL_READ_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_ATTR_TID_INVAL_READ_RSP,
+};
+
+struct hfi1_tid_inval_read_cmd {
+	__aligned_u64 tidlist;  /* user buffer pointer */
+	__u32 tidcnt;		/* space for this many TIDs */
+	__u32 reserved;
+};
+
+struct hfi1_tid_inval_read_rsp {
+	__u32 tidcnt;           /* numnber of returned tids */
+	__u32 reserved;
+};
+
+/*
+ * get_vers
+ */
+enum hfi1_attrs_get_vers {
+	/* no cmd */
+	HFI1_ATTR_GET_VERS_RSP = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+struct hfi1_get_vers_rsp {
+	__u32 version;
+	__u32 reserved;
+};
+
+/*
+ * pin_stats
+ */
+enum hfi1_attrs_pin_stats {
+	HFI1_ATTR_PIN_STATS_CMD = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_ATTR_PIN_STATS_RSP,
+};
+
+struct hfi1_pin_stats_cmd {
+	__u32 memtype;
+	/*
+	 * If -1, driver returns total number of stats entries for the given
+	 * memtype, otherwise returns stats for the given { memtype, index }.
+	 */
+	__s32 index;
+};
+
+struct hfi1_pin_stats_rsp {
+	__u64 id;
+	__u64 cache_entries;
+	__u64 total_refcounts;
+	__u64 total_bytes;
+	__u64 hits;
+	__u64 misses;
+	__u64 internal_evictions; /* due to self-imposed size limit */
+	__u64 external_evictions; /* system-driven evictions */
+};
+
 #endif /* _LINIUX__HFI1_IOCTL_H */

@@ -79,12 +79,12 @@ TRACE_EVENT(hfi1_fault_packet,
 			     __field(u32, etail)
 			     ),
 	     TP_fast_assign(DD_DEV_ASSIGN(packet->rcd->ppd->dd);
-			    __entry->eflags = rhf_err_flags(packet->rhf);
+			    __entry->eflags = packet->err_flags;
 			    __entry->ctxt = packet->rcd->ctxt;
 			    __entry->hlen = packet->hlen;
 			    __entry->tlen = packet->tlen;
 			    __entry->updegr = packet->updegr;
-			    __entry->etail = rhf_egr_index(packet->rhf);
+			    __entry->etail = packet->egr_index;
 			    ),
 	     TP_printk(
 		"[%s] ctxt %d eflags 0x%llx hlen %d tlen %d updegr %d etail %d",

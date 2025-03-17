@@ -187,10 +187,17 @@ void aspm_disable_all(struct hfi1_devdata *dd)
 	struct hfi1_ctxtdata *rcd;
 	unsigned long flags;
 	u16 i;
+	u16 j;
 
-	for (i = 0; i < dd->first_dyn_alloc_ctxt; i++) {
-		rcd = hfi1_rcd_get_by_index(dd, i);
-		if (rcd) {
+	for (i = 0; i < dd->num_pports; i++) {
+		struct hfi1_pportdata *ppd = dd->pport + i;
+
+		for (j = ppd->rcv_context_base;
+		     j < ppd->first_dyn_alloc_ctxt;
+		     j++) {
+			rcd = hfi1_rcd_get_by_index(dd, j);
+			if (!rcd)
+				continue;
 			del_timer_sync(&rcd->aspm_timer);
 			spin_lock_irqsave(&rcd->aspm_lock, flags);
 			rcd->aspm_intr_enable = false;
@@ -209,15 +216,22 @@ void aspm_enable_all(struct hfi1_devdata *dd)
 	struct hfi1_ctxtdata *rcd;
 	unsigned long flags;
 	u16 i;
+	u16 j;
 
 	aspm_enable(dd);
 
 	if (aspm_mode != ASPM_MODE_DYNAMIC)
 		return;
 
-	for (i = 0; i < dd->first_dyn_alloc_ctxt; i++) {
-		rcd = hfi1_rcd_get_by_index(dd, i);
-		if (rcd) {
+	for (i = 0; i < dd->num_pports; i++) {
+		struct hfi1_pportdata *ppd = dd->pport + i;
+
+		for (j = ppd->rcv_context_base;
+		     j < ppd->first_dyn_alloc_ctxt;
+		     j++) {
+			rcd = hfi1_rcd_get_by_index(dd, j);
+			if (!rcd)
+				continue;
 			spin_lock_irqsave(&rcd->aspm_lock, flags);
 			rcd->aspm_intr_enable = true;
 			rcd->aspm_enabled = true;
@@ -233,22 +247,29 @@ static  void aspm_ctx_init(struct hfi1_ctxtdata *rcd)
 	timer_setup(&rcd->aspm_timer, aspm_ctx_timer_function, 0);
 	rcd->aspm_intr_supported = rcd->dd->aspm_supported &&
 		aspm_mode == ASPM_MODE_DYNAMIC &&
-		rcd->ctxt < rcd->dd->first_dyn_alloc_ctxt;
+		is_kernel_context(rcd);
 }
 
 void aspm_init(struct hfi1_devdata *dd)
 {
 	struct hfi1_ctxtdata *rcd;
 	u16 i;
+	u16 j;
 
 	spin_lock_init(&dd->aspm_lock);
 	dd->aspm_supported = aspm_hw_l1_supported(dd);
 
-	for (i = 0; i < dd->first_dyn_alloc_ctxt; i++) {
-		rcd = hfi1_rcd_get_by_index(dd, i);
-		if (rcd)
-			aspm_ctx_init(rcd);
-		hfi1_rcd_put(rcd);
+	for (i = 0; i < dd->num_pports; i++) {
+		struct hfi1_pportdata *ppd = dd->pport + i;
+
+		for (j = ppd->rcv_context_base;
+		     j < ppd->first_dyn_alloc_ctxt;
+		     j++) {
+			rcd = hfi1_rcd_get_by_index(dd, j);
+			if (rcd)
+				aspm_ctx_init(rcd);
+			hfi1_rcd_put(rcd);
+		}
 	}
 
 	/* Start with ASPM disabled */

@@ -25,7 +25,7 @@ static int hfi1_ipoib_dev_init(struct net_device *dev)
 	if (ret)
 		return ret;
 
-	ret = hfi1_netdev_add_data(priv->dd,
+	ret = hfi1_netdev_add_data(priv->ppd,
 				   qpn_from_mac(priv->netdev->dev_addr),
 				   dev);
 	if (ret < 0) {
@@ -40,7 +40,10 @@ static void hfi1_ipoib_dev_uninit(struct net_device *dev)
 {
 	struct hfi1_ipoib_dev_priv *priv = hfi1_ipoib_priv(dev);
 
-	hfi1_netdev_remove_data(priv->dd, qpn_from_mac(priv->netdev->dev_addr));
+	free_percpu(dev->tstats);
+	dev->tstats = NULL;
+
+	hfi1_netdev_remove_data(priv->ppd, qpn_from_mac(priv->netdev->dev_addr));
 
 	priv->netdev_ops->ndo_uninit(dev);
 }
@@ -68,7 +71,7 @@ static int hfi1_ipoib_dev_open(struct net_device *dev)
 		priv->qp = qp;
 		rcu_read_unlock();
 
-		hfi1_netdev_enable_queues(priv->dd);
+		hfi1_netdev_enable_queues(priv->ppd);
 		hfi1_ipoib_napi_tx_enable(dev);
 	}
 
@@ -83,7 +86,7 @@ static int hfi1_ipoib_dev_stop(struct net_device *dev)
 		return 0;
 
 	hfi1_ipoib_napi_tx_disable(dev);
-	hfi1_netdev_disable_queues(priv->dd);
+	hfi1_netdev_disable_queues(priv->ppd);
 
 	rvt_put_qp(priv->qp);
 	priv->qp = NULL;
@@ -195,6 +198,7 @@ static int hfi1_ipoib_setup_rn(struct ib_device *device,
 
 	priv = hfi1_ipoib_priv(netdev);
 	priv->dd = dd;
+	priv->ppd = &dd->pport[port_num - 1];
 	priv->netdev = netdev;
 	priv->device = device;
 	priv->port_num = port_num;

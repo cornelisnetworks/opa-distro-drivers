@@ -14,9 +14,9 @@
 #include "ipoib.h"
 #include "user_sdma.h"
 
-const char *parse_sdma_flags(struct trace_seq *p, u64 desc0, u64 desc1);
+const char *parse_sdma_flags(struct trace_seq *p, u64 *qw, u8 first, u8 last);
 
-#define __parse_sdma_flags(desc0, desc1) parse_sdma_flags(p, desc0, desc1)
+#define __parse_sdma_flags(qw, first, last) parse_sdma_flags(p, qw, first, last)
 
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM hfi1_tx
@@ -108,22 +108,28 @@ DEFINE_EVENT(hfi1_qpsleepwakeup_template, hfi1_qpsleep,
 
 TRACE_EVENT(hfi1_sdma_descriptor,
 	    TP_PROTO(struct sdma_engine *sde,
-		     u64 desc0,
-		     u64 desc1,
+		     u64 *qw,
 		     u16 e,
 		     void *descp),
-		     TP_ARGS(sde, desc0, desc1, e, descp),
-		     TP_STRUCT__entry(DD_DEV_ENTRY(sde->dd)
+	    TP_ARGS(sde, qw, e, descp),
+	    TP_STRUCT__entry(DD_DEV_ENTRY(sde->dd)
 		     __field(void *, descp)
-		     __field(u64, desc0)
-		     __field(u64, desc1)
+		     __array(u64, qw, 2)
+		     __field(u64, phy_addr)
+		     __field(u32, len)
 		     __field(u16, e)
 		     __field(u8, idx)
+		     __field(u8, first)
+		     __field(u8, last)
 		     ),
-		     TP_fast_assign(DD_DEV_ASSIGN(sde->dd);
-		     __entry->desc0 = desc0;
-		     __entry->desc1 = desc1;
+	    TP_fast_assign(DD_DEV_ASSIGN(sde->dd);
+		     __entry->qw[0] = qw[0];
+		     __entry->qw[1] = qw[1];
+		     __entry->phy_addr = sdma_qw_get(sde->dd, phy_addr, qw);
+		     __entry->len = sdma_qw_get(sde->dd, byte_count, qw);
 		     __entry->idx = sde->this_idx;
+		     __entry->first = sdma_qw_get(sde->dd, first_desc, qw);
+		     __entry->last = sdma_qw_get(sde->dd, last_desc, qw);
 		     __entry->descp = descp;
 		     __entry->e = e;
 		     ),
@@ -131,15 +137,13 @@ TRACE_EVENT(hfi1_sdma_descriptor,
 	    "[%s] SDE(%u) flags:%s addr:0x%016llx gen:%u len:%u d0:%016llx d1:%016llx to %p,%u",
 	    __get_str(dev),
 	    __entry->idx,
-	    __parse_sdma_flags(__entry->desc0, __entry->desc1),
-	    (__entry->desc0 >> SDMA_DESC0_PHY_ADDR_SHIFT) &
-	    SDMA_DESC0_PHY_ADDR_MASK,
-	    (u8)((__entry->desc1 >> SDMA_DESC1_GENERATION_SHIFT) &
+	    __parse_sdma_flags(__entry->qw, __entry->first, __entry->last),
+	    __entry->phy_addr,
+	    (u8)((__entry->qw[1] >> SDMA_DESC1_GENERATION_SHIFT) &
 	    SDMA_DESC1_GENERATION_MASK),
-	    (u16)((__entry->desc0 >> SDMA_DESC0_BYTE_COUNT_SHIFT) &
-	    SDMA_DESC0_BYTE_COUNT_MASK),
-	    __entry->desc0,
-	    __entry->desc1,
+	    __entry->len,
+	    __entry->qw[0],
+	    __entry->qw[1],
 	    __entry->descp,
 	    __entry->e
 	    )
@@ -463,13 +467,13 @@ DEFINE_EVENT(hfi1_sdma_sn, hfi1_sdma_in_sn,
 	"[%s:%u:%u:%u] PBC=(0x%x 0x%x) LRH=(0x%x 0x%x) BTH=(0x%x 0x%x 0x%x) KDETH=(0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x) TIDVal=0x%x"
 
 TRACE_EVENT(hfi1_sdma_user_header,
-	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u8 subctxt, u16 req,
+	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u16 subctxt, u16 req,
 		     struct hfi1_pkt_header *hdr, u32 tidval),
 	    TP_ARGS(dd, ctxt, subctxt, req, hdr, tidval),
 	    TP_STRUCT__entry(
 		    DD_DEV_ENTRY(dd)
 		    __field(u16, ctxt)
-		    __field(u8, subctxt)
+		    __field(u16, subctxt)
 		    __field(u16, req)
 		    __field(u32, pbc0)
 		    __field(u32, pbc1)
@@ -542,17 +546,107 @@ TRACE_EVENT(hfi1_sdma_user_header,
 	    )
 );
 
-#define SDMA_UREQ_FMT \
-	"[%s:%u:%u] ver/op=0x%x, iovcnt=%u, npkts=%u, frag=%u, idx=%u"
-TRACE_EVENT(hfi1_sdma_user_reqinfo,
-	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u8 subctxt, u16 *i),
-	    TP_ARGS(dd, ctxt, subctxt, i),
+#define USDMA_HDR16B_FORMAT \
+	"[%s:%u:%u:%u] PBC=(0x%x 0x%x) LRH=(0x%x 0x%x 0x%x 0x%x) BTH=(0x%x 0x%x 0x%x) KDETH=(0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x) TIDVal=0x%x"
+
+TRACE_EVENT(hfi1_sdma_user_header16b,
+	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u8 subctxt, u16 req,
+		     struct hfi1_pkt_header16b *hdr, u32 tidval),
+	    TP_ARGS(dd, ctxt, subctxt, req, hdr, tidval),
 	    TP_STRUCT__entry(
 		    DD_DEV_ENTRY(dd)
 		    __field(u16, ctxt)
 		    __field(u8, subctxt)
+		    __field(u16, req)
+		    __field(u32, pbc0)
+		    __field(u32, pbc1)
+		    __field(u32, lrh0)
+		    __field(u32, lrh1)
+		    __field(u32, lrh2)
+		    __field(u32, lrh3)
+		    __field(u32, bth0)
+		    __field(u32, bth1)
+		    __field(u32, bth2)
+		    __field(u32, kdeth0)
+		    __field(u32, kdeth1)
+		    __field(u32, kdeth2)
+		    __field(u32, kdeth3)
+		    __field(u32, kdeth4)
+		    __field(u32, kdeth5)
+		    __field(u32, kdeth6)
+		    __field(u32, kdeth7)
+		    __field(u32, kdeth8)
+		    __field(u32, tidval)
+		    ),
+	    TP_fast_assign(
+		    __le32 *pbc = (__le32 *)hdr->pbc;
+		    __le32 *lrh = (__le32 *)hdr->lrh;
+		    __be32 *bth = (__be32 *)hdr->bth;
+		    __le32 *kdeth = (__le32 *)&hdr->kdeth;
+
+		    DD_DEV_ASSIGN(dd);
+		    __entry->ctxt = ctxt;
+		    __entry->subctxt = subctxt;
+		    __entry->req = req;
+		    __entry->pbc0 = le32_to_cpu(pbc[0]);
+		    __entry->pbc1 = le32_to_cpu(pbc[1]);
+		    __entry->lrh0 = le32_to_cpu(lrh[0]);
+		    __entry->lrh1 = le32_to_cpu(lrh[1]);
+		    __entry->lrh2 = le32_to_cpu(lrh[2]);
+		    __entry->lrh3 = le32_to_cpu(lrh[3]);
+		    __entry->bth0 = be32_to_cpu(bth[0]);
+		    __entry->bth1 = be32_to_cpu(bth[1]);
+		    __entry->bth2 = be32_to_cpu(bth[2]);
+		    __entry->kdeth0 = le32_to_cpu(kdeth[0]);
+		    __entry->kdeth1 = le32_to_cpu(kdeth[1]);
+		    __entry->kdeth2 = le32_to_cpu(kdeth[2]);
+		    __entry->kdeth3 = le32_to_cpu(kdeth[3]);
+		    __entry->kdeth4 = le32_to_cpu(kdeth[4]);
+		    __entry->kdeth5 = le32_to_cpu(kdeth[5]);
+		    __entry->kdeth6 = le32_to_cpu(kdeth[6]);
+		    __entry->kdeth7 = le32_to_cpu(kdeth[7]);
+		    __entry->kdeth8 = le32_to_cpu(kdeth[8]);
+		    __entry->tidval = tidval;
+		    ),
+	    TP_printk(USDMA_HDR16B_FORMAT,
+		      __get_str(dev),
+		      __entry->ctxt,
+		      __entry->subctxt,
+		      __entry->req,
+		      __entry->pbc1,
+		      __entry->pbc0,
+		      __entry->lrh0,
+		      __entry->lrh1,
+		      __entry->lrh2,
+		      __entry->lrh3,
+		      __entry->bth0,
+		      __entry->bth1,
+		      __entry->bth2,
+		      __entry->kdeth0,
+		      __entry->kdeth1,
+		      __entry->kdeth2,
+		      __entry->kdeth3,
+		      __entry->kdeth4,
+		      __entry->kdeth5,
+		      __entry->kdeth6,
+		      __entry->kdeth7,
+		      __entry->kdeth8,
+		      __entry->tidval
+		      )
+);
+
+#define SDMA_UREQ_FMT \
+	"[%s:%u:%u] ver/op=0x%x, iovcnt=%u, meminfo=%u, npkts=%u, frag=%u, idx=%u"
+TRACE_EVENT(hfi1_sdma_user_reqinfo,
+	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u16 subctxt, u16 *i),
+	    TP_ARGS(dd, ctxt, subctxt, i),
+	    TP_STRUCT__entry(
+		    DD_DEV_ENTRY(dd)
+		    __field(u16, ctxt)
+		    __field(u16, subctxt)
 		    __field(u8, ver_opcode)
 		    __field(u8, iovcnt)
+		    __field(u8, meminfo)
 		    __field(u16, npkts)
 		    __field(u16, fragsize)
 		    __field(u16, comp_idx)
@@ -562,7 +656,8 @@ TRACE_EVENT(hfi1_sdma_user_reqinfo,
 		    __entry->ctxt = ctxt;
 		    __entry->subctxt = subctxt;
 		    __entry->ver_opcode = i[0] & 0xff;
-		    __entry->iovcnt = (i[0] >> 8) & 0xff;
+		    __entry->iovcnt = (i[0] >> 8) & 0x7f;
+		    __entry->meminfo = (i[0] >> 15) & 0x1;
 		    __entry->npkts = i[1];
 		    __entry->fragsize = i[2];
 		    __entry->comp_idx = i[3];
@@ -573,6 +668,7 @@ TRACE_EVENT(hfi1_sdma_user_reqinfo,
 		      __entry->subctxt,
 		      __entry->ver_opcode,
 		      __entry->iovcnt,
+		      __entry->meminfo,
 		      __entry->npkts,
 		      __entry->fragsize,
 		      __entry->comp_idx
@@ -588,13 +684,13 @@ TRACE_EVENT(hfi1_sdma_user_reqinfo,
 			usdma_complete_name(ERROR))
 
 TRACE_EVENT(hfi1_sdma_user_completion,
-	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u8 subctxt, u16 idx,
+	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u16 subctxt, u16 idx,
 		     u8 state, int code),
 	    TP_ARGS(dd, ctxt, subctxt, idx, state, code),
 	    TP_STRUCT__entry(
 	    DD_DEV_ENTRY(dd)
 	    __field(u16, ctxt)
-	    __field(u8, subctxt)
+	    __field(u16, subctxt)
 	    __field(u16, idx)
 	    __field(u8, state)
 	    __field(int, code)
@@ -691,13 +787,13 @@ const char *print_u32_array(struct trace_seq *, u32 *, int);
 #define __print_u32_hex(arr, len) print_u32_array(p, arr, len)
 
 TRACE_EVENT(hfi1_sdma_user_header_ahg,
-	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u8 subctxt, u16 req,
+	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt, u16 subctxt, u16 req,
 		     u8 sde, u8 ahgidx, u32 *ahg, int len, u32 tidval),
 	    TP_ARGS(dd, ctxt, subctxt, req, sde, ahgidx, ahg, len, tidval),
 	    TP_STRUCT__entry(
 	    DD_DEV_ENTRY(dd)
 	    __field(u16, ctxt)
-	    __field(u8, subctxt)
+	    __field(u16, subctxt)
 	    __field(u16, req)
 	    __field(u8, sde)
 	    __field(u8, idx)
@@ -738,13 +834,16 @@ TRACE_EVENT(hfi1_sdma_state,
 	    TP_STRUCT__entry(DD_DEV_ENTRY(sde->dd)
 		__string(curstate, cstate)
 		__string(newstate, nstate)
+	        __field(u8, sde_idx)
 	    ),
 	    TP_fast_assign(DD_DEV_ASSIGN(sde->dd);
 		__assign_str(curstate);
 		__assign_str(newstate);
+		__entry->sde_idx = sde->this_idx;
 	    ),
-	    TP_printk("[%s] current state %s new state %s",
+	    TP_printk("[%s] SDE%d state: %s -> %s",
 		      __get_str(dev),
+		      __entry->sde_idx,
 		      __get_str(curstate),
 		      __get_str(newstate)
 	    )
