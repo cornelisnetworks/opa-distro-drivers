@@ -56,9 +56,9 @@ static int validate_scratch_checksum(struct hfi1_devdata *dd)
 	return 0;
 }
 
-static void save_platform_config_fields(struct hfi1_devdata *dd)
+static void save_platform_config_fields(struct hfi1_pportdata *ppd)
 {
-	struct hfi1_pportdata *ppd = dd->pport;
+	struct hfi1_devdata *dd = ppd->dd;
 	u64 temp_scratch = 0, temp_dest = 0;
 
 	temp_scratch = read_csr(dd, ASIC_CFG_SCRATCH_1);
@@ -104,8 +104,9 @@ static void save_platform_config_fields(struct hfi1_devdata *dd)
 	ppd->config_from_scratch = true;
 }
 
-void get_platform_config(struct hfi1_devdata *dd)
+void get_platform_config(struct hfi1_pportdata *ppd)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	int ret = 0;
 	u8 *temp_platform_config = NULL;
 	u32 esize;
@@ -113,7 +114,7 @@ void get_platform_config(struct hfi1_devdata *dd)
 
 	if (is_integrated(dd)) {
 		if (validate_scratch_checksum(dd)) {
-			save_platform_config_fields(dd);
+			save_platform_config_fields(ppd);
 			return;
 		}
 	} else {
@@ -165,7 +166,7 @@ void get_port_type(struct hfi1_pportdata *ppd)
 	int ret;
 	u32 temp;
 
-	ret = get_platform_config_field(ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+	ret = get_platform_config_field(ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 					PORT_TABLE_PORT_TYPE, &temp,
 					4);
 	if (ret) {
@@ -197,7 +198,7 @@ static int qual_power(struct hfi1_pportdata *ppd)
 	int ret = 0;
 
 	ret = get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_SYSTEM_TABLE, 0,
+		ppd, PLATFORM_CONFIG_SYSTEM_TABLE, 0,
 		SYSTEM_TABLE_QSFP_POWER_CLASS_MAX, &power_class_max, 4);
 	if (ret)
 		return ret;
@@ -302,7 +303,7 @@ static void apply_rx_cdr(struct hfi1_pportdata *ppd,
 	}
 
 	get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_RX_PRESET_TABLE,
+		ppd, PLATFORM_CONFIG_RX_PRESET_TABLE,
 		rx_preset_index, RX_PRESET_TABLE_QSFP_RX_CDR_APPLY,
 		&rx_preset, 4);
 
@@ -314,7 +315,7 @@ static void apply_rx_cdr(struct hfi1_pportdata *ppd,
 		return;
 	}
 	get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_RX_PRESET_TABLE,
+		ppd, PLATFORM_CONFIG_RX_PRESET_TABLE,
 		rx_preset_index, RX_PRESET_TABLE_QSFP_RX_CDR,
 		&rx_preset, 4);
 
@@ -353,7 +354,7 @@ static void apply_tx_cdr(struct hfi1_pportdata *ppd,
 	}
 
 	get_platform_config_field(
-		ppd->dd,
+		ppd,
 		PLATFORM_CONFIG_TX_PRESET_TABLE, tx_preset_index,
 		TX_PRESET_TABLE_QSFP_TX_CDR_APPLY, &tx_preset, 4);
 
@@ -365,7 +366,7 @@ static void apply_tx_cdr(struct hfi1_pportdata *ppd,
 		return;
 	}
 	get_platform_config_field(
-		ppd->dd,
+		ppd,
 		PLATFORM_CONFIG_TX_PRESET_TABLE,
 		tx_preset_index,
 		TX_PRESET_TABLE_QSFP_TX_CDR, &tx_preset, 4);
@@ -419,7 +420,7 @@ static void apply_tx_eq_prog(struct hfi1_pportdata *ppd, u32 tx_preset_index)
 		return;
 
 	get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_TX_PRESET_TABLE,
+		ppd, PLATFORM_CONFIG_TX_PRESET_TABLE,
 		tx_preset_index, TX_PRESET_TABLE_QSFP_TX_EQ_APPLY,
 		&tx_preset, 4);
 	if (!tx_preset) {
@@ -430,7 +431,7 @@ static void apply_tx_eq_prog(struct hfi1_pportdata *ppd, u32 tx_preset_index)
 		return;
 	}
 	get_platform_config_field(
-			ppd->dd, PLATFORM_CONFIG_TX_PRESET_TABLE,
+			ppd, PLATFORM_CONFIG_TX_PRESET_TABLE,
 			tx_preset_index, TX_PRESET_TABLE_QSFP_TX_EQ,
 			&tx_preset, 4);
 
@@ -461,7 +462,7 @@ static void apply_rx_eq_emp(struct hfi1_pportdata *ppd, u32 rx_preset_index)
 	if (!(cache[QSFP_EQ_INFO_OFFS] & 0x2))
 		return;
 	get_platform_config_field(
-			ppd->dd, PLATFORM_CONFIG_RX_PRESET_TABLE,
+			ppd, PLATFORM_CONFIG_RX_PRESET_TABLE,
 			rx_preset_index, RX_PRESET_TABLE_QSFP_RX_EMP_APPLY,
 			&rx_preset, 4);
 
@@ -473,7 +474,7 @@ static void apply_rx_eq_emp(struct hfi1_pportdata *ppd, u32 rx_preset_index)
 		return;
 	}
 	get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_RX_PRESET_TABLE,
+		ppd, PLATFORM_CONFIG_RX_PRESET_TABLE,
 		rx_preset_index, RX_PRESET_TABLE_QSFP_RX_EMP,
 		&rx_preset, 4);
 
@@ -504,9 +505,9 @@ static void apply_eq_settings(struct hfi1_pportdata *ppd,
 
 	/* no point going on w/o a page 3 */
 	if (cache[2] & 4) {
-		dd_dev_info(ppd->dd,
-			    "%s: Upper page 03 not present\n",
-			    __func__);
+		ppd_dev_info(ppd,
+			     "%s: Upper page 03 not present\n",
+			     __func__);
 		return;
 	}
 
@@ -526,40 +527,40 @@ static void apply_rx_amplitude_settings(
 
 	/* no point going on w/o a page 3 */
 	if (cache[2] & 4) {
-		dd_dev_info(ppd->dd,
-			    "%s: Upper page 03 not present\n",
-			    __func__);
+		ppd_dev_info(ppd,
+			     "%s: Upper page 03 not present\n",
+			     __func__);
 		return;
 	}
 	if (!(cache[QSFP_EQ_INFO_OFFS] & 0x1)) {
-		dd_dev_info(ppd->dd,
-			    "%s: RX_AMP_APPLY is set to disabled\n",
-			    __func__);
+		ppd_dev_info(ppd,
+			     "%s: RX_AMP_APPLY is set to disabled\n",
+			     __func__);
 		return;
 	}
 
-	get_platform_config_field(ppd->dd,
+	get_platform_config_field(ppd,
 				  PLATFORM_CONFIG_RX_PRESET_TABLE,
 				  rx_preset_index,
 				  RX_PRESET_TABLE_QSFP_RX_AMP_APPLY,
 				  &rx_preset, 4);
 
 	if (!rx_preset) {
-		dd_dev_info(ppd->dd,
-			    "%s: RX_AMP_APPLY is set to disabled\n",
-			    __func__);
+		ppd_dev_info(ppd,
+			     "%s: RX_AMP_APPLY is set to disabled\n",
+			     __func__);
 		return;
 	}
-	get_platform_config_field(ppd->dd,
+	get_platform_config_field(ppd,
 				  PLATFORM_CONFIG_RX_PRESET_TABLE,
 				  rx_preset_index,
 				  RX_PRESET_TABLE_QSFP_RX_AMP,
 				  &rx_preset, 4);
 
-	dd_dev_info(ppd->dd,
-		    "%s: Requested RX AMP %x\n",
-		    __func__,
-		    rx_preset);
+	ppd_dev_info(ppd,
+		     "%s: Requested RX AMP %x\n",
+		     __func__,
+		     rx_preset);
 
 	for (i = 0; i < 4; i++) {
 		if (cache[(128 * 3) + 225] & (1 << i)) {
@@ -574,12 +575,12 @@ static void apply_rx_amplitude_settings(
 	 * fall through of the default
 	 */
 	if (!preferred && !(cache[(128 * 3) + 225] & 0x1)) {
-		dd_dev_info(ppd->dd, "No supported RX AMP, not applying\n");
+		ppd_dev_info(ppd, "No supported RX AMP, not applying\n");
 		return;
 	}
 
-	dd_dev_info(ppd->dd,
-		    "%s: Applying RX AMP %x\n", __func__, preferred);
+	ppd_dev_info(ppd,
+		     "%s: Applying RX AMP %x\n", __func__, preferred);
 
 	rx_amp = preferred | (preferred << 4);
 	qsfp_write(ppd, ppd->dd->hfi1_id, (256 * 3) + 238, &rx_amp, 1);
@@ -654,8 +655,8 @@ static void apply_tunings(
 	ret = load_8051_config(ppd->dd, LINK_TUNING_PARAMETERS, GENERAL_CONFIG,
 			       config_data);
 	if (ret != HCMD_SUCCESS)
-		dd_dev_err(ppd->dd, "%s: Failed to set tuning method\n",
-			   __func__);
+		ppd_dev_err(ppd, "%s: Failed to set tuning method\n",
+			    __func__);
 
 	/* Set same channel loss for both TX and RX */
 	config_data = 0 | (total_atten << 16) | (total_atten << 24);
@@ -677,31 +678,31 @@ static void apply_tunings(
 		ret = load_8051_config(ppd->dd, DC_HOST_COMM_SETTINGS,
 				       GENERAL_CONFIG, config_data);
 		if (ret != HCMD_SUCCESS)
-			dd_dev_err(ppd->dd,
-				   "%s: Failed set ext device config params\n",
-				   __func__);
+			ppd_dev_err(ppd,
+				    "%s: Failed set ext device config params\n",
+				    __func__);
 	}
 
 	if (tx_preset_index == OPA_INVALID_INDEX) {
 		if (ppd->port_type == PORT_TYPE_QSFP && limiting_active)
-			dd_dev_err(ppd->dd, "%s: Invalid Tx preset index\n",
-				   __func__);
+			ppd_dev_err(ppd, "%s: Invalid Tx preset index\n",
+				    __func__);
 		return;
 	}
 
 	/* Following for limiting active channels only */
 	get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_TX_PRESET_TABLE, tx_preset_index,
+		ppd, PLATFORM_CONFIG_TX_PRESET_TABLE, tx_preset_index,
 		TX_PRESET_TABLE_PRECUR, &tx_preset, 4);
 	precur = tx_preset;
 
 	get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_TX_PRESET_TABLE,
+		ppd, PLATFORM_CONFIG_TX_PRESET_TABLE,
 		tx_preset_index, TX_PRESET_TABLE_ATTN, &tx_preset, 4);
 	attn = tx_preset;
 
 	get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_TX_PRESET_TABLE,
+		ppd, PLATFORM_CONFIG_TX_PRESET_TABLE,
 		tx_preset_index, TX_PRESET_TABLE_POSTCUR, &tx_preset, 4);
 	postcur = tx_preset;
 
@@ -763,7 +764,7 @@ static int tune_active_qsfp(struct hfi1_pportdata *ppd, u32 *ptr_tx_preset,
 
 	if (cache[QSFP_EQ_INFO_OFFS] & 0x4) {
 		ret = get_platform_config_field(
-			ppd->dd,
+			ppd,
 			PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_TX_PRESET_IDX_ACTIVE_EQ,
 			ptr_tx_preset, 4);
@@ -773,7 +774,7 @@ static int tune_active_qsfp(struct hfi1_pportdata *ppd, u32 *ptr_tx_preset,
 		}
 	} else {
 		ret = get_platform_config_field(
-			ppd->dd,
+			ppd,
 			PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_TX_PRESET_IDX_ACTIVE_NO_EQ,
 			ptr_tx_preset, 4);
@@ -784,7 +785,7 @@ static int tune_active_qsfp(struct hfi1_pportdata *ppd, u32 *ptr_tx_preset,
 	}
 
 	ret = get_platform_config_field(
-		ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+		ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 		PORT_TABLE_RX_PRESET_IDX, ptr_rx_preset, 4);
 	if (ret) {
 		*ptr_rx_preset = OPA_INVALID_INDEX;
@@ -793,11 +794,11 @@ static int tune_active_qsfp(struct hfi1_pportdata *ppd, u32 *ptr_tx_preset,
 
 	if ((lss & OPA_LINK_SPEED_25G) && (lse & OPA_LINK_SPEED_25G))
 		get_platform_config_field(
-			ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+			ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_LOCAL_ATTEN_25G, ptr_total_atten, 4);
 	else if ((lss & OPA_LINK_SPEED_12_5G) && (lse & OPA_LINK_SPEED_12_5G))
 		get_platform_config_field(
-			ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+			ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_LOCAL_ATTEN_12G, ptr_total_atten, 4);
 
 	apply_cdr_settings(ppd, *ptr_rx_preset, *ptr_tx_preset);
@@ -823,7 +824,7 @@ static int tune_qsfp(struct hfi1_pportdata *ppd,
 	switch ((cache[QSFP_MOD_TECH_OFFS] & 0xF0) >> 4) {
 	case 0xA ... 0xB:
 		ret = get_platform_config_field(
-			ppd->dd,
+			ppd,
 			PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_LOCAL_ATTEN_25G,
 			&platform_atten, 4);
@@ -839,7 +840,7 @@ static int tune_qsfp(struct hfi1_pportdata *ppd,
 		/* Fallback to configured attenuation if cable memory is bad */
 		if (cable_atten == 0 || cable_atten > 36) {
 			ret = get_platform_config_field(
-				ppd->dd,
+				ppd,
 				PLATFORM_CONFIG_SYSTEM_TABLE, 0,
 				SYSTEM_TABLE_QSFP_ATTENUATION_DEFAULT_25G,
 				&cable_atten, 4);
@@ -848,7 +849,7 @@ static int tune_qsfp(struct hfi1_pportdata *ppd,
 		}
 
 		ret = get_platform_config_field(
-			ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+			ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_REMOTE_ATTEN_25G, &remote_atten, 4);
 		if (ret)
 			return ret;
@@ -870,8 +871,8 @@ static int tune_qsfp(struct hfi1_pportdata *ppd,
 	case 0xD: fallthrough;
 	case 0xF:
 	default:
-		dd_dev_warn(ppd->dd, "%s: Unknown/unsupported cable\n",
-			    __func__);
+		ppd_dev_warn(ppd, "%s: Unknown/unsupported cable\n",
+			     __func__);
 		break;
 	}
 	return ret;
@@ -901,9 +902,8 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 	ppd->driver_link_ready = 0;
 	ppd->offline_disabled_reason = HFI1_ODR_MASK(OPA_LINKDOWN_REASON_NONE);
 
-	/* Skip the tuning for testing (loopback != none) and simulations */
-	if (loopback != LOOPBACK_NONE ||
-	    ppd->dd->icode == ICODE_FUNCTIONAL_SIMULATOR) {
+	/* skip tuning when in loopback */
+	if (loopback != LOOPBACK_NONE) {
 		ppd->driver_link_ready = 1;
 
 		if (qsfp_mod_present(ppd)) {
@@ -911,8 +911,8 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 						    qsfp_resource(ppd->dd),
 						    QSFP_WAIT);
 			if (ret) {
-				dd_dev_err(ppd->dd, "%s: hfi%d: cannot lock i2c chain\n",
-					   __func__, (int)ppd->dd->hfi1_id);
+				ppd_dev_err(ppd, "%s: hfi%d: cannot lock i2c chain\n",
+					    __func__, (int)ppd->dd->hfi1_id);
 				goto bail;
 			}
 
@@ -933,11 +933,11 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 	case PORT_TYPE_FIXED:
 		/* platform_atten, remote_atten pre-zeroed to catch error */
 		get_platform_config_field(
-			ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+			ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_LOCAL_ATTEN_25G, &platform_atten, 4);
 
 		get_platform_config_field(
-			ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+			ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 			PORT_TABLE_REMOTE_ATTEN_25G, &remote_atten, 4);
 
 		total_atten = platform_atten + remote_atten;
@@ -951,12 +951,12 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 			 * catch error
 			 */
 			get_platform_config_field(
-				ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+				ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 				PORT_TABLE_LOCAL_ATTEN_25G,
 				&platform_atten, 4);
 
 			get_platform_config_field(
-				ppd->dd, PLATFORM_CONFIG_PORT_TABLE, 0,
+				ppd, PLATFORM_CONFIG_PORT_TABLE, 0,
 				PORT_TABLE_REMOTE_ATTEN_25G,
 				&remote_atten, 4);
 
@@ -975,8 +975,8 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 						    qsfp_resource(ppd->dd),
 						    QSFP_WAIT);
 			if (ret) {
-				dd_dev_err(ppd->dd, "%s: hfi%d: cannot lock i2c chain\n",
-					   __func__, (int)ppd->dd->hfi1_id);
+				ppd_dev_err(ppd, "%s: hfi%d: cannot lock i2c chain\n",
+					    __func__, (int)ppd->dd->hfi1_id);
 				goto bail;
 			}
 			refresh_qsfp_cache(ppd, &ppd->qsfp_info);
@@ -1012,7 +1012,7 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 		}
 		break;
 	default:
-		dd_dev_warn(ppd->dd, "%s: Unknown port type\n", __func__);
+		ppd_dev_warn(ppd, "%s: Unknown port type\n", __func__);
 		ppd->port_type = PORT_TYPE_UNKNOWN;
 		tuning_method = OPA_UNKNOWN_TUNING;
 		total_atten = 0;

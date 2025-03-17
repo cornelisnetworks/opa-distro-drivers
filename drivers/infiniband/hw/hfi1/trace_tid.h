@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause) */
 /*
+ * Copyright(c) 2024 Cornelis Networks, Inc.
  * Copyright(c) 2018 Intel Corporation.
  *
  */
@@ -15,8 +16,7 @@
 #define show_tidtype(type)                   \
 __print_symbolic(type,                       \
 	tidtype_name(EXPECTED),              \
-	tidtype_name(EAGER),                 \
-	tidtype_name(INVALID))               \
+	tidtype_name(EAGER))
 
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM hfi1_tid
@@ -86,8 +86,8 @@ u16 hfi1_trace_get_tid_idx(u32 ent);
 DECLARE_EVENT_CLASS(/* class */
 	hfi1_exp_tid_reg_unreg,
 	TP_PROTO(unsigned int ctxt, u16 subctxt, u32 rarr, u32 npages,
-		 unsigned long va, unsigned long pa, dma_addr_t dma),
-	TP_ARGS(ctxt, subctxt, rarr, npages, va, pa, dma),
+		 unsigned long va, unsigned long pa, dma_addr_t dma, u16 type),
+	TP_ARGS(ctxt, subctxt, rarr, npages, va, pa, dma, type),
 	TP_STRUCT__entry(/* entry */
 		__field(unsigned int, ctxt)
 		__field(u16, subctxt)
@@ -96,6 +96,7 @@ DECLARE_EVENT_CLASS(/* class */
 		__field(unsigned long, va)
 		__field(unsigned long, pa)
 		__field(dma_addr_t, dma)
+		__field(u16, type)
 	),
 	TP_fast_assign(/* assign */
 		__entry->ctxt = ctxt;
@@ -105,30 +106,71 @@ DECLARE_EVENT_CLASS(/* class */
 		__entry->va = va;
 		__entry->pa = pa;
 		__entry->dma = dma;
+		__entry->type = type;
 	),
-	TP_printk("[%u:%u] entry:%u, %u pages @ 0x%lx, va:0x%lx dma:0x%llx",
+	TP_printk("[%u:%u] entry:%u, %u pages @ 0x%lx, va:0x%lx dma:0x%llx memtype:0x%x",
 		  __entry->ctxt,
 		  __entry->subctxt,
 		  __entry->rarr,
 		  __entry->npages,
 		  __entry->pa,
 		  __entry->va,
-		  __entry->dma
+		  __entry->dma,
+		  __entry->type
 	)
 );
 
 DEFINE_EVENT(/* exp_tid_unreg */
 	hfi1_exp_tid_reg_unreg, hfi1_exp_tid_unreg,
 	TP_PROTO(unsigned int ctxt, u16 subctxt, u32 rarr, u32 npages,
-		 unsigned long va, unsigned long pa, dma_addr_t dma),
-	TP_ARGS(ctxt, subctxt, rarr, npages, va, pa, dma)
+		 unsigned long va, unsigned long pa, dma_addr_t dma, u16 type),
+	TP_ARGS(ctxt, subctxt, rarr, npages, va, pa, dma, type)
 );
 
 DEFINE_EVENT(/* exp_tid_reg */
 	hfi1_exp_tid_reg_unreg, hfi1_exp_tid_reg,
 	TP_PROTO(unsigned int ctxt, u16 subctxt, u32 rarr, u32 npages,
-		 unsigned long va, unsigned long pa, dma_addr_t dma),
-	TP_ARGS(ctxt, subctxt, rarr, npages, va, pa, dma)
+		 unsigned long va, unsigned long pa, dma_addr_t dma, u16 type),
+	TP_ARGS(ctxt, subctxt, rarr, npages, va, pa, dma, type)
+);
+
+TRACE_EVENT(
+	hfi1_exp_tid_update,
+	TP_PROTO(unsigned int ctxt, u16 subctxt, struct hfi1_tid_info_v3 *tinfo),
+	TP_ARGS(ctxt, subctxt, tinfo),
+	TP_STRUCT__entry(
+		__field(u64, vaddr)
+		__field(u64, tidlist)
+		__field(u64, flags)
+		__field(u64, context)
+		__field(u32, tidcnt)
+		__field(u32, length)
+		__field(unsigned int, ctxt)
+		__field(u16, subctxt)
+		__field(u16, type)
+	),
+	TP_fast_assign(
+		__entry->ctxt = ctxt;
+		__entry->subctxt = subctxt;
+		__entry->vaddr = tinfo->vaddr;
+		__entry->tidlist = tinfo->tidlist;
+		__entry->tidcnt = tinfo->tidcnt;
+		__entry->length = tinfo->length;
+		__entry->flags = tinfo->flags;
+		__entry->context = tinfo->context;
+		__entry->type = (tinfo->flags & HFI1_MEMINFO_TYPE_ENTRY_MASK);
+	),
+	TP_printk("[%u:%u] vaddr 0x%llx tidlist 0x%llx tidcnt %u length %u flags.memtype 0x%x flags.reserved 0x%llx context 0x%llx",
+		  __entry->ctxt,
+		  __entry->subctxt,
+		  __entry->vaddr,
+		  __entry->tidlist,
+		  __entry->tidcnt,
+		  __entry->length,
+		  __entry->type,
+		  __entry->flags & (~(u64)HFI1_MEMINFO_TYPE_ENTRY_MASK),
+		  __entry->context
+	)
 );
 
 TRACE_EVENT(/* put_tid */
@@ -162,8 +204,8 @@ TRACE_EVENT(/* put_tid */
 TRACE_EVENT(/* exp_tid_inval */
 	hfi1_exp_tid_inval,
 	TP_PROTO(unsigned int ctxt, u16 subctxt, unsigned long va, u32 rarr,
-		 u32 npages, dma_addr_t dma),
-	TP_ARGS(ctxt, subctxt, va, rarr, npages, dma),
+		 u32 npages, dma_addr_t dma, u16 type),
+	TP_ARGS(ctxt, subctxt, va, rarr, npages, dma, type),
 	TP_STRUCT__entry(/* entry */
 		__field(unsigned int, ctxt)
 		__field(u16, subctxt)
@@ -171,6 +213,7 @@ TRACE_EVENT(/* exp_tid_inval */
 		__field(u32, rarr)
 		__field(u32, npages)
 		__field(dma_addr_t, dma)
+		__field(u16, type)
 	),
 	TP_fast_assign(/* assign */
 		__entry->ctxt = ctxt;
@@ -179,14 +222,16 @@ TRACE_EVENT(/* exp_tid_inval */
 		__entry->rarr = rarr;
 		__entry->npages = npages;
 		__entry->dma = dma;
+		__entry->type = type;
 	),
-	TP_printk("[%u:%u] entry:%u, %u pages @ 0x%lx dma: 0x%llx",
+	TP_printk("[%u:%u] entry:%u, %u pages @ 0x%lx dma: 0x%llx memtype:0x%x",
 		  __entry->ctxt,
 		  __entry->subctxt,
 		  __entry->rarr,
 		  __entry->npages,
 		  __entry->va,
-		  __entry->dma
+		  __entry->dma,
+		  __entry->type
 	)
 );
 

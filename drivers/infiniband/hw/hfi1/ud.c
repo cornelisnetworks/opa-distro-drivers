@@ -363,10 +363,18 @@ void hfi1_make_ud_req_16B(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			ps->s_txreq->hdr_dwords++;
 	}
 
-	/* SW provides space for CRC and LT for bypass packets. */
-	extra_bytes = hfi1_get_16b_padding((ps->s_txreq->hdr_dwords << 2),
-					   wqe->length);
-	nwords = ((wqe->length + extra_bytes + SIZE_OF_LT) >> 2) + SIZE_OF_CRC;
+	if (ppd->dd->params->chip_type == CHIP_WFR) {
+		/* SW provides space for CRC and LT for bypass packets. */
+		extra_bytes = hfi1_get_16b_padding((ps->s_txreq->hdr_dwords << 2),
+						   wqe->length);
+		nwords = ((wqe->length + extra_bytes + SIZE_OF_LT) >> 2) + SIZE_OF_CRC;
+	} else {
+		/* pad total message to a multiple of 8 */
+		extra_bytes = hfi1_pad8((ps->s_txreq->hdr_dwords << 2) +
+					wqe->length);
+		/* add in ICRC QW */
+		nwords = (wqe->length + extra_bytes + 8) >> 2;
+	}
 
 	if ((rdma_ah_get_ah_flags(ah_attr) & IB_AH_GRH) &&
 	    hfi1_check_mcast(rdma_ah_get_dlid(ah_attr))) {
@@ -377,8 +385,8 @@ void hfi1_make_ud_req_16B(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		 * before creating the GRH.
 		 */
 		if (grd->sgid_index == OPA_GID_INDEX) {
-			dd_dev_warn(ppd->dd, "Bad sgid_index. sgid_index: %d\n",
-				    grd->sgid_index);
+			ppd_dev_warn(ppd, "Bad sgid_index. sgid_index: %d\n",
+				     grd->sgid_index);
 			grd->sgid_index = 0;
 		}
 		grh = &ps->s_txreq->phdr.hdr.opah.u.l.grh;
@@ -442,7 +450,7 @@ int hfi1_make_ud_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 	int next_cur;
 	u32 lid;
 
-	ps->s_txreq = get_txreq(ps->dev, qp);
+	ps->s_txreq = alloc_txreq(ps->dev, qp);
 	if (!ps->s_txreq)
 		goto bail_no_tx;
 
@@ -560,7 +568,7 @@ int hfi1_lookup_pkey_idx(struct hfi1_ibport *ibp, u16 pkey)
 	if (pkey == FULL_MGMT_P_KEY || pkey == LIM_MGMT_P_KEY) {
 		unsigned lim_idx = -1;
 
-		for (i = 0; i < ARRAY_SIZE(ppd->pkeys); ++i) {
+		for (i = 0; i < ppd->dd->params->pkey_table_size; ++i) {
 			/* here we look for an exact match */
 			if (ppd->pkeys[i] == pkey)
 				return i;
@@ -578,7 +586,7 @@ int hfi1_lookup_pkey_idx(struct hfi1_ibport *ibp, u16 pkey)
 
 	pkey &= 0x7fff; /* remove limited/full membership bit */
 
-	for (i = 0; i < ARRAY_SIZE(ppd->pkeys); ++i)
+	for (i = 0; i < ppd->dd->params->pkey_table_size; ++i)
 		if ((ppd->pkeys[i] & 0x7fff) == pkey)
 			return i;
 
@@ -592,8 +600,9 @@ void return_cnp_16B(struct hfi1_ibport *ibp, struct rvt_qp *qp,
 		    u32 remote_qpn, u16 pkey, u32 slid, u32 dlid,
 		    u8 sc5, const struct ib_grh *old_grh)
 {
-	u64 pbc, pbc_flags = 0;
+	u64 pbc;
 	u32 bth0, plen, vl, hwords = 7;
+	u32 extra_bytes;
 	u16 len;
 	u8 l4;
 	struct hfi1_opa_header hdr;
@@ -601,12 +610,20 @@ void return_cnp_16B(struct hfi1_ibport *ibp, struct rvt_qp *qp,
 	struct pio_buf *pbuf;
 	struct send_context *ctxt = qp_to_send_context(qp, sc5);
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
+	struct hfi1_devdata *dd = ppd->dd;
 	u32 nwords;
 
 	hdr.hdr_type = HFI1_PKT_TYPE_16B;
 	/* Populate length */
-	nwords = ((hfi1_get_16b_padding(hwords << 2, 0) +
-		   SIZE_OF_LT) >> 2) + SIZE_OF_CRC;
+	if (dd->params->chip_type == CHIP_WFR) {
+		extra_bytes = hfi1_get_16b_padding(hwords << 2, 0);
+		nwords = ((extra_bytes + SIZE_OF_LT) >> 2) + SIZE_OF_CRC;
+	} else {
+		/* pad to multiple of 8 */
+		extra_bytes = hfi1_pad8(hwords);
+		/* add ICRC QW */
+		nwords = (extra_bytes + 8) >> 2;
+	}
 	if (old_grh) {
 		struct ib_grh *grh = &hdr.opah.u.l.grh;
 
@@ -625,8 +642,7 @@ void return_cnp_16B(struct hfi1_ibport *ibp, struct rvt_qp *qp,
 	}
 
 	/* BIT 16 to 19 is TVER. Bit 20 to 22 is pad cnt */
-	bth0 = (IB_OPCODE_CNP << 24) | (1 << 16) |
-	       (hfi1_get_16b_padding(hwords << 2, 0) << 20);
+	bth0 = (IB_OPCODE_CNP << 24) | (1 << 16) | (extra_bytes << 20);
 	ohdr->bth[0] = cpu_to_be32(bth0);
 
 	ohdr->bth[1] = cpu_to_be32(remote_qpn);
@@ -637,15 +653,15 @@ void return_cnp_16B(struct hfi1_ibport *ibp, struct rvt_qp *qp,
 	hfi1_make_16b_hdr(&hdr.opah, slid, dlid, len, pkey, 1, 0, l4, sc5);
 
 	plen = 2 /* PBC */ + hwords + nwords;
-	pbc_flags |= PBC_PACKET_BYPASS | PBC_INSERT_BYPASS_ICRC;
-	vl = sc_to_vlt(ppd->dd, sc5);
-	pbc = create_pbc(ppd, pbc_flags, qp->srate_mbps, vl, plen);
+	vl = sc_to_vlt(ppd, sc5);
 	if (ctxt) {
+		pbc = dd->params->create_pbc(ppd, 0, qp->srate_mbps, vl, plen,
+					     PBC_L2_16B, dlid,
+					     ctxt->hw_context);
 		pbuf = sc_buffer_alloc(ctxt, plen, NULL, NULL);
 		if (!IS_ERR_OR_NULL(pbuf)) {
-			trace_pio_output_ibhdr(ppd->dd, &hdr, sc5);
-			ppd->dd->pio_inline_send(ppd->dd, pbuf, pbc,
-						 &hdr, hwords);
+			trace_pio_output_ibhdr(dd, &hdr, sc5, 0);
+			dd->pio_inline_send(dd, pbuf, pbc, &hdr, hwords);
 		}
 	}
 }
@@ -663,6 +679,7 @@ void return_cnp(struct hfi1_ibport *ibp, struct rvt_qp *qp, u32 remote_qpn,
 	struct pio_buf *pbuf;
 	struct send_context *ctxt = qp_to_send_context(qp, sc5);
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
+	struct hfi1_devdata *dd = ppd->dd;
 
 	hdr.hdr_type = HFI1_PKT_TYPE_9B;
 	if (old_grh) {
@@ -692,15 +709,16 @@ void return_cnp(struct hfi1_ibport *ibp, struct rvt_qp *qp, u32 remote_qpn,
 
 	hfi1_make_ib_hdr(&hdr.ibh, lrh0, hwords + SIZE_OF_CRC, dlid, slid);
 	plen = 2 /* PBC */ + hwords;
-	pbc_flags |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
-	vl = sc_to_vlt(ppd->dd, sc5);
-	pbc = create_pbc(ppd, pbc_flags, qp->srate_mbps, vl, plen);
+	pbc_flags |= pbc_sc4_flag(sc5);
+	vl = sc_to_vlt(ppd, sc5);
 	if (ctxt) {
+		pbc = dd->params->create_pbc(ppd, pbc_flags, qp->srate_mbps, vl,
+					     plen, PBC_L2_9B, dlid,
+					     ctxt->hw_context);
 		pbuf = sc_buffer_alloc(ctxt, plen, NULL, NULL);
 		if (!IS_ERR_OR_NULL(pbuf)) {
-			trace_pio_output_ibhdr(ppd->dd, &hdr, sc5);
-			ppd->dd->pio_inline_send(ppd->dd, pbuf, pbc,
-						 &hdr, hwords);
+			trace_pio_output_ibhdr(dd, &hdr, sc5, 0);
+			dd->pio_inline_send(dd, pbuf, pbc, &hdr, hwords);
 		}
 	}
 }
@@ -960,17 +978,6 @@ void hfi1_ud_rcv(struct hfi1_packet *packet)
 	}
 	if (packet->grh) {
 		rvt_copy_sge(qp, &qp->r_sge, packet->grh,
-			     sizeof(struct ib_grh), true, false);
-		wc.wc_flags |= IB_WC_GRH;
-	} else if (packet->etype == RHF_RCV_TYPE_BYPASS) {
-		struct ib_grh grh;
-		/*
-		 * Assuming we only created 16B on the send side
-		 * if we want to use large LIDs, since GRH was stripped
-		 * out when creating 16B, add back the GRH here.
-		 */
-		hfi1_make_ext_grh(packet, &grh, slid, dlid);
-		rvt_copy_sge(qp, &qp->r_sge, &grh,
 			     sizeof(struct ib_grh), true, false);
 		wc.wc_flags |= IB_WC_GRH;
 	} else {

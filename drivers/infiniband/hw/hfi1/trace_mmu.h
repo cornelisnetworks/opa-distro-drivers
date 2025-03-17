@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause */
 /*
+ * Copyright(c) 2024 Cornelis Networks, Inc.
  * Copyright(c) 2017 Intel Corporation.
  */
 
@@ -35,6 +36,12 @@ DECLARE_EVENT_CLASS(hfi1_mmu_rb_template,
 DEFINE_EVENT(hfi1_mmu_rb_template, hfi1_mmu_rb_insert,
 	     TP_PROTO(struct mmu_rb_node *node),
 	     TP_ARGS(node));
+
+#ifdef NVIDIA_GPU_DIRECT
+DEFINE_EVENT(hfi1_mmu_rb_template, hfi1_mmu_rb_remove,
+	     TP_PROTO(struct mmu_rb_node *node),
+	     TP_ARGS(node));
+#endif
 
 TRACE_EVENT(hfi1_mmu_rb_search,
 	    TP_PROTO(unsigned long addr, unsigned long len),

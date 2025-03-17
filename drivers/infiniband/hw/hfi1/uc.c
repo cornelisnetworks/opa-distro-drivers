@@ -30,7 +30,7 @@ int hfi1_make_uc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 	u32 pmtu = qp->pmtu;
 	int middle = 0;
 
-	ps->s_txreq = get_txreq(ps->dev, qp);
+	ps->s_txreq = alloc_txreq(ps->dev, qp);
 	if (!ps->s_txreq)
 		goto bail_no_tx;
 

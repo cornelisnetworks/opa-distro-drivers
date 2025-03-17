@@ -32,6 +32,7 @@ bool hfi1_can_pin_pages(struct hfi1_devdata *dd, struct mm_struct *mm,
 	unsigned long ulimit_pages;
 	unsigned long cache_limit_pages;
 	unsigned int usr_ctxts;
+	int pidx;
 
 	/*
 	 * Perform RLIMIT_MEMLOCK based checks unless CAP_IPC_LOCK is present.
@@ -62,7 +63,9 @@ bool hfi1_can_pin_pages(struct hfi1_devdata *dd, struct mm_struct *mm,
 		 * per-process tracking of pinned pages.  It also assumes that each
 		 * user context has only one cache to limit.
 		 */
-		usr_ctxts = dd->num_rcv_contexts - dd->first_dyn_alloc_ctxt;
+		usr_ctxts = 0;
+		for (pidx = 0; pidx < dd->num_pports; pidx++)
+			usr_ctxts += dd->pport[pidx].num_rcv_contexts - dd->n_krcv_queues;
 		if (nlocked + npages > (ulimit_pages / usr_ctxts / 4))
 			return false;
 	}

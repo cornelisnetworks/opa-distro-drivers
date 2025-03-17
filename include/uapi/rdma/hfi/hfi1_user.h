@@ -69,6 +69,7 @@
  * way. The driver must be the same for initialization to succeed.
  */
 #define HFI1_USER_SWMAJOR 6
+#define HFI1_RDMA_USER_SWMAJOR 10
 
 /*
  * Minor version differences are always compatible
@@ -78,6 +79,7 @@
  * cares, or it must abort after initialization reports the difference.
  */
 #define HFI1_USER_SWMINOR 3
+#define HFI1_RDMA_USER_SWMINOR 0
 
 /*
  * We will encode the major/minor inside a single 32bit version number.
@@ -111,6 +113,15 @@
 #define HFI1_CAP_EARLY_CREDIT_RETURN (1UL << 18) /* early credit return */
 #define HFI1_CAP_AIP              (1UL << 19) /* Enable accelerated IP */
 
+#ifdef NVIDIA_GPU_DIRECT
+/* Cap bit is present for backwards compatibility with PSM2-CUDA */
+/*
+ * Bit-63 is being used instead of the LSB that is available since
+ * HFI1_CAP_GPUDIRECT_OT will only be used in an out of tree driver.
+ */
+#define HFI1_CAP_GPUDIRECT_OT     (1UL << 63) /* GPU Direct RDMA support */
+#endif
+
 #define HFI1_RCVHDR_ENTSIZE_2    (1UL << 0)
 #define HFI1_RCVHDR_ENTSIZE_16   (1UL << 1)
 #define HFI1_RCVDHR_ENTSIZE_32   (1UL << 2)
@@ -129,6 +140,12 @@
 #define HFI1_EVENT_LMC_CHANGE        (1UL << _HFI1_EVENT_LMC_CHANGE_BIT)
 #define HFI1_EVENT_SL2VL_CHANGE      (1UL << _HFI1_EVENT_SL2VL_CHANGE_BIT)
 #define HFI1_EVENT_TID_MMU_NOTIFY    (1UL << _HFI1_EVENT_TID_MMU_NOTIFY_BIT)
+
+#ifdef NVIDIA_GPU_DIRECT
+/* hfi1_tid_info_v2 .flags bits */
+#define HFI1_BUF_GPU_MEM_BIT 0
+#define HFI1_BUF_GPU_MEM     (1UL << HFI1_BUF_GPU_MEM_BIT)
+#endif
 
 /*
  * These are the status bits readable (in ASCII form, 64bit value)
@@ -183,6 +200,11 @@ struct hfi1_status {
 	char freezemsg[];
 };
 
+struct hfi1_status_v2 {
+	__aligned_u64 dev;      /* device/hw status bits */
+	__aligned_u64 ports[];  /* port state and status bits */
+};
+
 enum sdma_req_opcode {
 	EXPECTED = 0,
 	EAGER
@@ -192,14 +214,19 @@ enum sdma_req_opcode {
 #define HFI1_SDMA_REQ_VERSION_SHIFT 0x0
 #define HFI1_SDMA_REQ_OPCODE_MASK 0xF
 #define HFI1_SDMA_REQ_OPCODE_SHIFT 0x4
-#define HFI1_SDMA_REQ_IOVCNT_MASK 0xFF
+#define HFI1_SDMA_REQ_IOVCNT_MASK 0x7F
 #define HFI1_SDMA_REQ_IOVCNT_SHIFT 0x8
+#define HFI1_SDMA_REQ_MEMINFO_MASK 0x1
+#define HFI1_SDMA_REQ_MEMINFO_SHIFT 0xF
 
 struct sdma_req_info {
 	/*
-	 * bits 0-3 - version (currently unused)
+	 * bits 0-3 - version (currently used only for GPU direct)
+	 *               1 - user space is NOT using flags field
+	 *               2 - user space is using flags field
 	 * bits 4-7 - opcode (enum sdma_req_opcode)
-	 * bits 8-15 - io vector count
+	 * bits 8-14 - io vector count
+	 * bit  15 - meminfo present
 	 */
 	__u16 ctrl;
 	/*
@@ -220,7 +247,39 @@ struct sdma_req_info {
 	 * in charge of managing its own ring.
 	 */
 	__u16 comp_idx;
+#ifdef NVIDIA_GPU_DIRECT
+	/*
+	 * Buffer flags for this request. See HFI1_BUF_*
+	 */
+	__u16 flags;
+#endif
 } __attribute__((__packed__));
+
+#define HFI1_MEMINFO_TYPE_ENTRY_BITS 4
+#define HFI1_MEMINFO_TYPE_ENTRY_MASK ((1 << HFI1_MEMINFO_TYPE_ENTRY_BITS) - 1)
+#define HFI1_MEMINFO_TYPE_ENTRY_GET(m, n)              \
+	(((m) >> ((n) * HFI1_MEMINFO_TYPE_ENTRY_BITS)) & \
+	 HFI1_MEMINFO_TYPE_ENTRY_MASK)
+#define HFI1_MEMINFO_TYPE_ENTRY_SET(m, n, e)    \
+	((m) |= ((e) & HFI1_MEMINFO_TYPE_ENTRY_MASK) \
+	     << ((n) * HFI1_MEMINFO_TYPE_ENTRY_BITS))
+#define HFI1_MAX_MEMINFO_ENTRIES \
+	(sizeof(__u64) * 8 / HFI1_MEMINFO_TYPE_ENTRY_BITS)
+
+#define HFI1_MEMINFO_TYPE_SYSTEM 0
+#define HFI1_MEMINFO_TYPE_AMD    2
+#define HFI1_MEMINFO_TYPE_NVIDIA 3
+
+struct sdma_req_meminfo {
+	/*
+	 * Packed memory type indicators for each data iovec entry.
+	 */
+	__u64 types;
+	/*
+	 * Type-specific context for each data iovec entry.
+	 */
+	__u64 context[HFI1_MAX_MEMINFO_ENTRIES];
+};
 
 /*
  * SW KDETH header.

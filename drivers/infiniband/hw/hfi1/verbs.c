@@ -25,6 +25,7 @@
 #include "fault.h"
 #include "affinity.h"
 #include "ipoib.h"
+#include "uverbs.h"
 
 static unsigned int hfi1_lkey_table_size = 16;
 module_param_named(lkey_table_size, hfi1_lkey_table_size, uint,
@@ -347,7 +348,7 @@ void hfi1_kdeth_eager_rcv(struct hfi1_packet *packet)
 		goto drop;
 
 	packet->ohdr = &hdr->u.oth;
-	trace_input_ibhdr(rcd->dd, packet, !!(rhf_dc_info(packet->rhf)));
+	trace_input_ibhdr(rcd->dd, packet, packet->sc4);
 
 	opcode = (be32_to_cpu(packet->ohdr->bth[0]) >> 24);
 	inc_opstats(tlen, &rcd->opstats->stats[opcode]);
@@ -401,7 +402,7 @@ void hfi1_kdeth_expected_rcv(struct hfi1_packet *packet)
 		goto drop;
 
 	packet->ohdr = &hdr->u.oth;
-	trace_input_ibhdr(rcd->dd, packet, !!(rhf_dc_info(packet->rhf)));
+	trace_input_ibhdr(rcd->dd, packet, packet->sc4);
 
 	opcode = (be32_to_cpu(packet->ohdr->bth[0]) >> 24);
 	inc_opstats(tlen, &rcd->opstats->stats[opcode]);
@@ -536,7 +537,7 @@ void hfi1_ib_rcv(struct hfi1_packet *packet)
 {
 	struct hfi1_ctxtdata *rcd = packet->rcd;
 
-	trace_input_ibhdr(rcd->dd, packet, !!(rhf_dc_info(packet->rhf)));
+	trace_input_ibhdr(rcd->dd, packet, packet->sc4);
 	hfi1_handle_packet(packet, hfi1_check_mcast(packet->dlid));
 }
 
@@ -633,6 +634,8 @@ static int wait_kmem(struct hfi1_ibdev *dev,
 
 	spin_lock_irqsave(&qp->s_lock, flags);
 	if (ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK) {
+		/* take a new txreq reference */
+		hfi1_get_txreq(ps->s_txreq);
 		write_seqlock(&dev->iowait_lock);
 		list_add_tail(&ps->s_txreq->txreq.list,
 			      &ps->wait->tx_head);
@@ -732,11 +735,16 @@ static int build_verbs_tx_desc(
 		 * hdrbytes accounts for PBC. Need to subtract 8 bytes
 		 * before calculating padding.
 		 */
-		extra_bytes = hfi1_get_16b_padding(hdrbytes - 8, length) +
-			      (SIZE_OF_CRC << 2) + SIZE_OF_LT;
+		if (sde->dd->params->chip_type == CHIP_WFR) {
+			extra_bytes = hfi1_get_16b_padding(hdrbytes - 8, length)
+					+ (SIZE_OF_CRC << 2) + SIZE_OF_LT;
+		} else {
+			/* add ICRC QW */
+			extra_bytes = hfi1_pad8(hdrbytes - 8 + length) + 8;
+		}
 	}
 	if (!ahg_info->ahgcount) {
-		ret = sdma_txinit_ahg(
+		ret = sdma_txinit_ahg(sde->dd,
 			&tx->txreq,
 			ahg_info->tx_flags,
 			hdrbytes + length +
@@ -757,7 +765,7 @@ static int build_verbs_tx_desc(
 		if (ret)
 			goto bail_txadd;
 	} else {
-		ret = sdma_txinit_ahg(
+		ret = sdma_txinit_ahg(sde->dd,
 			&tx->txreq,
 			ahg_info->tx_flags,
 			length,
@@ -804,16 +812,25 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	u32 plen;
 	struct hfi1_ibdev *dev = ps->dev;
 	struct hfi1_pportdata *ppd = ps->ppd;
+	struct hfi1_devdata *dd = ppd->dd;
 	struct verbs_txreq *tx;
 	u8 sc5 = priv->s_sc;
 	int ret;
 	u32 dwords;
 
 	if (ps->s_txreq->phdr.hdr.hdr_type) {
-		u8 extra_bytes = hfi1_get_16b_padding((hdrwords << 2), len);
+		u8 extra_bytes;
 
-		dwords = (len + extra_bytes + (SIZE_OF_CRC << 2) +
-			  SIZE_OF_LT) >> 2;
+		if (dd->params->chip_type == CHIP_WFR) {
+			extra_bytes = hfi1_get_16b_padding((hdrwords << 2), len);
+			dwords = (len + extra_bytes + (SIZE_OF_CRC << 2) +
+				  SIZE_OF_LT) >> 2;
+		} else {
+			/* round up to multiple of 8 */
+			extra_bytes = hfi1_pad8((hdrwords << 2) + len);
+			/* add ICRC QW */
+			dwords = (len + extra_bytes + 8) >> 2;
+		}
 	} else {
 		dwords = (len + 3) >> 2;
 	}
@@ -822,21 +839,24 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	tx = ps->s_txreq;
 	if (!sdma_txreq_built(&tx->txreq)) {
 		if (likely(pbc == 0)) {
-			u32 vl = sc_to_vlt(dd_from_ibdev(qp->ibqp.device), sc5);
+			u32 vl = sc_to_vlt(ppd, sc5);
+			u32 l2;
+			u32 dlid;
 
 			/* No vl15 here */
 			/* set PBC_DC_INFO bit (aka SC[4]) in pbc */
-			if (ps->s_txreq->phdr.hdr.hdr_type)
-				pbc |= PBC_PACKET_BYPASS |
-				       PBC_INSERT_BYPASS_ICRC;
-			else
-				pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
+			if (ps->s_txreq->phdr.hdr.hdr_type) {
+				l2 = PBC_L2_16B;
+				dlid = hfi1_16B_get_dlid(&tx->phdr.hdr.opah);
+			} else {
+				pbc |= pbc_sc4_flag(sc5);
+				l2 = PBC_L2_9B;
+				dlid = ib_get_dlid(&tx->phdr.hdr.ibh);
+			}
 
-			pbc = create_pbc(ppd,
-					 pbc,
-					 qp->srate_mbps,
-					 vl,
-					 plen);
+			pbc = dd->params->create_pbc(ppd, pbc, qp->srate_mbps,
+						     vl, plen, l2, dlid,
+						     priv->s_sendcontext->hw_context);
 
 			if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
 				pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
@@ -849,28 +869,61 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		if (unlikely(ret))
 			goto bail_build;
 	}
-	ret =  sdma_send_txreq(tx->sde, ps->wait, &tx->txreq, ps->pkts_sent);
-	if (unlikely(ret < 0)) {
-		if (ret == -ECOMM)
-			goto bail_ecomm;
-		return ret;
-	}
+	/*
+	 * sdma_send_txreq() does not know about verbs_txreq and may transfer
+	 * ownership of tx's ref.  Take an extra reference here so that tx
+	 * remains valid for the trace that follows the sdma_send_txreq() call.
+	 *
+	 * Reference ownership will have been transferred if the return value
+	 * is 0, -ECOMM, or -EIOCBQUEUED.
+	 */
+	hfi1_get_txreq(tx);
+	ret = sdma_send_txreq(tx->sde, ps->wait, &tx->txreq, ps->pkts_sent);
+	trace_sdma_output_ibhdr(dd, &ps->s_txreq->phdr.hdr, ib_is_sc5(sc5), ret);
+	if (unlikely(ret < 0))
+		goto bail_ecomm;
+	/* ret == 0 => the extra reference has been transferred */
 
 	update_tx_opstats(qp, ps, plen);
-	trace_sdma_output_ibhdr(dd_from_ibdev(qp->ibqp.device),
-				&ps->s_txreq->phdr.hdr, ib_is_sc5(sc5));
-	return ret;
+	/* put ps's reference */
+	hfi1_put_txreq(tx);
+	ps->s_txreq = NULL;
+	return 0;
 
 bail_ecomm:
-	/* The current one got "sent" */
-	return 0;
-bail_build:
-	ret = wait_kmem(dev, qp, ps);
-	if (!ret) {
-		/* free txreq - bad state */
-		hfi1_put_txreq(ps->s_txreq);
-		ps->s_txreq = NULL;
+	if (ret == -EIOCBQUEUED) {
+		/*
+		 * The SDMA engine descriptor queue is full.  The txreq (and
+		 * its reference) has been added to the wait list.
+		 *
+		 * Return an error so pending transmit attempts cease until
+		 * the engine is ready.
+		 */
+	} else if (ret == -ECOMM) {
+		/*
+		 * The SDMA engine has stopped.  The txreq (and its reference)
+		 * has been transferred to a flush list.
+		 *
+		 * Return 0 so all pending transmits also drop like this one.
+		 */
+		ret = 0;
+	} else {
+		/*
+		 * An unexpected error has occurred.  Drop the txreq.  Remove
+		 * the extra reference taken above.
+		 */
+		hfi1_put_txreq(tx);
 	}
+	/* put ps's reference */
+	hfi1_put_txreq(tx);
+	ps->s_txreq = NULL;
+	return ret;
+bail_build:
+	/* wait_kmem() may take a reference to ps->s_txreq */
+	ret = wait_kmem(dev, qp, ps);
+	/* put ps's reference */
+	hfi1_put_txreq(ps->s_txreq);
+	ps->s_txreq = NULL;
 	return ret;
 }
 
@@ -896,6 +949,8 @@ static int pio_wait(struct rvt_qp *qp,
 	 */
 	spin_lock_irqsave(&qp->s_lock, flags);
 	if (ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK) {
+		/* take a new txreq reference */
+		hfi1_get_txreq(ps->s_txreq);
 		write_seqlock(&sc->waitlock);
 		list_add_tail(&ps->s_txreq->txreq.list,
 			      &ps->wait->tx_head);
@@ -944,6 +999,7 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	u32 dwords;
 	u32 plen;
 	struct hfi1_pportdata *ppd = ps->ppd;
+	struct hfi1_devdata *dd = ppd->dd;
 	u32 *hdr;
 	u8 sc5;
 	unsigned long flags = 0;
@@ -955,9 +1011,14 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	u8 extra_bytes = 0;
 
 	if (ps->s_txreq->phdr.hdr.hdr_type) {
-		u8 pad_size = hfi1_get_16b_padding((hdrwords << 2), len);
+		if (dd->params->chip_type == CHIP_WFR) {
+			u8 pad_size = hfi1_get_16b_padding((hdrwords << 2), len);
 
-		extra_bytes = pad_size + (SIZE_OF_CRC << 2) + SIZE_OF_LT;
+			extra_bytes = pad_size + (SIZE_OF_CRC << 2) + SIZE_OF_LT;
+		} else {
+			/* round up to next multiple of 8, add ICRC */
+			extra_bytes = hfi1_pad8((hdrwords << 2) + len) + 8;
+		}
 		dwords = (len + extra_bytes) >> 2;
 		hdr = (u32 *)&ps->s_txreq->phdr.hdr.opah;
 	} else {
@@ -981,15 +1042,23 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	sc = ps->s_txreq->psc;
 
 	if (likely(pbc == 0)) {
-		u8 vl = sc_to_vlt(dd_from_ibdev(qp->ibqp.device), sc5);
+		u8 vl = sc_to_vlt(ppd, sc5);
+		u32 l2;
+		u32 dlid;
 
 		/* set PBC_DC_INFO bit (aka SC[4]) in pbc */
-		if (ps->s_txreq->phdr.hdr.hdr_type)
-			pbc |= PBC_PACKET_BYPASS | PBC_INSERT_BYPASS_ICRC;
-		else
-			pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
+		if (ps->s_txreq->phdr.hdr.hdr_type) {
+			l2 = PBC_L2_16B;
+			dlid = hfi1_16B_get_dlid(&ps->s_txreq->phdr.hdr.opah);
+		} else {
+			pbc |= pbc_sc4_flag(sc5);
+			l2 = PBC_L2_9B;
+			dlid = ib_get_dlid(&ps->s_txreq->phdr.hdr.ibh);
+		}
 
-		pbc = create_pbc(ppd, pbc, qp->srate_mbps, vl, plen);
+		pbc = dd->params->create_pbc(ppd, pbc, qp->srate_mbps, vl, plen,
+					     l2, dlid,
+					     priv->s_sendcontext->hw_context);
 		if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
 			pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
 		else
@@ -1022,16 +1091,13 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			 */
 			hfi1_cdbg(PIO, "alloc failed. state active, queuing");
 			ret = pio_wait(qp, sc, ps, RVT_S_WAIT_PIO);
-			if (!ret)
-				/* txreq not queued - free */
-				goto bail;
-			/* tx consumed in wait */
-			return ret;
+			/* txreq may or may not be queued - done either way */
+			goto bail;
 		}
 	}
 
 	if (dwords == 0) {
-		pio_copy(ppd->dd, pbuf, pbc, hdr, hdrwords);
+		pio_copy(dd, pbuf, pbc, hdr, hdrwords);
 	} else {
 		seg_pio_copy_start(pbuf, pbc,
 				   hdr, hdrwords * 4);
@@ -1047,15 +1113,14 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		}
 		/* add icrc, lt byte, and padding to flit */
 		if (extra_bytes)
-			seg_pio_copy_mid(pbuf, ppd->dd->sdma_pad_dma,
+			seg_pio_copy_mid(pbuf, dd->sdma_pad_dma,
 					 extra_bytes);
 
 		seg_pio_copy_end(pbuf);
 	}
 
 	update_tx_opstats(qp, ps, plen);
-	trace_pio_output_ibhdr(dd_from_ibdev(qp->ibqp.device),
-			       &ps->s_txreq->phdr.hdr, ib_is_sc5(sc5));
+	trace_pio_output_ibhdr(dd, &ps->s_txreq->phdr.hdr, ib_is_sc5(sc5), 0);
 
 pio_bail:
 	spin_lock_irqsave(&qp->s_lock, flags);
@@ -1071,7 +1136,9 @@ pio_bail:
 	ret = 0;
 
 bail:
+	/* release ps hold on s_txreq */
 	hfi1_put_txreq(ps->s_txreq);
+	ps->s_txreq = NULL;
 	return ret;
 }
 
@@ -1116,7 +1183,7 @@ static inline int egress_pkey_matches_entry(u16 pkey, u16 ent)
 int egress_pkey_check(struct hfi1_pportdata *ppd, u32 slid, u16 pkey,
 		      u8 sc5, int8_t s_pkey_index)
 {
-	struct hfi1_devdata *dd;
+	struct hfi1_devdata *dd = ppd->dd;
 	int i;
 	int is_user_ctxt_mechanism = (s_pkey_index < 0);
 
@@ -1140,7 +1207,7 @@ int egress_pkey_check(struct hfi1_pportdata *ppd, u32 slid, u16 pkey,
 		return 0;
 	}
 
-	for (i = 0; i < MAX_PKEY_VALUES; i++) {
+	for (i = 0; i < dd->params->pkey_table_size; i++) {
 		if (egress_pkey_matches_entry(pkey, ppd->pkeys[i]))
 			return 0;
 	}
@@ -1152,7 +1219,6 @@ bad:
 	 */
 	if (!is_user_ctxt_mechanism) {
 		incr_cntr64(&ppd->port_xmit_constraint_errors);
-		dd = ppd->dd;
 		if (!(dd->err_info_xmit_constraint.status &
 		      OPA_EI_STATUS_SMASK)) {
 			dd->err_info_xmit_constraint.status |=
@@ -1214,6 +1280,8 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 {
 	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
 	struct hfi1_qp_priv *priv = qp->priv;
+	struct hfi1_ibport *ibp = to_iport(qp->ibqp.device, qp->port_num);
+	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 	struct ib_other_headers *ohdr = NULL;
 	send_routine sr;
 	int ret;
@@ -1251,7 +1319,7 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		ps->opcode = IB_OPCODE_UD_SEND_ONLY;
 
 	sr = get_send_routine(qp, ps);
-	ret = egress_pkey_check(dd->pport, slid, pkey,
+	ret = egress_pkey_check(ppd, slid, pkey,
 				priv->s_sc, qp->s_pkey_index);
 	if (unlikely(ret)) {
 		/*
@@ -1273,11 +1341,13 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		}
 		return -EINVAL;
 	}
-	if (sr == dd->process_dma_send && iowait_pio_pending(&priv->s_iowait))
-		return pio_wait(qp,
-				ps->s_txreq->psc,
-				ps,
-				HFI1_S_WAIT_PIO_DRAIN);
+	if (sr == dd->process_dma_send && iowait_pio_pending(&priv->s_iowait)) {
+		ret = pio_wait(qp, ps->s_txreq->psc, ps, HFI1_S_WAIT_PIO_DRAIN);
+		/* queued or not, ps is done with s_txreq */
+		hfi1_put_txreq(ps->s_txreq);
+		ps->s_txreq = NULL;
+		return ret;
+	}
 	return sr(qp, ps, 0);
 }
 
@@ -1338,6 +1408,10 @@ static inline u16 opa_speed_to_ib(u16 in)
 {
 	u16 out = 0;
 
+	if (in & OPA_LINK_SPEED_100G)
+		out |= IB_SPEED_NDR;
+	if (in & OPA_LINK_SPEED_50G)
+		out |= IB_SPEED_HDR;
 	if (in & OPA_LINK_SPEED_25G)
 		out |= IB_SPEED_EDR;
 	if (in & OPA_LINK_SPEED_12_5G)
@@ -1482,6 +1556,7 @@ static int hfi1_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr)
 	struct hfi1_devdata *dd;
 	u8 sc5;
 	u8 sl;
+	u8 vl;
 
 	if (hfi1_check_mcast(rdma_ah_get_dlid(ah_attr)) &&
 	    !(rdma_ah_get_ah_flags(ah_attr) & IB_AH_GRH))
@@ -1498,7 +1573,8 @@ static int hfi1_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr)
 	sl = array_index_nospec(sl, ARRAY_SIZE(ibp->sl_to_sc));
 
 	sc5 = ibp->sl_to_sc[sl];
-	if (sc_to_vlt(dd, sc5) > num_vls && sc_to_vlt(dd, sc5) != 0xf)
+	vl = sc_to_vlt(ppd, sc5);
+	if (vl > num_vls && vl != 0xf)
 		return -EINVAL;
 	return 0;
 }
@@ -1524,18 +1600,18 @@ static void hfi1_notify_new_ah(struct ib_device *ibdev,
 	hfi1_update_ah_attr(ibdev, attr);
 	hfi1_make_opa_lid(attr);
 	dd = dd_from_ppd(ppd);
-	ah->vl = sc_to_vlt(dd, sc5);
+	ah->vl = sc_to_vlt(ppd, sc5);
 	if (ah->vl < num_vls || ah->vl == 15)
-		ah->log_pmtu = ilog2(dd->vld[ah->vl].mtu);
+		ah->log_pmtu = ilog2(ppd->vld[ah->vl].mtu);
 }
 
 /**
  * hfi1_get_npkeys - return the size of the PKEY table for context 0
  * @dd: the hfi1_ib device
  */
-unsigned hfi1_get_npkeys(struct hfi1_devdata *dd)
+unsigned int hfi1_get_npkeys(struct hfi1_devdata *dd)
 {
-	return ARRAY_SIZE(dd->pport[0].pkeys);
+	return dd->params->pkey_table_size;
 }
 
 static void init_ibport(struct hfi1_pportdata *ppd)
@@ -1734,9 +1810,27 @@ static const struct ib_device_ops hfi1_dev_ops = {
 	.get_dev_fw_str = hfi1_get_dev_fw_str,
 	.get_hw_stats = get_hw_stats,
 	.modify_device = modify_device,
-	.port_groups = hfi1_attr_port_groups,
+	.port_groups = wfr_attr_port_groups,
 	/* keep process mad in the driver */
 	.process_mad = hfi1_process_mad,
+	.rdma_netdev_get_params = hfi1_ipoib_rn_get_params,
+};
+
+static const struct ib_device_ops cport_dev_ops = {
+	.owner = THIS_MODULE,
+	.driver_id = RDMA_DRIVER_HFI1,
+
+	/* XXX - some more of these probably need to change */
+	.alloc_hw_device_stats = hfi1_alloc_hw_device_stats,
+	.alloc_hw_port_stats = hfi_alloc_hw_port_stats,
+	.alloc_rdma_netdev = hfi1_vnic_alloc_rn,
+	.device_group = &ib_hfi1_attr_group,
+	.get_dev_fw_str = hfi1_get_dev_fw_str,
+	.get_hw_stats = get_hw_stats,
+	.modify_device = modify_device,
+	.port_groups = cport_attr_port_groups,
+	/* keep process mad in the driver */
+	.process_mad = cport_process_mad,
 	.rdma_netdev_get_params = hfi1_ipoib_rn_get_params,
 };
 
@@ -1749,13 +1843,17 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 {
 	struct hfi1_ibdev *dev = &dd->verbs_dev;
 	struct ib_device *ibdev = &dev->rdi.ibdev;
-	struct hfi1_pportdata *ppd = dd->pport;
-	struct hfi1_ibport *ibp = &ppd->ibport_data;
-	unsigned i;
+	struct hfi1_pportdata *ppd;
+	unsigned int i;
 	int ret;
+	u8 max_qos_shift;
 
-	for (i = 0; i < dd->num_pports; i++)
-		init_ibport(ppd + i);
+	/* rdmavt has only a single QPN space - use the largest QOS shift */
+	max_qos_shift = 1; /* always shift by at least 1 */
+	for (i = 0, ppd = dd->pport; i < dd->num_pports; i++, ppd++) {
+		init_ibport(ppd);
+		max_qos_shift = max_t(u8, max_qos_shift, ppd->qos_shift);
+	}
 
 	/* Only need to initialize non-zero fields. */
 
@@ -1771,7 +1869,8 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 		goto err_verbs_txreq;
 
 	/* Use first-port GUID as node guid */
-	ibdev->node_guid = get_sguid(ibp, HFI1_PORT_GUID_INDEX);
+	ibdev->node_guid = get_sguid(&dd->pport[HFI1_PORT_IDX].ibport_data,
+				     HFI1_PORT_GUID_INDEX);
 
 	/*
 	 * The system image GUID is supposed to be the same for all
@@ -1783,10 +1882,16 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	ibdev->phys_port_cnt = dd->num_pports;
 	ibdev->dev.parent = &dd->pcidev->dev;
 
-	ib_set_device_ops(ibdev, &hfi1_dev_ops);
+	if (dd->cport)
+		ib_set_device_ops(ibdev, &cport_dev_ops);
+	else
+		ib_set_device_ops(ibdev, &hfi1_dev_ops);
 
 	strscpy(ibdev->node_desc, init_utsname()->nodename,
 		sizeof(ibdev->node_desc));
+
+	if (IS_ENABLED(CONFIG_INFINIBAND_USER_ACCESS))
+		ibdev->driver_def = hfi1_ib_defs;
 
 	/*
 	 * Fill in rvt info object.
@@ -1807,7 +1912,7 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	dd->verbs_dev.rdi.dparms.qp_table_size = hfi1_qp_table_size;
 	dd->verbs_dev.rdi.dparms.qpn_start = 0;
 	dd->verbs_dev.rdi.dparms.qpn_inc = 1;
-	dd->verbs_dev.rdi.dparms.qos_shift = dd->qos_shift;
+	dd->verbs_dev.rdi.dparms.qos_shift = max_qos_shift;
 	dd->verbs_dev.rdi.dparms.qpn_res_start = RVT_KDETH_QP_BASE;
 	dd->verbs_dev.rdi.dparms.qpn_res_end = RVT_AIP_QP_MAX;
 	dd->verbs_dev.rdi.dparms.max_rdma_atomic = HFI1_MAX_RDMA_ATOMIC;
@@ -1840,6 +1945,9 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	dd->verbs_dev.rdi.driver_f.setup_wqe = hfi1_setup_wqe;
 	dd->verbs_dev.rdi.driver_f.comp_vect_cpu_lookup =
 						hfi1_comp_vect_mappings_lookup;
+	dd->verbs_dev.rdi.driver_f.alloc_ucontext = hfi1_alloc_ucontext;
+	dd->verbs_dev.rdi.driver_f.dealloc_ucontext = hfi1_dealloc_ucontext;
+	dd->verbs_dev.rdi.driver_f.mmap = hfi1_rdma_mmap;
 
 	/* completeion queue */
 	dd->verbs_dev.rdi.ibdev.num_comp_vectors = dd->comp_vect_possible_cpus;
@@ -1862,8 +1970,7 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	/* opcode translation table */
 	dd->verbs_dev.rdi.wc_opcode = ib_hfi1_wc_opcode;
 
-	ppd = dd->pport;
-	for (i = 0; i < dd->num_pports; i++, ppd++)
+	for (i = 0, ppd = dd->pport; i < dd->num_pports; i++, ppd++)
 		rvt_init_port(&dd->verbs_dev.rdi,
 			      &ppd->ibport_data.rvp,
 			      i,
@@ -1913,11 +2020,10 @@ void hfi1_cnp_rcv(struct hfi1_packet *packet)
 {
 	struct hfi1_ibport *ibp = rcd_to_iport(packet->rcd);
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
-	struct ib_header *hdr = packet->hdr;
 	struct rvt_qp *qp = packet->qp;
 	u32 lqpn, rqpn = 0;
 	u16 rlid = 0;
-	u8 sl, sc5, svc_type;
+	u8 sl, svc_type;
 
 	switch (packet->qp->ibqp.qp_type) {
 	case IB_QPT_UC:
@@ -1940,8 +2046,7 @@ void hfi1_cnp_rcv(struct hfi1_packet *packet)
 		return;
 	}
 
-	sc5 = hfi1_9B_get_sc5(hdr, packet->rhf);
-	sl = ibp->sc_to_sl[sc5];
+	sl = ibp->sc_to_sl[packet->sc];
 	lqpn = qp->ibqp.qp_num;
 
 	process_becn(ppd, sl, rlid, lqpn, rqpn, svc_type);

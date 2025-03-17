@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause */
 /*
+ * Copyright(c) 2024 Cornelis Networks, Inc.
  * Copyright(c) 2015, 2016 Intel Corporation.
  */
 
 #ifndef _HFI1_DEVICE_H
 #define _HFI1_DEVICE_H
+
+#include <linux/cdev.h>
+#include <linux/kobject.h>
 
 int hfi1_cdev_init(int minor, const char *name,
 		   const struct file_operations *fops,

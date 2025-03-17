@@ -21,3 +21,28 @@ config SDMA_VERBOSITY
 	help
 	This is a configuration flag to enable verbose
 	SDMA debug
+config HFI1_NVIDIA
+	bool "Build NVIDIA memory-pinning code"
+	depends on INFINIBAND_HFI1
+	default n
+	help
+	  Build hfi1 NVIDIA GPU memory-pinning code for user_sdma. Requires
+	  NVIDIA proprietary driver header files.
+config HFI1_AMD
+	bool "Build AMD memory-pinning code"
+	depends on INFINIBAND_HFI1
+	select NEED_SG_DMA_LENGTH
+	default n
+	help
+	  Build hfi1 AMD GPU memory-pinning code for user_sdma. Requires AMD
+	  ROCk out-of-tree driver header files.
+config HFI1_AMD_SOFTDEP
+	bool "Softdep on amdgpu and use symbol_get() to link"
+	depends on HFI1_AMD
+	default y
+	help
+	  Add amdgpu as a soft dependency and get amdkfd_query_rdma_interface()
+	  using symbol_get(). This allows hfi1 to load even if amdgpu is not
+	  available. Does not work on kernels where symbol_get() of
+	  non-EXPORT_SYMBOL_GPL() symbols fails. This is at present necessary
+	  when amdgpu Module.symvers is not available when hfi1 is built.

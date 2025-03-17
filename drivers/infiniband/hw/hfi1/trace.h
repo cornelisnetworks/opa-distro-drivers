@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause */
 /*
+ * Copyright(c) 2020-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015 - 2018 Intel Corporation.
  */
 
@@ -22,3 +23,4 @@ __print_symbolic(etype,                         \
 #include "trace_mmu.h"
 #include "trace_iowait.h"
 #include "trace_tid.h"
+#include "trace_pin.h"

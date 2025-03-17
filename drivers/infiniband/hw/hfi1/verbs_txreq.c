@@ -10,8 +10,9 @@
 
 #define TXREQ_LEN 24
 
-void hfi1_put_txreq(struct verbs_txreq *tx)
+void dealloc_txreq(struct kref *ref)
 {
+	struct verbs_txreq *tx = container_of(ref, struct verbs_txreq, ref);
 	struct hfi1_ibdev *dev;
 	struct rvt_qp *qp;
 	unsigned long flags;

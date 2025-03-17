@@ -70,14 +70,14 @@ struct sk_buff *hfi1_ipoib_prepare_skb(struct hfi1_netdev_rxq *rxq,
 int hfi1_ipoib_rxq_init(struct net_device *netdev)
 {
 	struct hfi1_ipoib_dev_priv *ipoib_priv = hfi1_ipoib_priv(netdev);
-	struct hfi1_devdata *dd = ipoib_priv->dd;
+	struct hfi1_pportdata *ppd = ipoib_priv->ppd;
 	int ret;
 
-	ret = hfi1_netdev_rx_init(dd);
+	ret = hfi1_netdev_rx_init(ppd);
 	if (ret)
 		return ret;
 
-	hfi1_init_aip_rsm(dd);
+	hfi1_init_aip_rsm(ppd);
 
 	return ret;
 }
@@ -85,8 +85,8 @@ int hfi1_ipoib_rxq_init(struct net_device *netdev)
 void hfi1_ipoib_rxq_deinit(struct net_device *netdev)
 {
 	struct hfi1_ipoib_dev_priv *ipoib_priv = hfi1_ipoib_priv(netdev);
-	struct hfi1_devdata *dd = ipoib_priv->dd;
+	struct hfi1_pportdata *ppd = ipoib_priv->ppd;
 
-	hfi1_deinit_aip_rsm(dd);
-	hfi1_netdev_rx_destroy(dd);
+	hfi1_deinit_aip_rsm(ppd);
+	hfi1_netdev_rx_destroy(ppd);
 }

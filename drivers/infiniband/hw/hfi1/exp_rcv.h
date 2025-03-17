@@ -15,6 +15,11 @@
 #define EXP_TID_TIDCTRL_SHIFT 20
 #define EXP_TID_TIDIDX_MASK   0x3FFULL
 #define EXP_TID_TIDIDX_SHIFT  22
+
+/* Expected buffer entry (TID) addressing supported by the hardware */
+#define EXP_TID_ADDR_SHIFT    12
+#define EXP_TID_ADDR_SIZE     BIT(EXP_TID_ADDR_SHIFT)
+
 #define EXP_TID_GET(tid, field)	\
 	(((tid) >> EXP_TID_TID##field##_SHIFT) & EXP_TID_TID##field##_MASK)
 
@@ -81,26 +86,6 @@ struct tid_group {
 	u8 used;
 	u8 map;
 };
-
-/*
- * Write an "empty" RcvArray entry.
- * This function exists so the TID registaration code can use it
- * to write to unused/unneeded entries and still take advantage
- * of the WC performance improvements. The HFI will ignore this
- * write to the RcvArray entry.
- */
-static inline void rcv_array_wc_fill(struct hfi1_devdata *dd, u32 index)
-{
-	/*
-	 * Doing the WC fill writes only makes sense if the device is
-	 * present and the RcvArray has been mapped as WC memory.
-	 */
-	if ((dd->flags & HFI1_PRESENT) && dd->rcvarray_wc) {
-		writeq(0, dd->rcvarray_wc + (index * 8));
-		if ((index & 3) == 3)
-			flush_wc();
-	}
-}
 
 static inline void tid_group_add_tail(struct tid_group *grp,
 				      struct exp_tid_set *set)

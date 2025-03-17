@@ -533,9 +533,9 @@ int refresh_qsfp_cache(struct hfi1_pportdata *ppd, struct qsfp_data *cp)
 
 	ret = qsfp_read(ppd, target, 0, cache, QSFP_PAGESIZE);
 	if (ret != QSFP_PAGESIZE) {
-		dd_dev_info(ppd->dd,
-			    "%s: Page 0 read failed, expected %d, got %d\n",
-			    __func__, QSFP_PAGESIZE, ret);
+		ppd_dev_info(ppd,
+			     "%s: Page 0 read failed, expected %d, got %d\n",
+			     __func__, QSFP_PAGESIZE, ret);
 		goto bail;
 	}
 
@@ -546,48 +546,48 @@ int refresh_qsfp_cache(struct hfi1_pportdata *ppd, struct qsfp_data *cp)
 			/* all */
 			ret = qsfp_read(ppd, target, 384, cache + 256, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 			ret = qsfp_read(ppd, target, 640, cache + 384, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 			ret = qsfp_read(ppd, target, 896, cache + 512, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 		} else if ((cache[195] & 0x80) == 0x80) {
 			/* only page 2 and 3 */
 			ret = qsfp_read(ppd, target, 640, cache + 384, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 			ret = qsfp_read(ppd, target, 896, cache + 512, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 		} else if ((cache[195] & 0x40) == 0x40) {
 			/* only page 1 and 3 */
 			ret = qsfp_read(ppd, target, 384, cache + 256, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 			ret = qsfp_read(ppd, target, 896, cache + 512, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 		} else {
 			/* only page 3 */
 			ret = qsfp_read(ppd, target, 896, cache + 512, 128);
 			if (ret <= 0 || ret != 128) {
-				dd_dev_info(ppd->dd, "%s failed\n", __func__);
+				ppd_dev_info(ppd, "%s failed\n", __func__);
 				goto bail;
 			}
 		}
@@ -662,21 +662,12 @@ int qsfp_mod_present(struct hfi1_pportdata *ppd)
  * For upper pages that are optional, if they are not valid, returns the
  * particular range of bytes in the data buffer set to 0.
  */
-int get_cable_info(struct hfi1_devdata *dd, u32 port_num, u32 addr, u32 len,
-		   u8 *data)
+int get_cable_info(struct hfi1_pportdata *ppd, u32 addr, u32 len, u8 *data)
 {
-	struct hfi1_pportdata *ppd;
+	struct hfi1_devdata *dd = ppd->dd;
 	u32 excess_len = len;
 	int ret = 0, offset = 0;
 
-	if (port_num > dd->num_pports || port_num < 1) {
-		dd_dev_info(dd, "%s: Invalid port number %d\n",
-			    __func__, port_num);
-		ret = -EINVAL;
-		goto set_zeroes;
-	}
-
-	ppd = dd->pport + (port_num - 1);
 	if (!qsfp_mod_present(ppd)) {
 		ret = -ENODEV;
 		goto set_zeroes;

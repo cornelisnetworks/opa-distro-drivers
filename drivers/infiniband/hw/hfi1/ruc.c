@@ -240,12 +240,22 @@ static inline void hfi1_make_ruc_header_16B(struct rvt_qp *qp,
 	u32 slid;
 	u16 pkey = hfi1_get_pkey(ibp, qp->s_pkey_index);
 	u8 l4 = OPA_16B_L4_IB_LOCAL;
-	u8 extra_bytes = hfi1_get_16b_padding(
-				(ps->s_txreq->hdr_dwords << 2),
-				ps->s_txreq->s_cur_size);
-	u32 nwords = SIZE_OF_CRC + ((ps->s_txreq->s_cur_size +
-				 extra_bytes + SIZE_OF_LT) >> 2);
+	u8 extra_bytes;
+	u32 nwords;
 	bool becn = false;
+
+	if (ppd->dd->params->chip_type == CHIP_WFR) {
+		extra_bytes = hfi1_get_16b_padding((ps->s_txreq->hdr_dwords << 2),
+						   ps->s_txreq->s_cur_size);
+		nwords = SIZE_OF_CRC + ((ps->s_txreq->s_cur_size +
+				extra_bytes + SIZE_OF_LT) >> 2);
+	} else {
+		/* round up to multiple of 8 */
+		extra_bytes = hfi1_pad8((ps->s_txreq->hdr_dwords << 2) +
+					ps->s_txreq->s_cur_size);
+		/* add in ICRC QW */
+		nwords = (ps->s_txreq->s_cur_size + extra_bytes + 8) >> 2;
+	}
 
 	if (unlikely(rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH) &&
 	    hfi1_check_mcast(rdma_ah_get_dlid(&qp->remote_ah_attr))) {
@@ -433,7 +443,7 @@ bool hfi1_schedule_send_yield(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 
 	if (unlikely(time_after(jiffies, ps->timeout))) {
 		if (!ps->in_thread ||
-		    workqueue_congested(ps->cpu, ps->ppd->hfi1_wq)) {
+		    workqueue_congested(ps->cpu, ps->ppd->dd->hfi1_wq)) {
 			spin_lock_irqsave(&qp->s_lock, ps->flags);
 			if (!tid) {
 				qp->s_flags &= ~RVT_S_BUSY;

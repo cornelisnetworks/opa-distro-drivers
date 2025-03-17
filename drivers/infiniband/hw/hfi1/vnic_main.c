@@ -187,19 +187,6 @@ static void hfi1_vnic_get_stats64(struct net_device *netdev,
 	hfi1_vnic_update_stats(vinfo, vstats);
 }
 
-static u64 create_bypass_pbc(u32 vl, u32 dw_len)
-{
-	u64 pbc;
-
-	pbc = ((u64)PBC_IHCRC_NONE << PBC_INSERT_HCRC_SHIFT)
-		| PBC_INSERT_BYPASS_ICRC | PBC_CREDIT_RETURN
-		| PBC_PACKET_BYPASS
-		| ((vl & PBC_VL_MASK) << PBC_VL_SHIFT)
-		| (dw_len & PBC_LENGTH_DWS_MASK) << PBC_LENGTH_DWS_SHIFT;
-
-	return pbc;
-}
-
 /* hfi1_vnic_maybe_stop_tx - stop tx queue if required */
 static void hfi1_vnic_maybe_stop_tx(struct hfi1_vnic_vport_info *vinfo,
 				    u8 q_idx)
@@ -215,9 +202,15 @@ static netdev_tx_t hfi1_netdev_start_xmit(struct sk_buff *skb,
 					  struct net_device *netdev)
 {
 	struct hfi1_vnic_vport_info *vinfo = opa_vnic_dev_priv(netdev);
+	struct rdma_netdev *rn = netdev_priv(netdev);
+	const u64 flags = PBC_CREDIT_RETURN;
 	u8 pad_len, q_idx = skb->queue_mapping;
 	struct hfi1_devdata *dd = vinfo->dd;
+	struct hfi1_pportdata *ppd = vinfo->ppd;
 	struct opa_vnic_skb_mdata *mdata;
+	void *hdr;
+	u32 dlid;
+	int sctxt;
 	u32 pkt_len, total_len;
 	int err = -EINVAL;
 	u64 pbc;
@@ -228,9 +221,21 @@ static netdev_tx_t hfi1_netdev_start_xmit(struct sk_buff *skb,
 		goto tx_finish;
 	}
 
+	/*
+	 * Find a send context for SDMA checking.  VNIC uses only SDMA for tx,
+	 * so there is no direct use of a send context.  However, VNIC uses
+	 * netdev_rx for rx.  Use the first netdev_rx's send context with the
+	 * expectation that all the rx have the same checking.
+	 */
+	if (ppd->netdev_rx->num_rx_q == 0) {
+		vinfo->stats[q_idx].tx_dlid_zero++;
+		goto tx_finish;
+	}
+	sctxt = ppd->netdev_rx->rxq[0].rcd->sc->hw_context;
+
 	/* take out meta data */
 	mdata = (struct opa_vnic_skb_mdata *)skb->data;
-	skb_pull(skb, sizeof(*mdata));
+	hdr = skb_pull(skb, sizeof(*mdata));
 	if (unlikely(mdata->flags & OPA_VNIC_SKB_MDATA_ENCAP_ERR)) {
 		vinfo->stats[q_idx].tx_dlid_zero++;
 		goto tx_finish;
@@ -248,7 +253,11 @@ static netdev_tx_t hfi1_netdev_start_xmit(struct sk_buff *skb,
 	pkt_len = (skb->len + pad_len) >> 2;
 	total_len = pkt_len + 2; /* PBC + packet */
 
-	pbc = create_bypass_pbc(mdata->vl, total_len);
+	/* the start of skb is now the VNIC 16B header - extract the dlid */
+	dlid = hfi1_16B_get_dlid(hdr);
+	pbc = dd->params->create_pbc(&dd->pport[rn->port_num - 1], flags, 0,
+				     mdata->vl, total_len, PBC_L2_16B, dlid,
+				     sctxt);
 
 	skb_get(skb);
 	v_dbg("pbc 0x%016llX len %d pad_len %d\n", pbc, skb->len, pad_len);
@@ -279,12 +288,14 @@ static u16 hfi1_vnic_select_queue(struct net_device *netdev,
 				  struct sk_buff *skb,
 				  struct net_device *sb_dev)
 {
+	struct rdma_netdev *rn = netdev_priv(netdev);
 	struct hfi1_vnic_vport_info *vinfo = opa_vnic_dev_priv(netdev);
+	struct hfi1_pportdata *ppd = vinfo->dd->pport + (rn->port_num - 1);
 	struct opa_vnic_skb_mdata *mdata;
 	struct sdma_engine *sde;
 
 	mdata = (struct opa_vnic_skb_mdata *)skb->data;
-	sde = sdma_select_engine_vl(vinfo->dd, mdata->entropy, mdata->vl);
+	sde = sdma_select_engine_vl(ppd, mdata->entropy, mdata->vl);
 	return sde->this_idx;
 }
 
@@ -308,20 +319,20 @@ static inline int hfi1_vnic_decap_skb(struct hfi1_vnic_rx_queue *rxq,
 	return rc;
 }
 
-static struct hfi1_vnic_vport_info *get_vnic_port(struct hfi1_devdata *dd,
+static struct hfi1_vnic_vport_info *get_vnic_port(struct hfi1_pportdata *ppd,
 						  int vesw_id)
 {
 	int vnic_id = VNIC_ID(vesw_id);
 
-	return hfi1_netdev_get_data(dd, vnic_id);
+	return hfi1_netdev_get_data(ppd, vnic_id);
 }
 
-static struct hfi1_vnic_vport_info *get_first_vnic_port(struct hfi1_devdata *dd)
+static struct hfi1_vnic_vport_info *get_first_vnic_port(struct hfi1_pportdata *ppd)
 {
 	struct hfi1_vnic_vport_info *vinfo;
 	int next_id = VNIC_ID(0);
 
-	vinfo = hfi1_netdev_get_first_data(dd, &next_id);
+	vinfo = hfi1_netdev_get_first_data(ppd, &next_id);
 
 	if (next_id > VNIC_ID(VNIC_MASK))
 		return NULL;
@@ -332,6 +343,7 @@ static struct hfi1_vnic_vport_info *get_first_vnic_port(struct hfi1_devdata *dd)
 void hfi1_vnic_bypass_rcv(struct hfi1_packet *packet)
 {
 	struct hfi1_devdata *dd = packet->rcd->dd;
+	struct hfi1_pportdata *ppd = packet->rcd->ppd;
 	struct hfi1_vnic_vport_info *vinfo = NULL;
 	struct hfi1_vnic_rx_queue *rxq;
 	struct sk_buff *skb;
@@ -342,7 +354,7 @@ void hfi1_vnic_bypass_rcv(struct hfi1_packet *packet)
 	l4_type = hfi1_16B_get_l4(packet->ebuf);
 	if (likely(l4_type == OPA_16B_L4_ETHR)) {
 		vesw_id = HFI1_VNIC_GET_VESWID(packet->ebuf);
-		vinfo = get_vnic_port(dd, vesw_id);
+		vinfo = get_vnic_port(ppd, vesw_id);
 
 		/*
 		 * In case of invalid vesw id, count the error on
@@ -351,7 +363,7 @@ void hfi1_vnic_bypass_rcv(struct hfi1_packet *packet)
 		if (unlikely(!vinfo)) {
 			struct hfi1_vnic_vport_info *vinfo_tmp;
 
-			vinfo_tmp = get_first_vnic_port(dd);
+			vinfo_tmp = get_first_vnic_port(ppd);
 			if (vinfo_tmp) {
 				spin_lock(&vport_cntr_lock);
 				vinfo_tmp->stats[0].netstats.rx_nohandler++;
@@ -403,7 +415,7 @@ void hfi1_vnic_bypass_rcv(struct hfi1_packet *packet)
 
 static int hfi1_vnic_up(struct hfi1_vnic_vport_info *vinfo)
 {
-	struct hfi1_devdata *dd = vinfo->dd;
+	struct hfi1_pportdata *ppd = vinfo->ppd;
 	struct net_device *netdev = vinfo->netdev;
 	int rc;
 
@@ -411,11 +423,11 @@ static int hfi1_vnic_up(struct hfi1_vnic_vport_info *vinfo)
 	if (!vinfo->vesw_id)
 		return -EINVAL;
 
-	rc = hfi1_netdev_add_data(dd, VNIC_ID(vinfo->vesw_id), vinfo);
+	rc = hfi1_netdev_add_data(ppd, VNIC_ID(vinfo->vesw_id), vinfo);
 	if (rc < 0)
 		return rc;
 
-	rc = hfi1_netdev_rx_init(dd);
+	rc = hfi1_netdev_rx_init(ppd);
 	if (rc)
 		goto err_remove;
 
@@ -426,20 +438,20 @@ static int hfi1_vnic_up(struct hfi1_vnic_vport_info *vinfo)
 	return 0;
 
 err_remove:
-	hfi1_netdev_remove_data(dd, VNIC_ID(vinfo->vesw_id));
+	hfi1_netdev_remove_data(ppd, VNIC_ID(vinfo->vesw_id));
 	return rc;
 }
 
 static void hfi1_vnic_down(struct hfi1_vnic_vport_info *vinfo)
 {
-	struct hfi1_devdata *dd = vinfo->dd;
+	struct hfi1_pportdata *ppd = vinfo->ppd;
 
 	clear_bit(HFI1_VNIC_UP, &vinfo->flags);
 	netif_carrier_off(vinfo->netdev);
 	netif_tx_disable(vinfo->netdev);
-	hfi1_netdev_remove_data(dd, VNIC_ID(vinfo->vesw_id));
+	hfi1_netdev_remove_data(ppd, VNIC_ID(vinfo->vesw_id));
 
-	hfi1_netdev_rx_destroy(dd);
+	hfi1_netdev_rx_destroy(ppd);
 }
 
 static int hfi1_netdev_open(struct net_device *netdev)
@@ -467,6 +479,7 @@ static int hfi1_netdev_close(struct net_device *netdev)
 static int hfi1_vnic_init(struct hfi1_vnic_vport_info *vinfo)
 {
 	struct hfi1_devdata *dd = vinfo->dd;
+	struct hfi1_pportdata *ppd = vinfo->ppd;
 	int rc = 0;
 
 	mutex_lock(&hfi1_mutex);
@@ -476,13 +489,13 @@ static int hfi1_vnic_init(struct hfi1_vnic_vport_info *vinfo)
 			goto txreq_fail;
 	}
 
-	rc = hfi1_netdev_rx_init(dd);
+	rc = hfi1_netdev_rx_init(ppd);
 	if (rc) {
 		dd_dev_err(dd, "Unable to initialize netdev contexts\n");
 		goto alloc_fail;
 	}
 
-	hfi1_init_vnic_rsm(dd);
+	hfi1_init_vnic_rsm(ppd);
 
 	dd->vnic_num_vports++;
 	hfi1_vnic_sdma_init(vinfo);
@@ -498,14 +511,15 @@ txreq_fail:
 static void hfi1_vnic_deinit(struct hfi1_vnic_vport_info *vinfo)
 {
 	struct hfi1_devdata *dd = vinfo->dd;
+	struct hfi1_pportdata *ppd = vinfo->ppd;
 
 	mutex_lock(&hfi1_mutex);
 	if (--dd->vnic_num_vports == 0) {
-		hfi1_deinit_vnic_rsm(dd);
 		hfi1_vnic_txreq_deinit(dd);
 	}
+	hfi1_deinit_vnic_rsm(ppd);
 	mutex_unlock(&hfi1_mutex);
-	hfi1_netdev_rx_destroy(dd);
+	hfi1_netdev_rx_destroy(ppd);
 }
 
 static void hfi1_vnic_set_vesw_id(struct net_device *netdev, int id)
@@ -582,11 +596,13 @@ struct net_device *hfi1_vnic_alloc_rn(struct ib_device *device,
 	rn = netdev_priv(netdev);
 	vinfo = opa_vnic_dev_priv(netdev);
 	vinfo->dd = dd;
+	vinfo->ppd = &dd->pport[port_num - 1];
 	vinfo->num_tx_q = chip_sdma_engines(dd);
 	vinfo->num_rx_q = dd->num_netdev_contexts;
 	vinfo->netdev = netdev;
 	rn->free_rdma_netdev = hfi1_vnic_free_rn;
 	rn->set_id = hfi1_vnic_set_vesw_id;
+	rn->port_num = port_num;
 
 	netdev->features = NETIF_F_HIGHDMA | NETIF_F_SG;
 	netdev->hw_features = netdev->features;

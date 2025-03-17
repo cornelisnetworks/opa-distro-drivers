@@ -22,6 +22,7 @@ struct verbs_txreq {
 	struct rvt_sge_state    *ss;
 	struct sdma_engine     *sde;
 	struct send_context     *psc;
+	struct kref		ref;
 	u16                     hdr_dwords;
 	u16			s_cur_size;
 };
@@ -31,8 +32,8 @@ struct verbs_txreq *__get_txreq(struct hfi1_ibdev *dev,
 				struct rvt_qp *qp);
 
 #define VERBS_TXREQ_GFP (GFP_ATOMIC | __GFP_NOWARN)
-static inline struct verbs_txreq *get_txreq(struct hfi1_ibdev *dev,
-					    struct rvt_qp *qp)
+static inline struct verbs_txreq *alloc_txreq(struct hfi1_ibdev *dev,
+					      struct rvt_qp *qp)
 	__must_hold(&qp->slock)
 {
 	struct verbs_txreq *tx;
@@ -54,6 +55,7 @@ static inline struct verbs_txreq *get_txreq(struct hfi1_ibdev *dev,
 	/* Set the header type */
 	tx->phdr.hdr.hdr_type = priv->hdr_type;
 	tx->txreq.flags = 0;
+	kref_init(&tx->ref);
 	return tx;
 }
 
@@ -72,7 +74,23 @@ static inline bool verbs_txreq_queued(struct iowait_work *w)
 	return iowait_packet_queued(w);
 }
 
-void hfi1_put_txreq(struct verbs_txreq *tx);
+void dealloc_txreq(struct kref *ref);
+
+/*
+ * There are no locks to enforce ordering between hfi1_get_txreq() and
+ * hfi1_put_txreq().  The caller of hfi1_get_txreq() must be currently
+ * holding a reference to avoid any race with hfi1_put_txreq().
+ */
+static inline void hfi1_get_txreq(struct verbs_txreq *tx)
+{
+	kref_get(&tx->ref);
+}
+
+static inline void hfi1_put_txreq(struct verbs_txreq *tx)
+{
+	kref_put(&tx->ref, dealloc_txreq);
+}
+
 int verbs_txreq_init(struct hfi1_ibdev *dev);
 void verbs_txreq_exit(struct hfi1_ibdev *dev);
 

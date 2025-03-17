@@ -290,6 +290,10 @@ int hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 		     const struct ib_wc *in_wc, const struct ib_grh *in_grh,
 		     const struct ib_mad *in_mad, struct ib_mad *out_mad,
 		     size_t *out_mad_size, u16 *out_mad_pkey_index);
+int cport_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
+		      const struct ib_wc *in_wc, const struct ib_grh *in_grh,
+		      const struct ib_mad *in_mad, struct ib_mad *out_mad,
+		      size_t *out_mad_size, u16 *out_mad_pkey_index);
 
 /*
  * The PSN_MASK and PSN_SHIFT allow for
@@ -354,9 +358,6 @@ static inline u32 full_flow_psn(struct tid_rdma_flow *flow, u32 psn)
 {
 	return __full_flow_psn(&flow->flow_state, psn);
 }
-
-struct verbs_txreq;
-void hfi1_put_txreq(struct verbs_txreq *tx);
 
 int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
 
@@ -429,7 +430,7 @@ void hfi1_ib_rcv(struct hfi1_packet *packet);
 
 void hfi1_16B_rcv(struct hfi1_packet *packet);
 
-unsigned hfi1_get_npkeys(struct hfi1_devdata *);
+unsigned int hfi1_get_npkeys(struct hfi1_devdata *);
 
 int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			u64 pbc);

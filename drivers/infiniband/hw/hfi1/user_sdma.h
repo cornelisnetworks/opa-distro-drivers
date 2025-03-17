@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause */
 /*
- * Copyright(c) 2023 - Cornelis Networks, Inc.
+ * Copyright(c) 2023-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015 - 2018 Intel Corporation.
  */
 #ifndef _HFI1_USER_SDMA_H
@@ -18,6 +18,8 @@
 
 /* The maximum number of Data io vectors per message/request */
 #define MAX_VECTORS_PER_REQ 8
+static_assert(MAX_VECTORS_PER_REQ <= HFI1_MAX_MEMINFO_ENTRIES);
+
 /*
  * Maximum number of packet to send from each message/request
  * before moving to the next one.
@@ -29,9 +31,11 @@
 #define req_opcode(x) \
 	(((x) >> HFI1_SDMA_REQ_OPCODE_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
 #define req_version(x) \
-	(((x) >> HFI1_SDMA_REQ_VERSION_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
+	(((x) >> HFI1_SDMA_REQ_VERSION_SHIFT) & HFI1_SDMA_REQ_VERSION_MASK)
 #define req_iovcnt(x) \
 	(((x) >> HFI1_SDMA_REQ_IOVCNT_SHIFT) & HFI1_SDMA_REQ_IOVCNT_MASK)
+#define req_has_meminfo(x) \
+	(((x) >> HFI1_SDMA_REQ_MEMINFO_SHIFT) & HFI1_SDMA_REQ_MEMINFO_MASK)
 
 /* Number of BTH.PSN bits used for sequence number in expected rcvs */
 #define BTH_SEQ_MASK 0x7ffull
@@ -39,9 +43,6 @@
 #define AHG_KDETH_INTR_SHIFT 12
 #define AHG_KDETH_SH_SHIFT   13
 #define AHG_KDETH_ARRAY_SIZE  9
-
-#define PBC2LRH(x) ((((x) & 0xfff) << 2) - 4)
-#define LRH2PBC(x) ((((x) >> 2) + 1) & 0xfff)
 
 /**
  * Build an SDMA AHG header update descriptor and save it to an array.
@@ -85,7 +86,6 @@ struct hfi1_user_sdma_pkt_q {
 	u16 subctxt;
 	u16 n_max_reqs;
 	atomic_t n_reqs;
-	u16 reqidx;
 	struct hfi1_devdata *dd;
 	struct kmem_cache *txreq_cache;
 	struct user_sdma_request *reqs;
@@ -94,7 +94,7 @@ struct hfi1_user_sdma_pkt_q {
 	enum pkt_q_sdma_state state;
 	wait_queue_head_t wait;
 	unsigned long unpinned;
-	struct mmu_rb_handler *handler;
+	struct pinning_state pinning_state;
 	atomic_t n_locked;
 };
 
@@ -104,8 +104,11 @@ struct hfi1_user_sdma_comp_q {
 };
 
 struct user_sdma_iovec {
-	struct list_head list;
 	struct iovec iov;
+	/* memory type for this vector */
+	unsigned int type;
+	/* memory type context for this vector */
+	u64 context;
 	/*
 	 * offset into the virtual address space of the vector at
 	 * which we last left off.
@@ -119,9 +122,46 @@ struct evict_data {
 	u32 target;	/* target count to evict */
 };
 
+/*
+ * User 16B header.  Differences between this and struct hfi1_pkt_hdr:
+ * o LRH size: 16 bytes vs 8 bytes
+ * o LRH byte ordering: LE vs BE
+ * o LRH units: 32 bits vs 16 bits
+ */
+struct hfi1_pkt_header16b {
+	__le16 pbc[4];
+	__le32 lrh[4];
+	__be32 bth[3];
+	struct hfi1_kdeth_header kdeth;
+} __packed;
+
+union user_pkt_header {
+	__le16 pbc[4];
+	struct hfi1_pkt_header hdr9b;
+	struct hfi1_pkt_header16b hdr16b;
+};
+
+/* Pinning-cache entry reference type */
+struct user_sdma_pinref {
+	void *ptr;
+	u16 memtype;
+	/** Used for determining eviction eligibility; set from &user_sdma_request.seqnum */
+	u16 req_seqnum;
+	/** Used for determining most-recently used; set from &user_sdma_request.pinrefs_seqnum */
+	u16 pinref_seqnum;
+};
+
+#define PINREF_ENTRIES 7
+
 struct user_sdma_request {
 	/* This is the original header from user space */
-	struct hfi1_pkt_header hdr;
+	union user_pkt_header h;
+	unsigned long hsize;
+	u32 lrh_len_bytes;
+	u32 pad_mask;
+
+	/* Memory type information for each data iovec entry. */
+	struct sdma_req_meminfo meminfo;
 
 	/* Read mostly fields */
 	struct hfi1_user_sdma_pkt_q *pq ____cacheline_aligned_in_smp;
@@ -171,6 +211,19 @@ struct user_sdma_request {
 	/* progress index moving along the iovs array */
 	u8 iov_idx;
 	u8 has_error;
+	/* possible appended bytes (16B ICRC QW) */
+	u8 tailsize;
+	/* true if this is a 16B request */
+	bool is16b;
+
+	u16 n_pinrefs;
+	/*
+	 * Since regular .seqnum is only incremented per-txreq, need separate
+	 * .pinref_seqnum to distinguish age of pinrefs within a txreq.
+	 */
+	u32 pinref_seqnum;
+	/* Shared space for storing pin_* cacherefs */
+	struct user_sdma_pinref pinrefs[PINREF_ENTRIES];
 
 	struct user_sdma_iovec iovs[MAX_VECTORS_PER_REQ];
 } ____cacheline_aligned_in_smp;
@@ -183,13 +236,21 @@ struct user_sdma_request {
  */
 struct user_sdma_txreq {
 	/* Packet header for the txreq */
-	struct hfi1_pkt_header hdr;
+	union user_pkt_header h;
 	struct sdma_txreq txreq;
-	struct list_head list;
 	struct user_sdma_request *req;
+	struct user_sdma_pinref *pinrefs;
+	u16 n_pinrefs;
 	u16 flags;
 	u16 seqnum;
 };
+
+int hfi1_user_sdma_add_ref(struct user_sdma_txreq *tx, void *ptr,
+			   u16 memtype);
+struct user_sdma_pinref *hfi1_user_sdma_mru_ref(struct user_sdma_txreq *tx,
+						u16 memtype);
+void hfi1_user_sdma_touch_ref(struct user_sdma_txreq *tx,
+			      struct user_sdma_pinref *d);
 
 int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 				struct hfi1_filedata *fd);

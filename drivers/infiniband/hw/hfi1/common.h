@@ -136,6 +136,32 @@
 
 #define HFI1_USER_SWVERSION ((HFI1_USER_SWMAJOR << HFI1_SWMAJOR_SHIFT) | \
 			     HFI1_USER_SWMINOR)
+#define HFI1_RDMA_USER_SWVERSION \
+	((HFI1_RDMA_USER_SWMAJOR << HFI1_SWMAJOR_SHIFT) | \
+	 HFI1_RDMA_USER_SWMINOR)
+
+/*
+ * Diagnostics can send a packet by writing the following
+ * struct to the diag packet special file.
+ *
+ * This allows a custom PBC qword, so that special modes and deliberate
+ * changes to CRCs can be used.
+ */
+#define _DIAG_PKT_VERS 1
+struct diag_pkt {
+	__u16 version;		/* structure version */
+	__u16 unit;		/* which device */
+	__u16 sw_index;		/* send sw index to use */
+	__u16 len;		/* data length, in bytes */
+	__u16 port;		/* port number */
+	__u16 unused;
+	__u32 flags;		/* call flags */
+	__u64 data;		/* user data pointer */
+	__u64 pbc;		/* PBC for the packet */
+};
+
+/* diag_pkt flags */
+#define F_DIAGPKT_WAIT 0x1	/* wait until packet is sent */
 
 /*
  * The next set of defines are for packet headers, and chip register
@@ -232,7 +258,7 @@
 #define SC15_PACKET 0xF
 #define SIZE_OF_CRC 1
 #define SIZE_OF_LT 1
-#define MAX_16B_PADDING 12 /* CRC = 4, LT = 1, Pad = 0 to 7 bytes */
+#define MAX_16B_PADDING 16 /* CRC = 4 or 8, LT = 1, Pad = 0 to 7 bytes */
 
 #define LIM_MGMT_P_KEY       0x7FFF
 #define FULL_MGMT_P_KEY      0xFFFF
@@ -250,7 +276,7 @@ static inline __u64 rhf_to_cpu(const __le32 *rbuf)
 	return __le64_to_cpu(*((__le64 *)rbuf));
 }
 
-static inline u64 rhf_err_flags(u64 rhf)
+static inline u64 wfr_rhf_err_flags(u64 rhf)
 {
 	return rhf & RHF_ERROR_SMASK;
 }
@@ -260,7 +286,7 @@ static inline u32 rhf_rcv_type(u64 rhf)
 	return (rhf >> RHF_RCV_TYPE_SHIFT) & RHF_RCV_TYPE_MASK;
 }
 
-static inline u32 rhf_rcv_type_err(u64 rhf)
+static inline u32 wfr_rhf_rcv_type_err(u64 rhf)
 {
 	return (rhf >> RHF_RCV_TYPE_ERR_SHIFT) & RHF_RCV_TYPE_ERR_MASK;
 }
@@ -271,14 +297,19 @@ static inline u32 rhf_pkt_len(u64 rhf)
 	return ((rhf & RHF_PKT_LEN_SMASK) >> RHF_PKT_LEN_SHIFT) << 2;
 }
 
-static inline u32 rhf_egr_index(u64 rhf)
+static inline u32 wfr_rhf_egr_index(u64 rhf)
 {
 	return (rhf >> RHF_EGR_INDEX_SHIFT) & RHF_EGR_INDEX_MASK;
 }
 
-static inline u32 rhf_rcv_seq(u64 rhf)
+static inline u32 wfr_rhf_rcv_seq(u64 rhf)
 {
 	return (rhf >> RHF_RCV_SEQ_SHIFT) & RHF_RCV_SEQ_MASK;
+}
+
+static inline u32 jkr_rhf_rcv_seq(u64 rhf)
+{
+	return (rhf >> 56) & 0xf; /* RHF.RcvSeq */
 }
 
 /* returned offset is in DWORDS */
@@ -292,7 +323,7 @@ static inline u64 rhf_use_egr_bfr(u64 rhf)
 	return rhf & RHF_USE_EGR_BFR_SMASK;
 }
 
-static inline u64 rhf_dc_info(u64 rhf)
+static inline u64 wfr_rhf_dc_info(u64 rhf)
 {
 	return rhf & RHF_DC_INFO_SMASK;
 }

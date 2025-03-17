@@ -149,8 +149,9 @@ static ssize_t sc2vl_attr_show(struct ib_device *ibdev, u32 port_num,
 	struct hfi1_sc2vl_attr *sattr =
 		container_of(attr, struct hfi1_sc2vl_attr, attr);
 	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+	struct hfi1_pportdata *ppd = &dd->pport[port_num - 1];
 
-	return sysfs_emit(buf, "%u\n", *((u8 *)dd->sc2vl + sattr->sc));
+	return sysfs_emit(buf, "%u\n", *((u8 *)ppd->sc2vl + sattr->sc));
 }
 
 #define HFI1_SC2VL_ATTR(N)                                                     \
@@ -345,8 +346,9 @@ static ssize_t vl2mtu_attr_show(struct ib_device *ibdev, u32 port_num,
 	struct hfi1_vl2mtu_attr *vlattr =
 		container_of(attr, struct hfi1_vl2mtu_attr, attr);
 	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+	struct hfi1_pportdata *ppd = &dd->pport[port_num - 1];
 
-	return sysfs_emit(buf, "%u\n", dd->vld[vlattr->vl].mtu);
+	return sysfs_emit(buf, "%u\n", ppd->vld[vlattr->vl].mtu);
 }
 
 #define HFI1_VL2MTU_ATTR(N)                                                    \
@@ -397,6 +399,39 @@ static const struct attribute_group port_vl2mtu_group = {
 	.attrs = port_vl2mtu_attributes,
 };
 
+/* start per-port nctxts and freectxts */
+static ssize_t num_ctxts_show(struct ib_device *ibdev, u32 port_num,
+			      struct ib_port_attribute *attr, char *buf)
+{
+	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+	struct hfi1_pportdata *ppd = &dd->pport[port_num - 1];
+
+	return sysfs_emit(buf, "%u\n", ppd->num_user_contexts);
+}
+
+static IB_PORT_ATTR_RO(num_ctxts);
+
+static ssize_t num_freectxts_show(struct ib_device *ibdev, u32 port_num,
+				  struct ib_port_attribute *attr, char *buf)
+{
+	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+	struct hfi1_pportdata *ppd = &dd->pport[port_num - 1];
+
+	return sysfs_emit(buf, "%u\n", ppd->freectxts);
+}
+
+static IB_PORT_ATTR_RO(num_freectxts);
+
+static struct attribute *port_ctxt_attributes[] = {
+	&ib_port_attr_num_ctxts.attr,
+	&ib_port_attr_num_freectxts.attr,
+	NULL,
+};
+
+static struct attribute_group port_ctxt_group = {
+	.attrs = port_ctxt_attributes,
+};
+
 /* end of per-port file structures and support code */
 
 /*
@@ -445,16 +480,14 @@ static ssize_t nctxts_show(struct device *device,
 	struct hfi1_ibdev *dev =
 		rdma_device_to_drv_device(device, struct hfi1_ibdev, rdi.ibdev);
 	struct hfi1_devdata *dd = dd_from_dev(dev);
+	u32 total;
+	int pidx;
 
-	/*
-	 * Return the smaller of send and receive contexts.
-	 * Normally, user level applications would require both a send
-	 * and a receive context, so returning the smaller of the two counts
-	 * give a more accurate picture of total contexts available.
-	 */
-	return sysfs_emit(buf, "%u\n",
-			  min(dd->num_user_contexts,
-			      (u32)dd->sc_sizes[SC_USER].count));
+	total = 0;
+	for (pidx = 0; pidx < dd->num_pports; pidx++)
+		total += dd->pport[pidx].num_user_contexts;
+
+	return sysfs_emit(buf, "%u\n", total);
 }
 static DEVICE_ATTR_RO(nctxts);
 
@@ -464,9 +497,14 @@ static ssize_t nfreectxts_show(struct device *device,
 	struct hfi1_ibdev *dev =
 		rdma_device_to_drv_device(device, struct hfi1_ibdev, rdi.ibdev);
 	struct hfi1_devdata *dd = dd_from_dev(dev);
+	u32 total;
+	int i;
+
+	for (total = 0, i = 0; i < dd->num_pports; i++)
+		total += dd->pport[i].freectxts;
 
 	/* Return the number of free user ports (contexts) available. */
-	return sysfs_emit(buf, "%u\n", dd->freectxts);
+	return sysfs_emit(buf, "%u\n", total);
 }
 static DEVICE_ATTR_RO(nfreectxts);
 
@@ -558,11 +596,20 @@ const struct attribute_group ib_hfi1_attr_group = {
 	.attrs = hfi1_attributes,
 };
 
-const struct attribute_group *hfi1_attr_port_groups[] = {
+const struct attribute_group *wfr_attr_port_groups[] = {
 	&port_cc_group,
 	&port_sc2vl_group,
 	&port_sl2sc_group,
 	&port_vl2mtu_group,
+	&port_ctxt_group,
+	NULL,
+};
+
+const struct attribute_group *cport_attr_port_groups[] = {
+	&port_sc2vl_group,
+	&port_sl2sc_group,
+	&port_vl2mtu_group,
+	&port_ctxt_group,
 	NULL,
 };
 
@@ -628,13 +675,21 @@ static ssize_t sde_store_cpu_to_sde_map(struct sdma_engine *sde,
 
 static ssize_t sde_show_vl(struct sdma_engine *sde, char *buf)
 {
+	struct hfi1_devdata *dd = sde->dd;
+	ssize_t off = 0;
 	int vl;
+	int i;
 
-	vl = sdma_engine_get_vl(sde);
-	if (vl < 0)
-		return vl;
+	for (i = 0; i < dd->num_pports; i++) {
+		vl = sdma_engine_get_vl(&dd->pport[i], sde);
+		if (vl < 0)
+			return vl;
+		if (i != 0)
+			off += sysfs_emit_at(buf, off, ",");
+		off += sysfs_emit_at(buf, off, "%d", vl);
+	}
 
-	return sysfs_emit(buf, "%d\n", vl);
+	return off;
 }
 
 static SDE_ATTR(cpu_list, S_IWUSR | S_IRUGO,

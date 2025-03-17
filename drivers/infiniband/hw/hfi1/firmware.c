@@ -917,10 +917,6 @@ int wait_fm_ready(struct hfi1_devdata *dd, u32 mstimeout)
 {
 	unsigned long timeout;
 
-	/* in the simulator, the fake 8051 is always ready */
-	if (dd->icode == ICODE_FUNCTIONAL_SIMULATOR)
-		return 0;
-
 	timeout = msecs_to_jiffies(mstimeout) + jiffies;
 	while (1) {
 		if (get_firmware_state(dd) == 0xa0)	/* ready */
@@ -1476,12 +1472,15 @@ done:
  * the resource to become available.
  *
  * Return 0 on success, -EBUSY if busy (even after wait), -EIO if mutex
- * acquire failed.
+ * acquire failed, -EINVAL if there is no asic_data.
  */
 int acquire_chip_resource(struct hfi1_devdata *dd, u32 resource, u32 mswait)
 {
 	unsigned long timeout;
 	int ret;
+
+	if (!dd->asic_data)
+		return -EINVAL;
 
 	timeout = jiffies + msecs_to_jiffies(mswait);
 	while (1) {
@@ -1501,6 +1500,9 @@ int acquire_chip_resource(struct hfi1_devdata *dd, u32 resource, u32 mswait)
 void release_chip_resource(struct hfi1_devdata *dd, u32 resource)
 {
 	u64 scratch0, bit;
+
+	if (!dd->asic_data)
+		return;
 
 	/* only dynamic resources should ever be cleared */
 	if (!(resource & CR_DYN_MASK)) {
@@ -1563,6 +1565,9 @@ bool check_chip_resource(struct hfi1_devdata *dd, u32 resource,
 static void clear_chip_resources(struct hfi1_devdata *dd, const char *func)
 {
 	u64 scratch0;
+
+	if (!dd->asic_data)
+		return;
 
 	/* lock against other callers within the driver wanting a resource */
 	mutex_lock(&dd->asic_data->asic_resource_mutex);
@@ -1666,8 +1671,15 @@ int hfi1_firmware_init(struct hfi1_devdata *dd)
 	}
 
 	/* no 8051 or QSFP on simulator */
-	if (dd->icode == ICODE_FUNCTIONAL_SIMULATOR)
+	if (dd->icode == ICODE_FUNCTIONAL_SIMULATOR) {
+		u8 ver_major, ver_minor, ver_patch;
+
+		read_misc_status(dd, &ver_major, &ver_minor, &ver_patch);
+		dd_dev_info(dd, "Simulated 8051 firmware version %d.%d.%d\n",
+			    (int)ver_major, (int)ver_minor, (int)ver_patch);
+		dd->dc8051_ver = dc8051_ver(ver_major, ver_minor, ver_patch);
 		fw_8051_load = 0;
+	}
 
 	if (!fw_8051_name) {
 		if (dd->icode == ICODE_RTL_SILICON)
@@ -1723,10 +1735,10 @@ static int check_meta_version(struct hfi1_devdata *dd, u32 *system_table)
 	return 0;
 }
 
-int parse_platform_config(struct hfi1_devdata *dd)
+int parse_platform_config(struct hfi1_pportdata *ppd)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	struct platform_config_cache *pcfgcache = &dd->pcfg_cache;
-	struct hfi1_pportdata *ppd = dd->pport;
 	u32 *ptr = NULL;
 	u32 header1 = 0, header2 = 0, magic_num = 0, crc = 0, file_length = 0;
 	u32 record_idx = 0, table_type = 0, table_length_dwords = 0;
@@ -1894,11 +1906,10 @@ bail:
 }
 
 static void get_integrated_platform_config_field(
-		struct hfi1_devdata *dd,
+		struct hfi1_pportdata *ppd,
 		enum platform_config_table_type_encoding table_type,
 		int field_index, u32 *data)
 {
-	struct hfi1_pportdata *ppd = dd->pport;
 	u8 *cache = ppd->qsfp_info.cache;
 	u32 tx_preset = 0;
 
@@ -2027,15 +2038,15 @@ static int get_platform_fw_field_metadata(struct hfi1_devdata *dd, int table,
  * @data: pointer to memory that will be populated with the field requested.
  * @len: length of memory pointed by @data in bytes.
  */
-int get_platform_config_field(struct hfi1_devdata *dd,
+int get_platform_config_field(struct hfi1_pportdata *ppd,
 			      enum platform_config_table_type_encoding
 			      table_type, int table_index, int field_index,
 			      u32 *data, u32 len)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	int ret = 0, wlen = 0, seek = 0;
 	u32 field_len_bits = 0, field_start_bits = 0, *src_ptr = NULL;
 	struct platform_config_cache *pcfgcache = &dd->pcfg_cache;
-	struct hfi1_pportdata *ppd = dd->pport;
 
 	if (data)
 		memset(data, 0, len);
@@ -2046,7 +2057,7 @@ int get_platform_config_field(struct hfi1_devdata *dd,
 		/*
 		 * Use saved configuration from ppd for integrated platforms
 		 */
-		get_integrated_platform_config_field(dd, table_type,
+		get_integrated_platform_config_field(ppd, table_type,
 						     field_index, data);
 		return 0;
 	}
@@ -2166,8 +2177,6 @@ void read_guid(struct hfi1_devdata *dd)
 	(void)read_csr(dd, CCE_DC_CTRL);
 
 	dd->base_guid = read_csr(dd, DC_DC8051_CFG_LOCAL_GUID);
-	dd_dev_info(dd, "GUID %llx",
-		    (unsigned long long)dd->base_guid);
 }
 
 /* read and display firmware version info */
@@ -2180,6 +2189,10 @@ static void dump_fw_version(struct hfi1_devdata *dd)
 	int all_same;
 	int ret;
 	u8 rcv_addr;
+
+	/* no firmware or sbus in simulation, skip */
+	if (dd->icode == ICODE_FUNCTIONAL_SIMULATOR)
+		return;
 
 	ret = acquire_chip_resource(dd, CR_SBUS, SBUS_TIMEOUT);
 	if (ret) {

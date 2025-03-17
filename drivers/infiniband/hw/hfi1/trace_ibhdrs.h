@@ -274,8 +274,8 @@ DEFINE_EVENT(hfi1_input_ibhdr_template, input_ibhdr,
 
 DECLARE_EVENT_CLASS(hfi1_output_ibhdr_template,
 		    TP_PROTO(struct hfi1_devdata *dd,
-			     struct hfi1_opa_header *opah, bool sc5),
-		    TP_ARGS(dd, opah, sc5),
+			     struct hfi1_opa_header *opah, bool sc5, int err),
+		    TP_ARGS(dd, opah, sc5, err),
 		    TP_STRUCT__entry(
 			DD_DEV_ENTRY(dd)
 			__field(u8, hdr_type)
@@ -303,6 +303,7 @@ DECLARE_EVENT_CLASS(hfi1_output_ibhdr_template,
 			__field(u32, slid)
 			__field(u32, dest_qpn)
 			__field(u32, src_qpn)
+			__field(int, err)
 			/* extended headers */
 			__dynamic_array(u8, ehdrs,
 					hfi1_trace_opa_hdr_len(opah))
@@ -315,6 +316,7 @@ DECLARE_EVENT_CLASS(hfi1_output_ibhdr_template,
 			__entry->hdr_type = opah->hdr_type;
 			__entry->dest_qpn = 0;
 			__entry->src_qpn = 0;
+			__entry->err = err;
 			if (__entry->hdr_type)  {
 				hfi1_trace_parse_16b_hdr(&opah->opah,
 							 &__entry->age,
@@ -382,7 +384,7 @@ DECLARE_EVENT_CLASS(hfi1_output_ibhdr_template,
 				memcpy(__get_dynamic_array(ehdrs),
 				       &ohdr->u, __get_dynamic_array_len(ehdrs));
 		    ),
-		    TP_printk("[%s] (%s) %s %s hlen:%d %s",
+		    TP_printk("[%s] (%s) %s %s hlen:%d %s err:%d",
 			      __get_str(dev),
 			      hfi1_trace_get_packet_l4_str(__entry->l4),
 			      hfi1_trace_fmt_lrh(p,
@@ -426,24 +428,25 @@ DECLARE_EVENT_CLASS(hfi1_output_ibhdr_template,
 					__entry->l4,
 					__entry->dest_qpn,
 					__entry->src_qpn,
-					(void *)__get_dynamic_array(ehdrs))
+					(void *)__get_dynamic_array(ehdrs)),
+			      __entry->err
 			     )
 );
 
 DEFINE_EVENT(hfi1_output_ibhdr_template, pio_output_ibhdr,
 	     TP_PROTO(struct hfi1_devdata *dd,
-		      struct hfi1_opa_header *opah, bool sc5),
-	     TP_ARGS(dd, opah, sc5));
+		      struct hfi1_opa_header *opah, bool sc5, int err),
+	     TP_ARGS(dd, opah, sc5, err));
 
 DEFINE_EVENT(hfi1_output_ibhdr_template, ack_output_ibhdr,
 	     TP_PROTO(struct hfi1_devdata *dd,
-		      struct hfi1_opa_header *opah, bool sc5),
-	     TP_ARGS(dd, opah, sc5));
+		      struct hfi1_opa_header *opah, bool sc5, int err),
+	     TP_ARGS(dd, opah, sc5, err));
 
 DEFINE_EVENT(hfi1_output_ibhdr_template, sdma_output_ibhdr,
 	     TP_PROTO(struct hfi1_devdata *dd,
-		      struct hfi1_opa_header *opah, bool sc5),
-	     TP_ARGS(dd, opah, sc5));
+		      struct hfi1_opa_header *opah, bool sc5, int err),
+	     TP_ARGS(dd, opah, sc5, err));
 
 
 #endif /* __HFI1_TRACE_IBHDRS_H */

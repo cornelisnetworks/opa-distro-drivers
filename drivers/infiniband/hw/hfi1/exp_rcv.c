@@ -45,7 +45,7 @@ int hfi1_alloc_ctxt_rcv_groups(struct hfi1_ctxtdata *rcd)
 			     GFP_KERNEL, rcd->numa_id);
 	if (!rcd->groups)
 		return -ENOMEM;
-	tidbase = rcd->expected_base;
+	tidbase = 0;
 	for (i = 0; i < ngroups; i++) {
 		grp = &rcd->groups[i];
 		grp->size = dd->rcv_entries.group_size;

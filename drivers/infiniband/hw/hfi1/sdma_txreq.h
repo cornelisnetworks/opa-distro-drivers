@@ -6,6 +6,8 @@
 #ifndef HFI1_SDMA_TXREQ_H
 #define HFI1_SDMA_TXREQ_H
 
+#include "sdma_defs.h"
+
 /* increased for AHG */
 #define NUM_DESC 6
 
@@ -19,9 +21,6 @@
 struct sdma_desc {
 	/* private:  don't use directly */
 	u64 qw[2];
-	void *pinning_ctx;
-	/* Release reference to @pinning_ctx. May be called in interrupt context. Must not sleep. */
-	void (*ctx_put)(void *ctx);
 };
 
 /**
@@ -85,6 +84,10 @@ struct sdma_txreq {
 	u16 coalesce_idx;
 	/* private: flags */
 	u16                         flags;
+	/* packed bitfield with enough space for SDMA_MAP_* values
+	 * for up to 64 descriptors at 2 bits per descriptor
+	 */
+	DECLARE_BITMAP(map_type, SDMA_MAP_BITS * MAX_DESC);
 	/* private: */
 	struct sdma_desc descs[NUM_DESC];
 };

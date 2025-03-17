@@ -67,8 +67,7 @@ static noinline int build_vnic_ulp_payload(struct sdma_engine *sde,
 				      &tx->txreq,
 				      skb_frag_page(frag),
 				      skb_frag_off(frag),
-				      skb_frag_size(frag),
-				      NULL, NULL, NULL);
+				      skb_frag_size(frag));
 		if (unlikely(ret))
 			goto bail_txadd;
 	}
@@ -89,7 +88,7 @@ static int build_vnic_tx_desc(struct sdma_engine *sde,
 	int ret = 0;
 	u16 hdrbytes = 2 << 2;  /* PBC */
 
-	ret = sdma_txinit_ahg(
+	ret = sdma_txinit_ahg(sde->dd,
 		&tx->txreq,
 		0,
 		hdrbytes + tx->skb->len + tx->plen,

@@ -89,38 +89,42 @@ static void cpu_mask_set_put(struct cpu_mask_set *set, int cpu)
 	_cpu_mask_set_gen_dec(set);
 }
 
+/**
+ * Remove HT/SMT threads from cores in @cpus.
+ *
+ * Assumes that first thread in each topology_sibling_cpumask() is a
+ * real/physical thread and that other siblings in same group are HT/SMT
+ * threads.
+ *
+ * @return number of CPUs cleared from @cpus.
+ */
+static int clear_ht_siblings(cpumask_var_t cpus)
+{
+	int c, s, p = 0;
+
+	/* Remove HT/SMT threads from real_cpu_mask */
+	for (c = cpumask_first(cpus); c < nr_cpu_ids; c = cpumask_next(c, cpus)) {
+		/* Skip first CPU, assume it is a physical (non-HT/SMT) CPU */
+		s = cpumask_next(c, topology_sibling_cpumask(c));
+		while (s < nr_cpu_ids) {
+			cpumask_clear_cpu(s, cpus);
+			s = cpumask_next(s, topology_sibling_cpumask(c));
+			p++;
+		}
+	}
+
+	return p;
+}
+
 /* Initialize non-HT cpu cores mask */
 void init_real_cpu_mask(void)
 {
-	int possible, curr_cpu, i, ht;
+	cpumask_var_t cpus = &node_affinity.real_cpu_mask;
 
-	cpumask_clear(&node_affinity.real_cpu_mask);
-
+	cpumask_clear(cpus);
 	/* Start with cpu online mask as the real cpu mask */
-	cpumask_copy(&node_affinity.real_cpu_mask, cpu_online_mask);
-
-	/*
-	 * Remove HT cores from the real cpu mask.  Do this in two steps below.
-	 */
-	possible = cpumask_weight(&node_affinity.real_cpu_mask);
-	ht = cpumask_weight(topology_sibling_cpumask(
-				cpumask_first(&node_affinity.real_cpu_mask)));
-	/*
-	 * Step 1.  Skip over the first N HT siblings and use them as the
-	 * "real" cores.  Assumes that HT cores are not enumerated in
-	 * succession (except in the single core case).
-	 */
-	curr_cpu = cpumask_first(&node_affinity.real_cpu_mask);
-	for (i = 0; i < possible / ht; i++)
-		curr_cpu = cpumask_next(curr_cpu, &node_affinity.real_cpu_mask);
-	/*
-	 * Step 2.  Remove the remaining HT siblings.  Use cpumask_next() to
-	 * skip any gaps.
-	 */
-	for (; i < possible; i++) {
-		cpumask_clear_cpu(curr_cpu, &node_affinity.real_cpu_mask);
-		curr_cpu = cpumask_next(curr_cpu, &node_affinity.real_cpu_mask);
-	}
+	cpumask_copy(cpus, cpu_online_mask);
+	clear_ht_siblings(cpus);
 }
 
 int node_affinity_init(void)
@@ -133,13 +137,7 @@ int node_affinity_init(void)
 	cpumask_copy(&node_affinity.proc.mask, cpu_online_mask);
 
 	node_affinity.proc.gen = 0;
-	node_affinity.num_core_siblings =
-				cpumask_weight(topology_sibling_cpumask(
-					cpumask_first(&node_affinity.proc.mask)
-					));
 	node_affinity.num_possible_nodes = num_possible_nodes();
-	node_affinity.num_online_nodes = num_online_nodes();
-	node_affinity.num_online_cpus = num_online_cpus();
 
 	/*
 	 * The real cpu mask is part of the affinity struct but it has to be
@@ -857,7 +855,7 @@ static int get_irq_affinity(struct hfi1_devdata *dd,
 		break;
 	case IRQ_RCVCTXT:
 		rcd = (struct hfi1_ctxtdata *)msix->arg;
-		if (rcd->ctxt == HFI1_CTRL_CTXT)
+		if (is_control_context(rcd))
 			cpu = cpumask_first(&entry->general_intr_mask);
 		else
 			set = &entry->rcv_intr;
@@ -937,7 +935,7 @@ void hfi1_put_irq_affinity(struct hfi1_devdata *dd,
 		struct hfi1_ctxtdata *rcd = msix->arg;
 
 		/* Don't do accounting for control contexts */
-		if (rcd->ctxt != HFI1_CTRL_CTXT)
+		if (!is_control_context(rcd))
 			set = &entry->rcv_intr;
 		break;
 	}
@@ -959,38 +957,6 @@ void hfi1_put_irq_affinity(struct hfi1_devdata *dd,
 	mutex_unlock(&node_affinity.lock);
 }
 
-/* This should be called with node_affinity.lock held */
-static void find_hw_thread_mask(uint hw_thread_no, cpumask_var_t hw_thread_mask,
-				struct hfi1_affinity_node_list *affinity)
-{
-	int possible, curr_cpu, i;
-	uint num_cores_per_socket = node_affinity.num_online_cpus /
-					affinity->num_core_siblings /
-						node_affinity.num_online_nodes;
-
-	cpumask_copy(hw_thread_mask, &affinity->proc.mask);
-	if (affinity->num_core_siblings > 0) {
-		/* Removing other siblings not needed for now */
-		possible = cpumask_weight(hw_thread_mask);
-		curr_cpu = cpumask_first(hw_thread_mask);
-		for (i = 0;
-		     i < num_cores_per_socket * node_affinity.num_online_nodes;
-		     i++)
-			curr_cpu = cpumask_next(curr_cpu, hw_thread_mask);
-
-		for (; i < possible; i++) {
-			cpumask_clear_cpu(curr_cpu, hw_thread_mask);
-			curr_cpu = cpumask_next(curr_cpu, hw_thread_mask);
-		}
-
-		/* Identifying correct HW threads within physical cores */
-		cpumask_shift_left(hw_thread_mask, hw_thread_mask,
-				   num_cores_per_socket *
-				   node_affinity.num_online_nodes *
-				   hw_thread_no);
-	}
-}
-
 int hfi1_get_proc_affinity(int node)
 {
 	int cpu = -1, ret, i;
@@ -1000,6 +966,7 @@ int hfi1_get_proc_affinity(int node)
 		*proc_mask = current->cpus_ptr;
 	struct hfi1_affinity_node_list *affinity = &node_affinity;
 	struct cpu_mask_set *set = &affinity->proc;
+	int pruned;
 
 	/*
 	 * check whether process/context affinity has already
@@ -1081,28 +1048,27 @@ int hfi1_get_proc_affinity(int node)
 	hfi1_cdbg(PROC, "CPUs used by interrupts: %*pbl",
 		  cpumask_pr_args(intrs_mask));
 
-	cpumask_copy(hw_thread_mask, &set->mask);
 
 	/*
 	 * If HT cores are enabled, identify which HW threads within the
 	 * physical cores should be used.
+	 *
+	 * Start with affinity mask but prune HT/SMT threads. If all HW threads
+	 * are in use, then try again with all threads in mask, but only if
+	 * threads were pruned before the first step.
 	 */
-	if (affinity->num_core_siblings > 0) {
-		for (i = 0; i < affinity->num_core_siblings; i++) {
-			find_hw_thread_mask(i, hw_thread_mask, affinity);
-
-			/*
-			 * If there's at least one available core for this HW
-			 * thread number, stop looking for a core.
-			 *
-			 * diff will always be not empty at least once in this
-			 * loop as the used mask gets reset when
-			 * (set->mask == set->used) before this loop.
-			 */
-			cpumask_andnot(diff, hw_thread_mask, &set->used);
-			if (!cpumask_empty(diff))
-				break;
-		}
+	cpumask_copy(hw_thread_mask, &affinity->proc.mask);
+	pruned = clear_ht_siblings(hw_thread_mask);
+	for (i = 0; i < 2; i++) {
+		/*
+		 * diff will always be not empty at least once in this
+		 * loop as the used mask gets reset when
+		 * (set->mask == set->used) before this loop.
+		 */
+		cpumask_andnot(diff, hw_thread_mask, &set->used);
+		if (!cpumask_empty(diff) || !pruned)
+			break;
+		cpumask_copy(hw_thread_mask, &affinity->proc.mask);
 	}
 	hfi1_cdbg(PROC, "Same available HW thread on all physical CPUs: %*pbl",
 		  cpumask_pr_args(hw_thread_mask));

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause */
 /*
- * Copyright(c) 2020-2023 Cornelis Networks, Inc.
+ * Copyright(c) 2020-2024 Cornelis Networks, Inc.
  * Copyright(c) 2015-2020 Intel Corporation.
  */
 
@@ -42,6 +42,10 @@
 #include "platform.h"
 #include "affinity.h"
 #include "msix.h"
+#include "cport.h"
+
+/* The active logical port index, default is 0 */
+#define HFI1_PORT_IDX 0
 
 /* bumped 1 from s/w major version of TrueScale */
 #define HFI1_CHIP_VERS_MAJ 3U
@@ -59,7 +63,8 @@
 #define NEIGHBOR_TYPE_HFI		0
 #define NEIGHBOR_TYPE_SWITCH	1
 
-#define HFI1_MAX_ACTIVE_WORKQUEUE_ENTRIES 5
+#define HFI1_MAX_ACTIVE_GEN_WQ_ENTRIES		10
+#define HFI1_MAX_ACTIVE_WORKQUEUE_ENTRIES	5
 
 extern unsigned long hfi1_cap_mask;
 #define HFI1_CAP_KGET_MASK(mask, cap) ((mask) & HFI1_CAP_##cap)
@@ -181,6 +186,7 @@ struct hfi1_ctxtdata {
 	struct send_context *sc;
 	/* per context recv functions */
 	const rhf_rcv_function_ptr *rhf_rcv_function_map;
+	const rhf_rcv_function_ptr *save_rhf_rcv_function_map;
 	/*
 	 * The interrupt handler for a particular receive context can vary
 	 * throughout it's lifetime. This is not a lock protected data member so
@@ -210,6 +216,8 @@ struct hfi1_ctxtdata {
 	u8 rcvhdrqentsize;
 	/* offset of RHF within receive header entry */
 	u8 rhf_offset;
+	/* KDETH receive header size */
+	u8 kdeth_rcv_hdr;
 	/* dynamic receive available interrupt timeout */
 	u8 rcvavail_timeout;
 	/* Indicates that this is vnic context */
@@ -236,9 +244,12 @@ struct hfi1_ctxtdata {
 	unsigned long flags;
 	/* array of tid_groups */
 	struct tid_group  *groups;
-	/* mmap of hdrq, must fit in 44 bits */
+	/* receive header queue dma addresses */
 	dma_addr_t rcvhdrq_dma;
 	dma_addr_t rcvhdrqtailaddr_dma;
+	/* receive header error queue (rheq) */
+	void *rheq;
+	dma_addr_t rheq_dma;
 	/* Last interrupt timestamp */
 	ktime_t aspm_ts_last_intr;
 	/* Last timestamp at which we scheduled a timer for this context */
@@ -254,15 +265,15 @@ struct hfi1_ctxtdata {
 	/* job key */
 	u16 jkey;
 	/* number of RcvArray groups for this context. */
-	u16 rcv_array_groups;
+	u32 rcv_array_groups;
 	/* index of first eager TID entry. */
-	u16 eager_base;
+	u32 eager_base;
 	/* number of expected TID entries */
-	u16 expected_count;
+	u32 expected_count;
 	/* index of first expected TID entry. */
-	u16 expected_base;
+	u32 expected_base;
 	/* Device context index */
-	u8 ctxt;
+	u16 ctxt;
 
 	/* PSM Specific fields */
 	/* lock protecting all Expected TID data */
@@ -303,7 +314,7 @@ struct hfi1_ctxtdata {
 	 * non-zero if ctxt can be shared, and defines the maximum number of
 	 * sub-contexts for this device context.
 	 */
-	u8 subctxt_cnt;
+	u16 subctxt_cnt;
 
 	/* Bit mask to track free TID RDMA HW flows */
 	unsigned long flow_mask;
@@ -321,6 +332,11 @@ static inline u32 rcvhdrq_size(struct hfi1_ctxtdata *rcd)
 {
 	return PAGE_ALIGN(rcd->rcvhdrq_cnt *
 			  rcd->rcvhdrqentsize * sizeof(u32));
+}
+
+static inline u32 rheq_size(struct hfi1_ctxtdata *rcd)
+{
+	return PAGE_ALIGN(rcd->rcvhdrq_cnt * sizeof(u64));
 }
 
 /*
@@ -359,6 +375,12 @@ struct hfi1_packet {
 	u8 sl;
 	u8 opcode;
 	bool migrated;
+	/* chip-dependent extracted RHF fields */
+	u64 err_flags;
+	u16 egr_index;
+	u8 rcv_seq;
+	bool sc4;
+	bool has_errs;
 };
 
 /* Packet types */
@@ -485,6 +507,27 @@ static inline u8 hfi1_16B_bth_get_pad(struct ib_other_headers *ohdr)
 	return (u8)((be32_to_cpu(ohdr->bth[0]) >> IB_BTH_PAD_SHIFT) &
 		   OPA_16B_BTH_PAD_MASK);
 }
+
+/*
+ * Private data for snoop/capture support.
+ */
+struct hfi1_snoop_data {
+	int mode_flag;
+	int snoop_flags;
+	struct cdev cdev;
+	struct device *class_dev;
+	/* protect snoop data */
+	spinlock_t snoop_lock;
+	struct list_head queue;
+	wait_queue_head_t waitq;
+	void *filter_value;
+	int (*filter_callback)(void *hdr, void *data, void *value);
+	u64 dcc_cfg; /* saved value of DCC Cfg register */
+};
+
+/* snoop mode_flag values */
+#define HFI1_PORT_SNOOP_MODE     1U
+#define HFI1_PORT_CAPTURE_MODE   2U
 
 /*
  * 16B Management
@@ -644,6 +687,7 @@ struct rvt_sge_state;
 #define HFI1_RCVCTRL_NO_EGR_DROP_DIS 0x20000
 #define HFI1_RCVCTRL_URGENT_ENB 0x40000
 #define HFI1_RCVCTRL_URGENT_DIS 0x80000
+#define HFI1_RCVCTRL_TID_CONFIG 0x100000
 
 /* partition enforcement flags */
 #define HFI1_PART_ENFORCE_IN	0x1
@@ -659,6 +703,7 @@ struct rvt_sge_state;
 #define CNTR_32BIT		0x4 /* Simulate 64 bits for this counter */
 #define CNTR_VL			0x8 /* Per VL counter */
 #define CNTR_SDMA              0x10
+#define CNTR_OVF	       0x20 /* per receive context overflow */
 #define CNTR_INVALID_VL		-1  /* Specifies invalid VL */
 #define CNTR_MODE_W		0x0
 #define CNTR_MODE_R		0x1
@@ -722,6 +767,17 @@ struct vl_arb_cache {
 	struct ib_vl_weight_elem table[VL_ARB_TABLE_SIZE];
 };
 
+struct per_vl_data {
+	u16 mtu;
+	struct send_context *sc;
+};
+
+/* 16 to directly index */
+#define PER_VL_SEND_CONTEXTS 16
+
+/* maximum pkey table size */
+#define MAX_PKEY_VALUES 1024
+
 /*
  * The structure below encapsulates data relevant to a physical IB Port.
  * Current chips support only one such port, but the separation
@@ -754,6 +810,9 @@ struct hfi1_pportdata {
 	/* GUID for peer interface, in host order */
 	u64 neighbor_guid;
 
+	/* Per VL data. Enough for all VLs but not all elements are set/used. */
+	struct per_vl_data vld[PER_VL_SEND_CONTEXTS];
+
 	/* up or down physical link state */
 	u32 linkup;
 
@@ -763,9 +822,15 @@ struct hfi1_pportdata {
 	 */
 	u64 *statusp;
 
-	/* SendDMA related entries */
+	/* seqlock for sc2vl */
+	seqlock_t sc2vl_lock ____cacheline_aligned_in_smp;
+	u64 sc2vl[4];
+	/* adding a new field here would make it part of this cacheline */
 
-	struct workqueue_struct *hfi1_wq;
+	/* SendDMA related entries */
+	/* array of vl maps */
+	struct sdma_vl_map __rcu *sdma_map;
+
 	struct workqueue_struct *link_wq;
 
 	/* move out of interrupt context */
@@ -773,7 +838,6 @@ struct hfi1_pportdata {
 	struct work_struct link_up_work;
 	struct work_struct link_down_work;
 	struct work_struct sma_message_work;
-	struct work_struct freeze_work;
 	struct work_struct link_downgrade_work;
 	struct work_struct link_bounce_work;
 	struct delayed_work start_link_work;
@@ -804,6 +868,7 @@ struct hfi1_pportdata {
 	u16 link_width_downgrade_tx_active;
 	u16 link_width_downgrade_rx_active;
 	u16 link_speed_active;
+	u16 link_ltp_rtt;
 	u8 vls_supported;
 	u8 vls_operational;
 	u8 actual_vls_operational;
@@ -811,6 +876,8 @@ struct hfi1_pportdata {
 	u8 lmc;
 	/* Rx Polarity inversion (compensate for ~tx on partner) */
 	u8 rx_pol_inv;
+	/* QOS shift: number of QPN bottom bits set to zero by rdmavt */
+	u8 qos_shift;
 
 	u8 hw_pidx;     /* physical port index */
 	u32 port;        /* IB port number and index into dd->pports - 1 */
@@ -843,6 +910,23 @@ struct hfi1_pportdata {
 	atomic_t led_override_timer_active;
 	/* Used to flash LEDs in override mode */
 	struct timer_list led_override_timer;
+
+	/* array of kernel send contexts */
+	struct send_context **kernel_send_context;
+	/* array of vl maps */
+	struct pio_vl_map __rcu *pio_map;
+	/* starting receive context for this port */
+	u16 rcv_context_base;
+	/* number of receive contexts in use for this port */
+	u16 num_rcv_contexts;
+	/* number of available user/netdev contexts for this port */
+	u16 num_user_contexts;
+	/* Lowest context number which can be used by user processes or VNIC */
+	u16 first_dyn_alloc_ctxt;
+	/* current number of receive user ctxts available for this port */
+	u32 freectxts;
+	/* starting RcvArray entry for this port */
+	u32 rcv_array_base;
 
 	u32 sm_trap_qp;
 	u32 sa_qp;
@@ -896,6 +980,8 @@ struct hfi1_pportdata {
 	u64 *cntrs;
 	/* port relative synthetic counter buffer */
 	u64 *scntrs;
+	/* RcvCounterArray32.RcvBufOvflCount saved current value */
+	u32 rcv_ovfl_cnt;
 	/* port_xmit_discards are synthesized from different egress errors */
 	u64 port_xmit_discards;
 	u64 port_xmit_discards_vl[C_VL_COUNT];
@@ -930,6 +1016,12 @@ struct hfi1_pportdata {
 	u64 port_vl_xmit_wait_last[C_VL_COUNT + 1];
 	u16 prev_link_width;
 	u64 vl_xmit_flit_cnt[C_VL_COUNT + 1];
+	/* per-port networking */
+	struct hfi1_netdev_rx *netdev_rx;
+	int netdev_rsm_rule;
+	atomic_t ipoib_rsm_usr_num;
+	atomic_t vnic_rsm_usr_num;
+	struct hfi1_snoop_data hfi1_snoop;
 };
 
 typedef void (*opcode_handler)(struct hfi1_packet *packet);
@@ -945,18 +1037,9 @@ extern const rhf_rcv_function_ptr netdev_rhf_rcv_functions[];
 #define RHF_RCV_REPROCESS 2	/* stop. retain this packet */
 
 struct rcv_array_data {
-	u16 ngroups;
-	u16 nctxt_extra;
+	u32 ngroups;
 	u8 group_size;
 };
-
-struct per_vl_data {
-	u16 mtu;
-	struct send_context *sc;
-};
-
-/* 16 to directly index */
-#define PER_VL_SEND_CONTEXTS 16
 
 struct err_info_rcvport {
 	u8 status_and_code;
@@ -1014,6 +1097,286 @@ struct sdma_vl_map;
 #define BOARD_VERS_MAX 96 /* how long the version string can be */
 #define SERIAL_MAX 16 /* length of the serial number */
 
+/* chip implementation values */
+enum {
+	CHIP_NONE,
+	CHIP_WFR,	/* Intel OPA 100 */
+	CHIP_JKR,	/* CN 5000 */
+};
+
+/* must be >= than all param->num_ports values */
+#define LARGEST_NUM_PORTS 2
+
+/* must be >= than all param->num_int_csrs values */
+#define LARGEST_NUM_INT_CSRS 21
+
+/* max number of contexts on any device */
+#define MAX_CTXTS 256
+/* max number of RSM rules on any device */
+#define MAX_RSM_RULES 64
+
+/* chip specific values */
+struct chip_params {
+	int chip_type;
+	int num_ports;
+	u32 bar0_size;
+	u32 kreg1_size;
+	u32 kreg2_offset;
+	u32 kreg2_size;
+	u32 rcv_array_offset;
+	u32 rcv_array_size;
+	u32 link_speed_supported;
+	u32 link_speed_active;
+	u32 asic_cclock_ps;
+	u32 rsm_rule_size;
+	u32 pkey_table_size;
+	const char *generic_boardname;
+	u32 max_eager_entries;
+	u8 pio_base_bits; /* SendCtxtCtrl.CtxtBase bit count */
+	const struct flag_data *egress_err_info_data;
+	u64 send_ctrl_flush; /* set-once flush flag */
+	u64 port_discard_egress_errs;
+
+	/* interrupt sources */
+	u32 num_int_csrs;
+	u32 num_int_map_csrs;
+	u32 is_rcvavail_start;
+	u32 is_rcvurgent_start;
+	u32 is_sdmaeng_err_start;
+	u32 is_sdma_idle_start;
+	u32 is_sdma_progress_start;
+	u32 is_sdma_start;
+	u32 is_last_source;
+	const struct is_table *is_table;
+	const struct gi_enable_entry *gi_enable_table;
+
+	/* counters */
+	struct cntr_entry *chip_dev_cntrs;
+	u32 chip_dev_cntr_first;
+	u32 chip_num_dev_cntrs;
+	struct cntr_entry *chip_port_cntrs;
+	u32 chip_port_cntr_first;
+	u32 chip_num_port_cntrs;
+
+	/* ingress port registers */
+	u32 rxe_iport_stride;
+	u32 rcv_iport_ctrl_reg;
+	u32 rcv_iport_status_reg;
+	u32 rcv_bth_qp_reg;
+	u32 rcv_multicast_reg;
+	u32 rcv_bypass_reg;
+	u32 rcv_vl15_reg;
+	u32 rcv_err_info_reg;
+	u32 rcv_err_status_reg;
+	u32 rcv_err_mask_reg;
+	u32 rcv_err_clear_reg;
+	u32 rcv_qp_map_table_reg;
+	u32 rcv_partition_key_reg;
+	u32 rcv_counter_array32_reg;
+	u32 rcv_counter_array64_reg;
+
+	/* ingress port receive context registers */
+	u32 rxe_iprc_stride;
+	u32 rcv_jkey_ctrl_reg;
+
+	/* RXE restricted context registers */
+	u32 rxe_rctxt_stride;
+	u32 rcv_rctxt_ctrl_reg;
+	u32 rcv_egr_ctrl_reg;
+	u32 rcv_tid_ctrl_reg;
+
+	/* RXE kernel context registers */
+	u32 rxe_kctxt_stride;
+	u32 rcv_kctxt_ctrl_reg;
+	u32 rcv_hdr_addr_reg;
+	u32 rcv_hdr_cnt_reg;
+	u32 rcv_hdr_ent_size_reg;
+	u32 rcv_hdr_tail_addr_reg;
+	u32 rcv_avail_time_out_reg;
+	u32 rcv_hdr_ovfl_cnt_reg;
+
+	/* RXE kernel/user registers */
+	u32 rxe_ku_stride;
+	u32 rcv_ctxt_status_reg;
+
+	/* RXE user registers */
+	u32 rxe_uctxt_stride;
+	u32 rcv_hdr_tail_reg;
+	u32 rcv_hdr_head_reg;
+	u32 rcv_egr_index_head_reg;
+	u32 rcv_tid_flow_table_reg;
+
+	/* TXE kernel registers */
+	u32 send_contexts_reg;
+	u32 send_dma_engines_reg;
+	u32 send_pio_mem_size_reg;
+	u32 send_dma_mem_size_reg;
+	u32 send_pio_init_ctxt_reg;
+
+	/* send context registers */
+	u32 txe_sctxt_stride;
+	u32 send_ctxt_status_reg;
+	u32 send_ctxt_credit_ctrl_reg;
+	u32 send_ctxt_credit_status_reg;
+	u32 send_ctxt_credit_return_addr_reg;
+	u32 send_ctxt_credit_force_reg;
+	u32 send_ctxt_err_status_reg;
+	u32 send_ctxt_err_mask_reg;
+	u32 send_ctxt_err_clear_reg;
+
+	/* TXE send context registers */
+	u32 txe_tctxt_stride;
+	u32 send_ctxt_ctrl_reg;
+
+	/* SDMA registers */
+	u32 txe_sdma_stride;
+	u32 send_dma_ctrl_reg;
+	u32 send_dma_status_reg;
+	u32 send_dma_base_addr_reg;
+	u32 send_dma_len_gen_reg;
+	u32 send_dma_tail_reg;
+	u32 send_dma_head_reg;
+	u32 send_dma_head_addr_reg;
+	u32 send_dma_priority_thld_reg;
+	u32 send_dma_idle_cnt_reg;
+	u32 send_dma_reload_cnt_reg;
+	u32 send_dma_desc_cnt_reg;
+	u32 send_dma_desc_fetched_cnt_reg;
+	u32 send_dma_eng_err_status_reg;
+	u32 send_dma_eng_err_mask_reg;
+	u32 send_dma_eng_err_clear_reg;
+
+	/* SDMA Config registers */
+	u32 txe_sdmacfg_stride;
+	u32 send_dma_cfg_memory_reg;
+
+	/* egress port registers */
+	u32 txe_eport_stride;
+	u32 send_ctrl_reg;
+	u32 send_high_priority_limit_reg;
+	u32 send_egress_err_status_reg;
+	u32 send_egress_err_mask_reg;
+	u32 send_egress_err_clear_reg;
+	u32 send_bth_qp_reg;
+	u32 send_static_rate_control_reg;
+	u32 send_sc2vlt0_reg;
+	u32 send_sc2vlt1_reg;
+	u32 send_sc2vlt2_reg;
+	u32 send_sc2vlt3_reg;
+	u32 send_len_check0_reg;
+	u32 send_len_check1_reg;
+	u32 send_low_priority_list_reg;
+	u32 send_high_priority_list_reg;
+	u32 send_counter_array32_reg;
+	u32 send_counter_array64_reg;
+	u32 send_cm_ctrl_reg;
+	u32 send_cm_global_credit_reg;
+	u32 send_cm_credit_used_status_reg;
+	u32 send_cm_timer_ctrl_reg;
+	u32 send_cm_local_au_table0_to3_reg;
+	u32 send_cm_local_au_table4_to7_reg;
+	u32 send_cm_remote_au_table0_to3_reg;
+	u32 send_cm_remote_au_table4_to7_reg;
+	u32 send_cm_credit_vl_reg;
+	u32 send_cm_credit_vl15_reg;
+	u32 send_egress_err_info_reg;
+	u32 send_egress_err_source_reg;
+	u32 send_egress_ctxt_status_reg;
+	u32 send_egress_send_dma_status_reg;
+
+	/* egress port send context registers */
+	u32 txe_epsc_stride;
+	u32 send_ctxt_check_enable_reg;
+	u32 send_ctxt_check_vl_reg;
+	u32 send_ctxt_check_job_key_reg;
+	u32 send_ctxt_check_partition_key_reg;
+	u32 send_ctxt_check_slid_reg;
+	u32 send_ctxt_check_opcode_reg;
+
+	/* SI registers */
+	u32 cce_msix_int_map_vec_reg;
+	u32 send_pio_err_status_reg;
+	u32 send_pio_err_mask_reg;
+	u32 send_pio_err_clear_reg;
+	u32 send_dma_err_status_reg;
+	u32 send_dma_err_mask_reg;
+	u32 send_dma_err_clear_reg;
+	u32 csr_err_status_reg;
+	u32 csr_err_mask_reg;
+	u32 csr_err_clear_reg;
+
+	void (*setextled)(struct hfi1_pportdata *ppd, u32 on);
+	void (*start_led_override)(struct hfi1_pportdata *ppd,
+				   unsigned int timeon,
+				   unsigned int timeoff);
+	void (*shutdown_led_override)(struct hfi1_pportdata *ppd);
+	void (*read_guid)(struct hfi1_devdata *dd);
+	int (*early_per_chip_init)(struct hfi1_devdata *dd);
+	int (*mid_per_chip_init)(struct hfi1_devdata *dd);
+	void (*init_other)(struct hfi1_devdata *dd);
+	int (*late_per_chip_init)(struct hfi1_devdata *dd);
+	void (*start_port)(struct hfi1_pportdata *ppd);
+	void (*stop_port)(struct hfi1_pportdata *ppd);
+	void (*init_tids)(struct hfi1_devdata *dd);
+	void (*put_tid)(struct hfi1_ctxtdata *rcd, u32 index,
+			u32 type, unsigned long pa, u16 order, bool flush);
+	void (*rcv_array_wc_fill)(struct hfi1_ctxtdata *rcd, u32 index,
+				  u32 type);
+	void (*set_port_tid_count)(struct hfi1_ctxtdata *rcd);
+	void (*set_port_max_mtu)(struct hfi1_pportdata *ppd, u32 maxvlmtu);
+	void (*update_rcv_hdr_size)(struct hfi1_pportdata *ppd, u16 ctxt,
+				    u32 size);
+	bool (*check_synth_status)(struct hfi1_devdata *dd);
+	void (*update_synth_status)(struct hfi1_devdata *dd);
+	u64 (*create_pbc)(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs,
+			  u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
+	void (*set_pio_integrity)(struct send_context *sc, enum spi_cmds cmd);
+	int (*find_used_resources)(struct hfi1_devdata *dd);
+	void (*read_link_quality)(struct hfi1_pportdata *ppd, u8 *link_quality);
+	void (*set_rheq_addr)(struct hfi1_devdata *dd, u16 ctxt, u64 dma_addr);
+	void (*handle_link_bounce)(struct work_struct *work);
+	void (*enable_rcv_context)(struct hfi1_pportdata *ppd, u16 ctxt,
+				   u64 *kctxt_ctrl, bool enable);
+};
+
+/* synthetic counter data */
+struct wfr_synth_data {
+	u64 last_tx;
+	u64 last_rx;
+};
+
+union synth_data {
+	struct wfr_synth_data wfr;
+};
+
+/* Port State Change (TRAP128) data used exclusivly by that code */
+struct hfi1_psc {
+	struct work_struct work;	/* port-state-change TRAP handler */
+	struct semaphore wait;		/* serialization of port-state-change processing */
+	atomic_t nq;			/* number of outstanding TRAP128 svc reqs */
+};
+
+/* CPORT items, separate from hfi1_devdata */
+struct hfi1_cport {
+	struct hfi1_devdata *dd;
+	struct cport_options opts;
+	struct cport_trap_status traps;
+	struct semaphore outbox;	/* PF0->CPORT outbox contention avoidance */
+	struct xarray tid_xa;		/* maps req msg to u32 tid */
+	u32 tid_next;			/* for xa_alloc_cyclic() */
+	struct work_struct mctxt_work;	/* first step of MCTXT recv */
+	atomic_t seqno;			/* sequence number for sends */
+	unsigned int rseqno;		/* sequence number for recvs */
+#ifdef CONFIG_HFI_CPORT_POLLING
+	struct task_struct *poll_th;
+#endif
+	atomic_t nping;			/* CPORT ping counter */
+	struct task_struct *ping_th;	/* kthread currently running ping */
+	struct xarray trap_xa;		/* handlers for MCTXT TRAPs */
+	struct hfi1_psc psc;		/* used only by TRAP128 */
+	cport_handler handlers[256];
+};
+
 typedef int (*send_routine)(struct rvt_qp *, struct hfi1_pkt_state *, u64);
 struct hfi1_netdev_rx;
 struct hfi1_devdata {
@@ -1027,6 +1390,9 @@ struct hfi1_devdata {
 	struct device *user_device;
 	struct device *diag_device;
 	struct device *ui_device;
+	const struct chip_params *params;
+	struct hfi1_cport *cport;
+	struct workqueue_struct *hfi1_wq;
 
 	/* first mapping up to RcvArray */
 	u8 __iomem *kregbase1;
@@ -1037,12 +1403,10 @@ struct hfi1_devdata {
 	/* for detecting offset above kregbase2 address */
 	u32 base2_start;
 
-	/* Per VL data. Enough for all VLs but not all elements are set/used. */
-	struct per_vl_data vld[PER_VL_SEND_CONTEXTS];
 	/* send context data */
 	struct send_context_info *send_contexts;
 	/* map hardware send contexts to software index */
-	u8 *hw_to_sw;
+	u16 *hw_to_sw;
 	/* spinlock for allocating and releasing send context resources */
 	spinlock_t sc_lock;
 	/* lock for pio_map */
@@ -1051,10 +1415,6 @@ struct hfi1_devdata {
 	spinlock_t sc_init_lock;
 	/* lock for sdma_map */
 	spinlock_t                          sde_map_lock;
-	/* array of kernel send contexts */
-	struct send_context **kernel_send_context;
-	/* array of vl maps */
-	struct pio_vl_map __rcu *pio_map;
 	/* default flags to last descriptor */
 	u64 default_desc1;
 
@@ -1070,11 +1430,10 @@ struct hfi1_devdata {
 	u32                                 num_sdma;
 	/* array of engines sized by num_sdma */
 	struct sdma_engine                 *per_sdma;
-	/* array of vl maps */
-	struct sdma_vl_map __rcu           *sdma_map;
 	/* SPC freeze waitqueue and variable */
 	wait_queue_head_t		  sdma_unfreeze_wq;
 	atomic_t			  sdma_unfreeze_count;
+	atomic_t			  sdma_print_tag;
 
 	u32 lcb_access_count;		/* count of LCB users */
 
@@ -1109,16 +1468,21 @@ struct hfi1_devdata {
 	u64 __percpu *send_schedule;
 	/* number of reserved contexts for netdev usage */
 	u16 num_netdev_contexts;
-	/* number of receive contexts in use by the driver */
-	u32 num_rcv_contexts;
 	/* number of pio send contexts in use by the driver */
 	u32 num_send_contexts;
-	/*
-	 * number of ctxts available for PSM open
-	 */
-	u32 freectxts;
-	/* total number of available user/PSM contexts */
-	u32 num_user_contexts;
+	/* first RcvArray entroy to use */
+	u32 first_rcvarray_entry;
+	/* first PIO block to use */
+	u32 first_pio_block;
+	/* first receive context to use */
+	u16 first_rcv_context;
+	/* first send send context to use */
+	u16 first_send_context;
+	/* first available RSM rule */
+	u8 first_rsm_rule;
+	/* RSM rules are initialized (first_rsm_rule is valid) */
+	bool rsm_rule_init;
+
 	/* base receive interrupt timeout, in CSR units */
 	u32 rcv_intr_timeout_csr;
 
@@ -1128,6 +1492,8 @@ struct hfi1_devdata {
 	struct mutex dc8051_lock; /* exclusive access to 8051 */
 	struct workqueue_struct *update_cntr_wq;
 	struct work_struct update_cntr_work;
+	struct work_struct rcverr_work;
+	struct work_struct freeze_work;
 	/* exclusive access to 8051 memory */
 	spinlock_t dc8051_memlock;
 	int dc8051_timed_out;	/* remember if the 8051 timed out */
@@ -1141,7 +1507,7 @@ struct hfi1_devdata {
 	 * mapped read-only into user processes so they can get unit and
 	 * IB link status cheaply
 	 */
-	struct hfi1_status *status;
+	struct hfi1_status_v2 *status;
 
 	/* revision register shadow */
 	u64 revision;
@@ -1203,8 +1569,7 @@ struct hfi1_devdata {
 	u16 vl15buf_cached;
 
 	/* Misc small ints */
-	u8 n_krcv_queues;
-	u8 qos_shift;
+	u16 n_krcv_queues;
 
 	u16 irev;	/* implementation revision */
 	u32 dc8051_ver; /* 8051 firmware version */
@@ -1215,8 +1580,11 @@ struct hfi1_devdata {
 
 	struct diag_client *diag_client;
 
-	/* general interrupt: mask of handled interrupts */
-	u64 gi_mask[CCE_NUM_INT_CSRS];
+	/* general interrupt masks */
+	struct {
+		u64 remap;	  /* remaped away */
+		u64 cce_int_mask; /* cache of csr */
+	} gi_mask[LARGEST_NUM_INT_CSRS];
 
 	struct rcv_array_data rcv_entries;
 
@@ -1240,11 +1608,8 @@ struct hfi1_devdata {
 	u64 *cntrs;
 	u64 *scntrs;
 
-	/*
-	 * remembered values for synthetic counters
-	 */
-	u64 last_tx;
-	u64 last_rx;
+	/* remembered values for synthetic counters */
+	union synth_data synth_data;
 
 	/*
 	 * per-port counters
@@ -1252,6 +1617,12 @@ struct hfi1_devdata {
 	size_t nportcntrs;
 	char *portcntrnames;
 	size_t portcntrnameslen;
+
+	atomic_t snoop_count;
+
+	/* overflow header counter support */
+	DECLARE_BITMAP(ovf_disabled, MAX_CTXTS);
+	u8 ovf_offset[MAX_CTXTS];
 
 	struct err_info_rcvport err_info_rcvport;
 	struct err_info_constraint err_info_rcv_constraint;
@@ -1312,17 +1683,13 @@ struct hfi1_devdata {
 	struct hfi1_opcode_stats_perctx __percpu *tx_opstats;
 	/* device (not port) flags, basically device capabilities */
 	u16 flags;
+	/* number of elements allocated in the rcd array */
+	u16 num_rcd;
 	/* Number of physical ports available */
 	u8 num_pports;
-	/* Lowest context number which can be used by user processes or VNIC */
-	u8 first_dyn_alloc_ctxt;
 	/* adding a new field here would make it part of this cacheline */
 
-	/* seqlock for sc2vl */
-	seqlock_t sc2vl_lock ____cacheline_aligned_in_smp;
-	u64 sc2vl[4];
 	u64 __percpu *rcv_limit;
-	/* adding a new field here would make it part of this cacheline */
 
 	/* OUI comes from the HW. Used everywhere as 3 separate bytes. */
 	u8 oui1;
@@ -1338,7 +1705,6 @@ struct hfi1_devdata {
 	__le64 *rcvhdrtail_dummy_kvaddr;
 	dma_addr_t rcvhdrtail_dummy_dma;
 
-	u32 rcv_ovfl_cnt;
 	/* Serialize ASPM enable/disable between multiple verbs contexts */
 	spinlock_t aspm_lock;
 	/* Number of verbs contexts which have disabled ASPM */
@@ -1358,11 +1724,10 @@ struct hfi1_devdata {
 	/* Lock to protect IRQ SRC register access */
 	spinlock_t irq_src_lock;
 	int vnic_num_vports;
-	struct hfi1_netdev_rx *netdev_rx;
 	struct hfi1_affinity_node *affinity_entry;
 
 	/* Keeps track of IPoIB RSM rule users */
-	atomic_t ipoib_rsm_usr_num;
+	DECLARE_BITMAP(rsm_rule_bitmap, MAX_RSM_RULES);
 };
 
 /* 8051 firmware version helper */
@@ -1371,11 +1736,9 @@ struct hfi1_devdata {
 #define dc8051_ver_min(a) (((a) & 0x00ff00) >> 8)
 #define dc8051_ver_patch(a) ((a) & 0x0000ff)
 
-/* f_put_tid types */
+/* hfi1_put_tid types */
 #define PT_EXPECTED       0
 #define PT_EAGER          1
-#define PT_INVALID_FLUSH  2
-#define PT_INVALID        3
 
 struct tid_rb_node;
 
@@ -1383,6 +1746,7 @@ struct tid_rb_node;
 struct hfi1_filedata {
 	struct srcu_struct pq_srcu;
 	struct hfi1_devdata *dd;
+	struct hfi1_pportdata *ppd;
 	struct hfi1_ctxtdata *uctxt;
 	struct hfi1_user_sdma_comp_q *cq;
 	/* update side lock for SRCU */
@@ -1391,6 +1755,11 @@ struct hfi1_filedata {
 	u16 subctxt;
 	/* for cpu affinity; -1 if none */
 	int rec_cpu_num;
+	/*
+	 * For TID memory implementations that must enforce RLIMIT_MEMLOCK.
+	 *
+	 * tid_n_pinned should only be used by TID memory implementations.
+	 */
 	u32 tid_n_pinned;
 	bool use_mn;
 	struct tid_rb_node **entry_to_rb;
@@ -1405,26 +1774,33 @@ struct hfi1_filedata {
 
 extern struct xarray hfi1_dev_table;
 struct hfi1_devdata *hfi1_lookup(int unit);
+int get_num_user_contexts(struct hfi1_devdata *dd, int pidx);
 
 static inline unsigned long uctxt_offset(struct hfi1_ctxtdata *uctxt)
 {
-	return (uctxt->ctxt - uctxt->dd->first_dyn_alloc_ctxt) *
-		HFI1_MAX_SHARED_CTXTS;
+	return uctxt->ctxt * HFI1_MAX_SHARED_CTXTS;
 }
 
 int hfi1_init(struct hfi1_devdata *dd, int reinit);
+extern unsigned int snoop_drop_send;
+extern unsigned int snoop_force_capture;
 int hfi1_count_active_units(void);
 
 int hfi1_diag_add(struct hfi1_devdata *dd);
 void hfi1_diag_remove(struct hfi1_devdata *dd);
-void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup);
+void handle_linkup_change(struct hfi1_pportdata *ppd, u32 linkup);
+void cport_handle_linkup_change(struct hfi1_pportdata *ppd,
+				struct opa_port_info *pi, u32 linkup);
+void go_port_active(struct hfi1_pportdata *ppd);
 
 void handle_user_interrupt(struct hfi1_ctxtdata *rcd);
 
+int start_cport(struct hfi1_devdata *dd);
 int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd);
 int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd);
 int hfi1_create_kctxts(struct hfi1_devdata *dd);
-int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
+#define DYNAMIC_CONTEXT 0xffff /* dynamic context request */
+int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa, u16 ctxt,
 			 struct hfi1_ctxtdata **rcd);
 void hfi1_free_ctxt(struct hfi1_ctxtdata *rcd);
 void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
@@ -1432,15 +1808,13 @@ void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
 void hfi1_free_ctxtdata(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd);
 int hfi1_rcd_put(struct hfi1_ctxtdata *rcd);
 int hfi1_rcd_get(struct hfi1_ctxtdata *rcd);
-struct hfi1_ctxtdata *hfi1_rcd_get_by_index_safe(struct hfi1_devdata *dd,
-						 u16 ctxt);
 struct hfi1_ctxtdata *hfi1_rcd_get_by_index(struct hfi1_devdata *dd, u16 ctxt);
 int handle_receive_interrupt(struct hfi1_ctxtdata *rcd, int thread);
 int handle_receive_interrupt_nodma_rtail(struct hfi1_ctxtdata *rcd, int thread);
 int handle_receive_interrupt_dma_rtail(struct hfi1_ctxtdata *rcd, int thread);
 int handle_receive_interrupt_napi_fp(struct hfi1_ctxtdata *rcd, int budget);
 int handle_receive_interrupt_napi_sp(struct hfi1_ctxtdata *rcd, int budget);
-void set_all_slowpath(struct hfi1_devdata *dd);
+void set_all_slowpath(struct hfi1_pportdata *ppd);
 
 extern const struct pci_device_id hfi1_pci_tbl[];
 void hfi1_make_ud_req_9B(struct rvt_qp *qp,
@@ -1557,6 +1931,18 @@ static inline u8 get_hdrqentsize(struct hfi1_ctxtdata *rcd)
 }
 
 /**
+ * kctxt_hdrqentsize - return hdrq entry size for a port kernel context
+ * @ppd: target port structure
+ */
+static inline u8 kctxt_hdrqentsize(struct hfi1_pportdata *ppd)
+{
+	/* use port's first rcv context */
+	struct hfi1_ctxtdata *rcd = ppd->dd->rcd[ppd->rcv_context_base];
+
+	return get_hdrqentsize(rcd);
+}
+
+/**
  * get_hdrq_cnt - return hdrq count
  * @rcd: the receive context
  */
@@ -1580,7 +1966,7 @@ static inline bool hfi1_is_slowpath(struct hfi1_ctxtdata *rcd)
  */
 static inline bool hfi1_is_fastpath(struct hfi1_ctxtdata *rcd)
 {
-	if (rcd->ctxt == HFI1_CTRL_CTXT)
+	if (is_control_context(rcd))
 		return false;
 
 	return rcd->do_interrupt == rcd->fast_handler;
@@ -1603,9 +1989,15 @@ int hfi1_reset_device(int);
 void receive_interrupt_work(struct work_struct *work);
 
 /* extract service channel from header and rhf */
-static inline int hfi1_9B_get_sc5(struct ib_header *hdr, u64 rhf)
+static inline int hfi1_9B_get_sc5(struct ib_header *hdr, bool sc4)
 {
-	return ib_get_sc(hdr) | ((!!(rhf_dc_info(rhf))) << 4);
+	return ib_get_sc(hdr) | (sc4 << 4);
+}
+
+/* 9B header length function */
+static inline u16 ib_get_len(const struct ib_header *hdr)
+{
+	return be16_to_cpu(hdr->lrh[2]);
 }
 
 #define HFI1_JKEY_WIDTH       16
@@ -1641,7 +2033,11 @@ static inline u32 active_egress_rate(struct hfi1_pportdata *ppd)
 	u16 link_width = ppd->link_width_active;
 	u32 egress_rate;
 
-	if (link_speed == OPA_LINK_SPEED_25G)
+	if (link_speed == OPA_LINK_SPEED_100G)
+		egress_rate = 100000;
+	else if (link_speed == OPA_LINK_SPEED_50G)
+		egress_rate = 50000;
+	else if (link_speed == OPA_LINK_SPEED_25G)
 		egress_rate = 25000;
 	else /* assume OPA_LINK_SPEED_12_5G */
 		egress_rate = 12500;
@@ -1719,10 +2115,10 @@ static inline void pause_for_credit_return(struct hfi1_devdata *dd)
 
 /**
  * sc_to_vlt() - reverse lookup sc to vl
- * @dd - devdata
+ * @ppd - per-port data
  * @sc5 - 5 bit sc
  */
-static inline u8 sc_to_vlt(struct hfi1_devdata *dd, u8 sc5)
+static inline u8 sc_to_vlt(struct hfi1_pportdata *ppd, u8 sc5)
 {
 	unsigned seq;
 	u8 rval;
@@ -1731,9 +2127,9 @@ static inline u8 sc_to_vlt(struct hfi1_devdata *dd, u8 sc5)
 		return (u8)(0xff);
 
 	do {
-		seq = read_seqbegin(&dd->sc2vl_lock);
-		rval = *(((u8 *)dd->sc2vl) + sc5);
-	} while (read_seqretry(&dd->sc2vl_lock, seq));
+		seq = read_seqbegin(&ppd->sc2vl_lock);
+		rval = *(((u8 *)ppd->sc2vl) + sc5);
+	} while (read_seqretry(&ppd->sc2vl_lock, seq));
 
 	return rval;
 }
@@ -1770,11 +2166,12 @@ static inline int ingress_pkey_matches_entry(u16 pkey, u16 ent)
  * an entry which matches 'pkey'. return 0 if a match is found,
  * and 1 otherwise.
  */
-static int ingress_pkey_table_search(struct hfi1_pportdata *ppd, u16 pkey)
+static inline int ingress_pkey_table_search(struct hfi1_pportdata *ppd,
+					    u16 pkey)
 {
 	int i;
 
-	for (i = 0; i < MAX_PKEY_VALUES; i++) {
+	for (i = 0; i < ppd->dd->params->pkey_table_size; i++) {
 		if (ingress_pkey_matches_entry(pkey, ppd->pkeys[i]))
 			return 0;
 	}
@@ -1786,8 +2183,8 @@ static int ingress_pkey_table_search(struct hfi1_pportdata *ppd, u16 pkey)
  * i.e., increment port_rcv_constraint_errors for the port, and record
  * the 'error info' for this failure.
  */
-static void ingress_pkey_table_fail(struct hfi1_pportdata *ppd, u16 pkey,
-				    u32 slid)
+static inline void ingress_pkey_table_fail(struct hfi1_pportdata *ppd, u16 pkey,
+					   u32 slid)
 {
 	struct hfi1_devdata *dd = ppd->dd;
 
@@ -1866,7 +2263,7 @@ bad:
 #define OPA_MTU_2048  4
 #define OPA_MTU_4096  5
 
-u32 lrh_max_header_bytes(struct hfi1_devdata *dd);
+u32 lrh_max_header_bytes(struct hfi1_pportdata *ppd);
 int mtu_to_enum(u32 mtu, int default_if_bad);
 u16 enum_to_mtu(int mtu);
 static inline int valid_ib_mtu(unsigned int mtu)
@@ -1886,16 +2283,24 @@ int set_mtu(struct hfi1_pportdata *ppd);
 
 int hfi1_set_lid(struct hfi1_pportdata *ppd, u32 lid, u8 lmc);
 void hfi1_disable_after_error(struct hfi1_devdata *dd);
-int hfi1_set_uevent_bits(struct hfi1_pportdata *ppd, const int evtbit);
 int hfi1_rcvbuf_validate(u32 size, u8 type, u16 *encode);
 
 int fm_get_table(struct hfi1_pportdata *ppd, int which, void *t);
 int fm_set_table(struct hfi1_pportdata *ppd, int which, void *t);
 
-void set_up_vau(struct hfi1_devdata *dd, u8 vau);
-void set_up_vl15(struct hfi1_devdata *dd, u16 vl15buf);
-void reset_link_credits(struct hfi1_devdata *dd);
-void assign_remote_cm_au_table(struct hfi1_devdata *dd, u8 vcu);
+void set_up_vau(struct hfi1_pportdata *ppd, u8 vau);
+void set_up_vl15(struct hfi1_pportdata *ppd, u16 vl15buf);
+void reset_link_credits(struct hfi1_pportdata *ppd);
+void assign_remote_cm_au_table(struct hfi1_pportdata *ppd, u8 vcu);
+
+void hfi1_snoop_init(struct hfi1_devdata *dd);
+void snoop_recv_handler(struct hfi1_packet *packet);
+int snoop_send_dma_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
+			   u64 pbc);
+int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
+			   u64 pbc);
+void snoop_inline_pio_send(struct hfi1_devdata *dd, struct pio_buf *pbuf,
+			   u64 pbc, const void *from, size_t count);
 
 int set_buffer_control(struct hfi1_pportdata *ppd, struct buffer_control *bc);
 
@@ -1983,7 +2388,7 @@ static inline u16 hfi1_get_pkey(struct hfi1_ibport *ibp, unsigned index)
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 	u16 ret;
 
-	if (index >= ARRAY_SIZE(ppd->pkeys))
+	if (index >= ppd->dd->params->pkey_table_size)
 		ret = 0;
 	else
 		ret = ppd->pkeys[index];
@@ -2046,7 +2451,6 @@ struct cc_state *get_cc_state_protected(struct hfi1_pportdata *ppd)
 
 /* free up any allocated data at closes */
 int hfi1_init_dd(struct hfi1_devdata *dd);
-void hfi1_free_devdata(struct hfi1_devdata *dd);
 
 /* LED beaconing functions */
 void hfi1_start_led_override(struct hfi1_pportdata *ppd, unsigned int timeon,
@@ -2126,26 +2530,14 @@ static inline u32 get_rcvhdrtail(const struct hfi1_ctxtdata *rcd)
 	return (u32)le64_to_cpu(*hfi1_rcvhdrtail_kvaddr(rcd));
 }
 
-static inline bool hfi1_packet_present(struct hfi1_ctxtdata *rcd)
-{
-	if (likely(!rcd->rcvhdrtail_kvaddr)) {
-		u32 seq = rhf_rcv_seq(rhf_to_cpu(get_rhf_addr(rcd)));
-
-		return !last_rcv_seq(rcd, seq);
-	}
-	return hfi1_rcd_head(rcd) != get_rcvhdrtail(rcd);
-}
-
 /*
  * sysfs interface.
  */
 
 extern const char ib_hfi1_version[];
 extern const struct attribute_group ib_hfi1_attr_group;
-extern const struct attribute_group *hfi1_attr_port_groups[];
-
-int hfi1_device_create(struct hfi1_devdata *dd);
-void hfi1_device_remove(struct hfi1_devdata *dd);
+extern const struct attribute_group *wfr_attr_port_groups[];
+extern const struct attribute_group *cport_attr_port_groups[];
 
 int hfi1_verbs_register_sysfs(struct hfi1_devdata *dd);
 void hfi1_verbs_unregister_sysfs(struct hfi1_devdata *dd);
@@ -2161,8 +2553,8 @@ int restore_pci_variables(struct hfi1_devdata *dd);
 int save_pci_variables(struct hfi1_devdata *dd);
 int do_pcie_gen3_transition(struct hfi1_devdata *dd);
 void tune_pcie_caps(struct hfi1_devdata *dd);
-int parse_platform_config(struct hfi1_devdata *dd);
-int get_platform_config_field(struct hfi1_devdata *dd,
+int parse_platform_config(struct hfi1_pportdata *ppd);
+int get_platform_config_field(struct hfi1_pportdata *ppd,
 			      enum platform_config_table_type_encoding
 			      table_type, int table_index, int field_index,
 			      u32 *data, u32 len);
@@ -2204,11 +2596,19 @@ extern struct mutex hfi1_mutex;
 #define DRIVER_NAME		"hfi1"
 #define HFI1_USER_MINOR_BASE     0
 #define HFI1_TRACE_MINOR         127
+#define HFI1_DIAGPKT_MINOR       128
+#define HFI1_DIAG_MINOR_BASE     129
+#define HFI1_SNOOP_CAPTURE_BASE  200
 #define HFI1_NMINORS             255
 
 #define PCI_VENDOR_ID_INTEL 0x8086
 #define PCI_DEVICE_ID_INTEL0 0x24f0
 #define PCI_DEVICE_ID_INTEL1 0x24f1
+#define PCI_VENDOR_ID_CORNELIS 0x434e
+#define PCI_DEVICE_ID_CORNELIS1 0x0001
+
+/* create a ULL mask out of the given number of bits */
+#define MASK_ULL(bits) ((1ull << (bits)) - 1)
 
 #define HFI1_PKT_USER_SC_INTEGRITY					    \
 	(SEND_CTXT_CHECK_ENABLE_DISALLOW_NON_KDETH_PACKETS_SMASK	    \
@@ -2219,13 +2619,17 @@ extern struct mutex hfi1_mutex;
 #define HFI1_PKT_KERNEL_SC_INTEGRITY					    \
 	(SEND_CTXT_CHECK_ENABLE_DISALLOW_KDETH_PACKETS_SMASK)
 
-static inline u64 hfi1_pkt_default_send_ctxt_mask(struct hfi1_devdata *dd,
+static inline u64 hfi1_pkt_default_send_ctxt_mask(struct hfi1_pportdata *ppd,
 						  u16 ctxt_type)
 {
 	u64 base_sc_integrity;
 
-	/* No integrity checks if HFI1_CAP_NO_INTEGRITY is set */
-	if (HFI1_CAP_IS_KSET(NO_INTEGRITY))
+	/*
+	 * No integrity checks if HFI1_CAP_NO_INTEGRITY is set
+	 * or driver is snooping
+	 */
+	if (HFI1_CAP_IS_KSET(NO_INTEGRITY) ||
+	    (ppd->hfi1_snoop.mode_flag & HFI1_PORT_SNOOP_MODE))
 		return 0;
 
 	base_sc_integrity =
@@ -2258,7 +2662,7 @@ static inline u64 hfi1_pkt_default_send_ctxt_mask(struct hfi1_devdata *dd,
 		base_sc_integrity |= HFI1_PKT_KERNEL_SC_INTEGRITY;
 
 	/* turn on send-side job key checks if !A0 */
-	if (!is_ax(dd))
+	if (!is_ax(ppd->dd))
 		base_sc_integrity |= SEND_CTXT_CHECK_ENABLE_CHECK_JOB_KEY_SMASK;
 
 	return base_sc_integrity;
@@ -2339,6 +2743,26 @@ static inline u64 hfi1_pkt_base_sdma_integrity(struct hfi1_devdata *dd)
 	dev_err(&(dd)->pcidev->dev, "%s: port %u: " fmt, \
 		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), (port), ##__VA_ARGS__)
 
+#define ppd_dev_err(ppd, fmt, ...) \
+	dev_err(&(ppd)->dd->pcidev->dev, "%s.%u: " fmt, \
+		rvt_get_ibdev_name(&(ppd)->dd->verbs_dev.rdi), (ppd)->hw_pidx, \
+		##__VA_ARGS__)
+
+#define ppd_dev_warn(ppd, fmt, ...) \
+	dev_warn(&(ppd)->dd->pcidev->dev, "%s.%u: " fmt, \
+		 rvt_get_ibdev_name(&(ppd)->dd->verbs_dev.rdi), (ppd)->hw_pidx, \
+		 ##__VA_ARGS__)
+
+#define ppd_dev_warn_ratelimited(ppd, fmt, ...) \
+	dev_warn_ratelimited(&(ppd)->dd->pcidev->dev, "%s.%u: " fmt, \
+			     rvt_get_ibdev_name(&(ppd)->dd->verbs_dev.rdi), (ppd)->hw_pidx, \
+			     ##__VA_ARGS__)
+
+#define ppd_dev_info(ppd, fmt, ...) \
+	dev_info(&(ppd)->dd->pcidev->dev, "%s.%u: " fmt, \
+		 rvt_get_ibdev_name(&(ppd)->dd->verbs_dev.rdi), (ppd)->hw_pidx, \
+		 ##__VA_ARGS__)
+
 /*
  * this is used for formatting hw error messages...
  */
@@ -2376,14 +2800,7 @@ static inline void hfi1_reset_cpu_counters(struct hfi1_devdata *dd)
 	}
 }
 
-/* Control LED state */
-static inline void setextled(struct hfi1_devdata *dd, u32 on)
-{
-	if (on)
-		write_csr(dd, DCC_CFG_LED_CNTRL, 0x1F);
-	else
-		write_csr(dd, DCC_CFG_LED_CNTRL, 0x10);
-}
+void setextled(struct hfi1_pportdata *ppd, u32 on);
 
 /* return the i2c resource given the target */
 static inline u32 i2c_target(u32 target)
@@ -2598,6 +3015,12 @@ static inline void hfi1_make_ext_grh(struct hfi1_packet *packet,
 		cpu_to_be64(ppd->guids[HFI1_PORT_GUID_INDEX]);
 }
 
+/* return value to add to size to make it a multiple of 8, values 0-7 */
+static inline u32 hfi1_pad8(u32 size)
+{
+	return -((int)size) & 0x7;
+}
+
 static inline int hfi1_get_16b_padding(u32 hdr_size, u32 payload)
 {
 	return -(hdr_size + payload + (SIZE_OF_CRC << 2) +
@@ -2643,4 +3066,239 @@ static inline void hfi1_make_16b_hdr(struct hfi1_16b_header *hdr,
 	hdr->lrh[2] = lrh2;
 	hdr->lrh[3] = lrh3;
 }
+
+static inline u32 chip_send_contexts(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, dd->params->send_contexts_reg);
+}
+
+static inline u32 chip_sdma_engines(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, dd->params->send_dma_engines_reg);
+}
+
+static inline u32 chip_pio_mem_size(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, dd->params->send_pio_mem_size_reg);
+}
+
+static inline u32 chip_sdma_mem_size(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, dd->params->send_dma_mem_size_reg);
+}
+
+static inline u64 read_iport_csr(const struct hfi1_devdata *dd, int pidx,
+				 u32 offset)
+{
+	/* IPORT CSRs are separated by rxe_iport_stride */
+	return read_csr(dd, offset + (dd->params->rxe_iport_stride * pidx));
+}
+
+static inline void write_iport_csr(struct hfi1_devdata *dd, int pidx,
+				   u32 offset, u64 value)
+{
+	/* IPORT CSRs are separated by rxe_iport_stride */
+	write_csr(dd, offset + (dd->params->rxe_iport_stride * pidx), value);
+}
+
+static inline u64 read_iprc_csr(const struct hfi1_devdata *dd, int pidx,
+				int rc, u32 offset)
+{
+	/*
+	 * IPORT receive context CSRs are separated by rxe_iport_stride and
+	 * rxe_iprc_stride.
+	 */
+	return read_csr(dd, offset + (dd->params->rxe_iport_stride * pidx)
+			+ (dd->params->rxe_iprc_stride * rc));
+}
+
+static inline void write_iprc_csr(struct hfi1_devdata *dd, int pidx,
+				  int rc, u32 offset, u64 value)
+{
+	/*
+	 * IPORT receive context CSRs are separated by rxe_iport_stride and
+	 * rxe_iprc_stride.
+	 */
+	write_csr(dd, offset + (dd->params->rxe_iport_stride * pidx)
+		  + (dd->params->rxe_iprc_stride * rc), value);
+}
+
+static inline u64 read_rctxt_csr(const struct hfi1_devdata *dd, int ctxt,
+				 u32 offset)
+{
+	/* restricted rcv context CSRs are separated by rxe_rctxt_stride */
+	return read_csr(dd, offset + (dd->params->rxe_rctxt_stride * ctxt));
+}
+
+static inline void write_rctxt_csr(struct hfi1_devdata *dd, int ctxt,
+				   u32 offset, u64 value)
+{
+	/* restricted rcv context CSRs are separated by rxe_rctxt_stride */
+	write_csr(dd, offset + (dd->params->rxe_rctxt_stride * ctxt), value);
+}
+
+static inline u64 read_kctxt_csr(const struct hfi1_devdata *dd, int ctxt,
+				 u32 offset)
+{
+	/* kernel rcv context CSRs are separated by rxe_kctxt_stride */
+	return read_csr(dd, offset + (dd->params->rxe_kctxt_stride * ctxt));
+}
+
+static inline void write_kctxt_csr(struct hfi1_devdata *dd, int ctxt,
+				   u32 offset, u64 value)
+{
+	/* kernel rcv context CSRs are separated by rxe_kctxt_stride */
+	write_csr(dd, offset + (dd->params->rxe_kctxt_stride * ctxt), value);
+}
+
+static inline u64 read_ku_csr(const struct hfi1_devdata *dd, int ctxt,
+			      u32 offset)
+{
+	/* kernel/user rcv context CSRs are separated by rxe_ku_stride */
+	return read_csr(dd, offset + (dd->params->rxe_ku_stride * ctxt));
+}
+
+static inline void write_ku_csr(struct hfi1_devdata *dd, int ctxt,
+				u32 offset, u64 value)
+{
+	/* kernel/user rcv context CSRs are separated by rxe_ku_stride */
+	write_csr(dd, offset + (dd->params->rxe_ku_stride * ctxt), value);
+}
+
+static inline u64 read_uctxt_csr(const struct hfi1_devdata *dd, int ctxt,
+				 u32 offset)
+{
+	/* user per-context CSRs are separated by rxe_uctxt_stride */
+	return read_csr(dd, offset + (dd->params->rxe_uctxt_stride * ctxt));
+}
+
+static inline void write_uctxt_csr(struct hfi1_devdata *dd, int ctxt,
+				   u32 offset, u64 value)
+{
+	/* user per-context CSRs are separated by rxe_uctxt_stride */
+	write_csr(dd, offset + (dd->params->rxe_uctxt_stride * ctxt), value);
+}
+
+static inline u64 read_sctxt_csr(const struct hfi1_devdata *dd, int ctxt,
+				 u32 offset)
+{
+	/* send context CSRs are separated by txe_sctxt_stride */
+	return read_csr(dd, offset + (dd->params->txe_sctxt_stride * ctxt));
+}
+
+static inline void write_sctxt_csr(struct hfi1_devdata *dd, int ctxt,
+				   u32 offset, u64 value)
+{
+	/* send context CSRs are separated by txe_sctxt_stride */
+	write_csr(dd, offset + (dd->params->txe_sctxt_stride * ctxt), value);
+}
+
+static inline u64 read_tctxt_csr(const struct hfi1_devdata *dd, int ctxt,
+				 u32 offset)
+{
+	/* TXE send context CSRs are separated by txe_tctxt_stride */
+	return read_csr(dd, offset + (dd->params->txe_tctxt_stride * ctxt));
+}
+
+static inline void write_tctxt_csr(struct hfi1_devdata *dd, int ctxt,
+				   u32 offset, u64 value)
+{
+	/* TXE send context CSRs are separated by txe_tctxt_stride */
+	write_csr(dd, offset + (dd->params->txe_tctxt_stride * ctxt), value);
+}
+
+static inline u64 read_sdma_csr(const struct hfi1_devdata *dd, int eng,
+				u32 offset)
+{
+	/* SDMA engine CSRs are separated by txe_sdma_stride */
+	return read_csr(dd, offset + (dd->params->txe_sdma_stride * eng));
+}
+
+static inline void write_sdma_csr(struct hfi1_devdata *dd, int eng,
+				  u32 offset, u64 value)
+{
+	/* SDMA engine CSRs are separated by txe_sdma_stride */
+	write_csr(dd, offset + (dd->params->txe_sdma_stride * eng), value);
+}
+
+static inline u64 read_sdmacfg_csr(const struct hfi1_devdata *dd, int eng,
+				   u32 offset)
+{
+	/* SDMA config engine CSRs are separated by txe_sdmacfg_stride */
+	return read_csr(dd, offset + (dd->params->txe_sdmacfg_stride * eng));
+}
+
+static inline void write_sdmacfg_csr(struct hfi1_devdata *dd, int eng,
+				     u32 offset, u64 value)
+{
+	/* SDMA config engine CSRs are separated by txe_sdmacfg_stride */
+	write_csr(dd, offset + (dd->params->txe_sdmacfg_stride * eng), value);
+}
+
+static inline u64 read_eport_csr(const struct hfi1_devdata *dd, int pidx,
+				 u32 offset)
+{
+	/* EPORT CSRs are separated by txe_eport_stride */
+	return read_csr(dd, offset + (dd->params->txe_eport_stride * pidx));
+}
+
+static inline void write_eport_csr(struct hfi1_devdata *dd, int pidx,
+				   u32 offset, u64 value)
+{
+	/* EPORT CSRs are separated by txe_eport_stride */
+	write_csr(dd, offset + (dd->params->txe_eport_stride * pidx), value);
+}
+
+static inline u64 read_epsc_csr(const struct hfi1_devdata *dd, int pidx,
+				int sc, u32 offset)
+{
+	/*
+	 * EPORT send context CSRs are separated by txe_eport_stride and
+	 * txe_epsc_stride.
+	 */
+	return read_csr(dd, offset + (dd->params->txe_eport_stride * pidx)
+			+ (dd->params->txe_epsc_stride * sc));
+}
+
+static inline void write_epsc_csr(struct hfi1_devdata *dd, int pidx,
+				  int sc, u32 offset, u64 value)
+{
+	/*
+	 * EPORT send context CSRs are separated by txe_eport_stride and
+	 * txe_epsc_stride.
+	 */
+	write_csr(dd, offset + (dd->params->txe_eport_stride * pidx)
+		  + (dd->params->txe_epsc_stride * sc), value);
+}
+
+static inline u32 rhe_rcv_type_err(struct hfi1_packet *packet)
+{
+	/* same field location on WFR, JKR; different u64 */
+	return (packet->err_flags >> RHF_RCV_TYPE_ERR_SHIFT) & RHF_RCV_TYPE_ERR_MASK;
+}
+
+static inline bool rhe_crk_err(struct hfi1_packet *packet)
+{
+	/* same bit location on WFR, JKR; different u64 */
+	return !!(packet->err_flags & RHF_DC_ERR);
+}
+
+static inline bool rhe_tid_err(struct hfi1_packet *packet)
+{
+	/* same bit location on WFR, JKR; different u64 */
+	return !!(packet->err_flags & RHF_TID_ERR);
+}
+
+static inline bool rhe_len_err(struct hfi1_packet *packet)
+{
+	/* same bit location on WFR, JKR; different u64 */
+	return !!(packet->err_flags & RHF_LEN_ERR);
+}
+
+static inline bool rhe_icrc_err(struct hfi1_packet *packet)
+{
+	/* same bit location on WFR, JKR; different u64 */
+	return !!(packet->err_flags & RHF_ICRC_ERR);
+}
+
 #endif                          /* _HFI1_KERNEL_H */
