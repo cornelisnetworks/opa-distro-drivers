@@ -120,6 +120,7 @@ struct hfi1_ipoib_txq {
 
 struct hfi1_ipoib_dev_priv {
 	struct hfi1_devdata *dd;
+	struct hfi1_pportdata *ppd;
 	struct net_device   *netdev;
 	struct ib_device    *device;
 	struct hfi1_ipoib_txq *txqs;

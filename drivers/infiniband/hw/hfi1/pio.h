@@ -55,7 +55,8 @@ union pio_shadow_ring {
 /* per-NUMA send context */
 struct send_context {
 	/* read-only after init */
-	struct hfi1_devdata *dd;		/* device */
+	struct hfi1_devdata *dd;	/* device */
+	struct hfi1_pportdata *ppd;	/* port */
 	union pio_shadow_ring *sr;	/* shadow ring */
 	void __iomem *base_addr;	/* start of PIO memory */
 	u32 __percpu *buffers_allocated;/* count of buffers allocated */
@@ -64,9 +65,9 @@ struct send_context {
 	int node;			/* context home node */
 	u32 sr_size;			/* size of the shadow ring */
 	u16 flags;			/* flags */
+	u16 sw_index;			/* software index number */
+	u16 hw_context;			/* hardware context number */
 	u8  type;			/* context type */
-	u8  sw_index;			/* software index number */
-	u8  hw_context;			/* hardware context number */
 	u8  group;			/* credit return group */
 
 	/* allocator fields */
@@ -127,63 +128,65 @@ struct sc_config_sizes {
 };
 
 /*
- * The diagram below details the relationship of the mapping structures
+ * The diagram below details layout of pio_map, which is used to quickly select
+ * a kernel send context given a vl and a selector (fuzz).
  *
- * Since the mapping now allows for non-uniform send contexts per vl, the
- * number of send contexts for a vl is either the vl_scontexts[vl] or
- * a computation based on num_kernel_send_contexts/num_vls:
+ * sc = pio_map->map[vl & map_mask]->ksc[selector & elem_mask]
  *
- * For example:
- * nactual = vl_scontexts ? vl_scontexts[vl] : num_kernel_send_contexts/num_vls
+ * The map allows for non-uniform send contexts per vl.
  *
- * n = roundup to next highest power of 2 using nactual
+ * Where:
+ * nactual = num_kernel_send_contexts / num_vls
+ * vl_scontexts[vl] = nactual + extra
  *
- * In the case where there are num_kernel_send_contexts/num_vls doesn't divide
- * evenly, the extras are added from the last vl downward.
+ *	Extra is an evenly distributed modulo of remaining send contexts.
  *
- * For the case where n > nactual, the send contexts are assigned
- * in a round robin fashion wrapping back to the first send context
- * for a particular vl.
+ * svl[vl] = 1 + sum vl_scontexts[0..vl-1]
  *
- *               dd->pio_map
- *                    |                                   pio_map_elem[0]
- *                    |                                +--------------------+
- *                    v                                |       mask         |
- *               pio_vl_map                            |--------------------|
- *      +--------------------------+                   | ksc[0] -> sc 1     |
- *      |    list (RCU)            |                   |--------------------|
- *      |--------------------------|                 ->| ksc[1] -> sc 2     |
- *      |    mask                  |              --/  |--------------------|
- *      |--------------------------|            -/     |        *           |
- *      |    actual_vls (max 8)    |          -/       |--------------------|
- *      |--------------------------|       --/         | ksc[n-1] -> sc n   |
- *      |    vls (max 8)           |     -/            +--------------------+
+ * n = roundup to next highest power of 2 of vl_scontexts[vl]
+ *
+ * When n > vl_scontexts[vl], the send contexts are assigned in a round robin
+ * fashion wrapping back to the first send context for a particular vl.
+ *
+ *              ppd->pio_map
+ *                    |                                  pio_map_elem[0]
+ *                    |                               +------------------------+
+ *                    v                               |       mask             |
+ *               pio_vl_map                           |------------------------|
+ *      +--------------------------+                  | ksc[0] -> svl[0]       |
+ *      |    list (RCU)            |                  |------------------------|
+ *      |--------------------------|                ->| ksc[1] -> svl[0]+1     |
+ *      |    mask                  |              -/  |------------------------|
+ *      |--------------------------|            -/    |        *               |
+ *      |    actual_vls (max 8)    |          -/      |------------------------|
+ *      |--------------------------|       --/        | ksc[n-1] -> svl[0]+n-1 |
+ *      |    vls (max 8)           |     -/           +------------------------+
  *      |--------------------------|  --/
  *      |    map[0]                |-/
- *      |--------------------------|                   +--------------------+
- *      |    map[1]                |---                |       mask         |
- *      |--------------------------|   \----           |--------------------|
- *      |           *              |        \--        | ksc[0] -> sc 1+n   |
- *      |           *              |           \----   |--------------------|
- *      |           *              |                \->| ksc[1] -> sc 2+n   |
- *      |--------------------------|                   |--------------------|
- *      |   map[vls - 1]           |-                  |         *          |
- *      +--------------------------+ \-                |--------------------|
- *                                     \-              | ksc[m-1] -> sc m+n |
- *                                       \             +--------------------+
+ *      |--------------------------|                  +------------------------+
+ *      |    map[1]                |---               |       mask             |
+ *      |--------------------------|   \----          |------------------------|
+ *      |           *              |        \--       | ksc[0] -> svl[1]       |
+ *      |           *              |           \---   |------------------------|
+ *      |           *              |               \->| ksc[1] -> svl[1]+1     |
+ *      |--------------------------|                  |------------------------|
+ *      |   map[vls - 1]           |-                 |         *              |
+ *      +--------------------------+ \-               |------------------------|
+ *                                     \-             | ksc[n-1] -> svl[1]+n-1 |
+ *                                       \            +------------------------+
  *                                        \-
  *                                          \
- *                                           \-        +----------------------+
- *                                             \-      |       mask           |
- *                                               \     |----------------------|
- *                                                \-   | ksc[0] -> sc 1+m+n   |
- *                                                  \- |----------------------|
- *                                                    >| ksc[1] -> sc 2+m+n   |
- *                                                     |----------------------|
- *                                                     |         *            |
- *                                                     |----------------------|
- *                                                     | ksc[o-1] -> sc o+m+n |
- *                                                     +----------------------+
+ *                                           \-       +------------------------+
+ *                                             \-     |       mask             |
+ *                                               \    |------------------------|
+ *                                                \-  | ksc[x] -> svl[x]       |
+ *                                                  \ |------------------------|
+ *                                                   >| ksc[x] -> svl[x]+1     |
+ *                                                    |------------------------|
+ *                                                    |         *              |
+ *                                                    |------------------------|
+ *                                                    | ksc[n-1] -> svl[x]+n-1 |
+ *                                                    +------------------------+
  *
  */
 
@@ -224,12 +227,11 @@ struct pio_vl_map {
 	struct pio_map_elem *map[];
 };
 
-int pio_map_init(struct hfi1_devdata *dd, u8 port, u8 num_vls,
-		 u8 *vl_scontexts);
+int pio_map_init(struct hfi1_pportdata *ppd, u8 num_vls);
 void free_pio_map(struct hfi1_devdata *dd);
-struct send_context *pio_select_send_context_vl(struct hfi1_devdata *dd,
+struct send_context *pio_select_send_context_vl(struct hfi1_pportdata *ppd,
 						u32 selector, u8 vl);
-struct send_context *pio_select_send_context_sc(struct hfi1_devdata *dd,
+struct send_context *pio_select_send_context_sc(struct hfi1_pportdata *ppd,
 						u32 selector, u8 sc5);
 
 /* send context functions */
@@ -237,8 +239,8 @@ int init_credit_return(struct hfi1_devdata *dd);
 void free_credit_return(struct hfi1_devdata *dd);
 int init_sc_pools_and_sizes(struct hfi1_devdata *dd);
 int init_send_contexts(struct hfi1_devdata *dd);
-int init_pervl_scs(struct hfi1_devdata *dd);
-struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
+int init_pervl_scs(struct hfi1_pportdata *ppd);
+struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 			      uint hdrqentsize, int numa);
 void sc_free(struct send_context *sc);
 int sc_enable(struct send_context *sc);
@@ -259,13 +261,23 @@ u32 sc_percent_to_threshold(struct send_context *sc, u32 percent);
 u32 sc_mtu_to_threshold(struct send_context *sc, u32 mtu, u32 hdrqentsize);
 void hfi1_sc_wantpiobuf_intr(struct send_context *sc, u32 needint);
 void sc_wait(struct hfi1_devdata *dd);
-void set_pio_integrity(struct send_context *sc);
+
+/* commands for set_pio_integrity() */
+enum spi_cmds {
+	SPI_DEFAULT,
+	SPI_INIT,
+	SPI_SET_JKEY,
+	SPI_CLEAR_JKEY,
+	SPI_SET_PKEY,
+	SPI_CLEAR_PKEY,
+};
+void wfr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd);
 
 /* support functions */
 void pio_reset_all(struct hfi1_devdata *dd);
 void pio_freeze(struct hfi1_devdata *dd);
 void pio_kernel_unfreeze(struct hfi1_devdata *dd);
-void pio_kernel_linkup(struct hfi1_devdata *dd);
+void pio_kernel_linkup(struct hfi1_pportdata *ppd);
 
 /* global PIO send control operations */
 #define PSC_GLOBAL_ENABLE 0
@@ -276,8 +288,8 @@ void pio_kernel_linkup(struct hfi1_devdata *dd);
 #define PSC_DATA_VL_ENABLE 5
 #define PSC_DATA_VL_DISABLE 6
 
-void __cm_reset(struct hfi1_devdata *dd, u64 sendctrl);
-void pio_send_control(struct hfi1_devdata *dd, int op);
+void __cm_reset(struct hfi1_pportdata *ppd, u64 sendctrl);
+void pio_send_control(struct hfi1_pportdata *ppd, int op);
 
 /* PIO copy routines */
 void pio_copy(struct hfi1_devdata *dd, struct pio_buf *pbuf, u64 pbc,

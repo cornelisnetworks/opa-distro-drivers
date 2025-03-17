@@ -12,94 +12,118 @@
 #include <linux/workqueue.h>
 #include <linux/rculist.h>
 
+#include "sdma_defs.h"
 #include "hfi.h"
 #include "verbs.h"
 #include "sdma_txreq.h"
 
-/* Hardware limit */
-#define MAX_DESC 64
-/* Hardware limit for SDMA packet size */
-#define MAX_SDMA_PKT_SIZE ((16 * 1024) - 1)
+static inline bool wfr_sdma_qw_get_first_desc(u64 *qw)
+{
+	return !!(qw[0] & WFR_SDMA_DESC0_FIRST_DESC_FLAG);
+}
 
-#define SDMA_MAP_NONE          0
-#define SDMA_MAP_SINGLE        1
-#define SDMA_MAP_PAGE          2
+static inline void wfr_sdma_qw_set_first_desc(u64 *qw)
+{
+	qw[0] |= WFR_SDMA_DESC0_FIRST_DESC_FLAG;
+}
 
-#define SDMA_AHG_VALUE_MASK          0xffff
-#define SDMA_AHG_VALUE_SHIFT         0
-#define SDMA_AHG_INDEX_MASK          0xf
-#define SDMA_AHG_INDEX_SHIFT         16
-#define SDMA_AHG_FIELD_LEN_MASK      0xf
-#define SDMA_AHG_FIELD_LEN_SHIFT     20
-#define SDMA_AHG_FIELD_START_MASK    0x1f
-#define SDMA_AHG_FIELD_START_SHIFT   24
-#define SDMA_AHG_UPDATE_ENABLE_MASK  0x1
-#define SDMA_AHG_UPDATE_ENABLE_SHIFT 31
+static inline bool wfr_sdma_qw_get_last_desc(u64 *qw)
+{
+	return !!(qw[0] & WFR_SDMA_DESC0_LAST_DESC_FLAG);
+}
 
-/* AHG modes */
+static inline void wfr_sdma_qw_set_last_desc(u64 *qw)
+{
+	qw[0] |= WFR_SDMA_DESC0_LAST_DESC_FLAG;
+}
 
-/*
- * Be aware the ordering and values
- * for SDMA_AHG_APPLY_UPDATE[123]
- * are assumed in generating a skip
- * count in submit_tx() in sdma.c
- */
-#define SDMA_AHG_NO_AHG              0
-#define SDMA_AHG_COPY                1
-#define SDMA_AHG_APPLY_UPDATE1       2
-#define SDMA_AHG_APPLY_UPDATE2       3
-#define SDMA_AHG_APPLY_UPDATE3       4
+static inline u32 wfr_sdma_qw_get_byte_count(u64 *qw)
+{
+	return (qw[0] >> WFR_SDMA_DESC0_BYTE_COUNT_SHIFT) &
+		WFR_SDMA_DESC0_BYTE_COUNT_MASK;
+}
 
-/*
- * Bits defined in the send DMA descriptor.
- */
-#define SDMA_DESC0_FIRST_DESC_FLAG      BIT_ULL(63)
-#define SDMA_DESC0_LAST_DESC_FLAG       BIT_ULL(62)
-#define SDMA_DESC0_BYTE_COUNT_SHIFT     48
-#define SDMA_DESC0_BYTE_COUNT_WIDTH     14
-#define SDMA_DESC0_BYTE_COUNT_MASK \
-	((1ULL << SDMA_DESC0_BYTE_COUNT_WIDTH) - 1)
-#define SDMA_DESC0_BYTE_COUNT_SMASK \
-	(SDMA_DESC0_BYTE_COUNT_MASK << SDMA_DESC0_BYTE_COUNT_SHIFT)
-#define SDMA_DESC0_PHY_ADDR_SHIFT       0
-#define SDMA_DESC0_PHY_ADDR_WIDTH       48
-#define SDMA_DESC0_PHY_ADDR_MASK \
-	((1ULL << SDMA_DESC0_PHY_ADDR_WIDTH) - 1)
-#define SDMA_DESC0_PHY_ADDR_SMASK \
-	(SDMA_DESC0_PHY_ADDR_MASK << SDMA_DESC0_PHY_ADDR_SHIFT)
+/* assumes starting field is zero */
+static inline void wfr_sdma_qw_set_byte_count(u64 *qw, u32 bytes)
+{
+	qw[0] |= ((u64)bytes & WFR_SDMA_DESC0_BYTE_COUNT_MASK) <<
+			WFR_SDMA_DESC0_BYTE_COUNT_SHIFT;
+}
 
-#define SDMA_DESC1_HEADER_UPDATE1_SHIFT 32
-#define SDMA_DESC1_HEADER_UPDATE1_WIDTH 32
-#define SDMA_DESC1_HEADER_UPDATE1_MASK \
-	((1ULL << SDMA_DESC1_HEADER_UPDATE1_WIDTH) - 1)
-#define SDMA_DESC1_HEADER_UPDATE1_SMASK \
-	(SDMA_DESC1_HEADER_UPDATE1_MASK << SDMA_DESC1_HEADER_UPDATE1_SHIFT)
-#define SDMA_DESC1_HEADER_MODE_SHIFT    13
-#define SDMA_DESC1_HEADER_MODE_WIDTH    3
-#define SDMA_DESC1_HEADER_MODE_MASK \
-	((1ULL << SDMA_DESC1_HEADER_MODE_WIDTH) - 1)
-#define SDMA_DESC1_HEADER_MODE_SMASK \
-	(SDMA_DESC1_HEADER_MODE_MASK << SDMA_DESC1_HEADER_MODE_SHIFT)
-#define SDMA_DESC1_HEADER_INDEX_SHIFT   8
-#define SDMA_DESC1_HEADER_INDEX_WIDTH   5
-#define SDMA_DESC1_HEADER_INDEX_MASK \
-	((1ULL << SDMA_DESC1_HEADER_INDEX_WIDTH) - 1)
-#define SDMA_DESC1_HEADER_INDEX_SMASK \
-	(SDMA_DESC1_HEADER_INDEX_MASK << SDMA_DESC1_HEADER_INDEX_SHIFT)
-#define SDMA_DESC1_HEADER_DWS_SHIFT     4
-#define SDMA_DESC1_HEADER_DWS_WIDTH     4
-#define SDMA_DESC1_HEADER_DWS_MASK \
-	((1ULL << SDMA_DESC1_HEADER_DWS_WIDTH) - 1)
-#define SDMA_DESC1_HEADER_DWS_SMASK \
-	(SDMA_DESC1_HEADER_DWS_MASK << SDMA_DESC1_HEADER_DWS_SHIFT)
-#define SDMA_DESC1_GENERATION_SHIFT     2
-#define SDMA_DESC1_GENERATION_WIDTH     2
-#define SDMA_DESC1_GENERATION_MASK \
-	((1ULL << SDMA_DESC1_GENERATION_WIDTH) - 1)
-#define SDMA_DESC1_GENERATION_SMASK \
-	(SDMA_DESC1_GENERATION_MASK << SDMA_DESC1_GENERATION_SHIFT)
-#define SDMA_DESC1_INT_REQ_FLAG         BIT_ULL(1)
-#define SDMA_DESC1_HEAD_TO_HOST_FLAG    BIT_ULL(0)
+static inline u64 wfr_sdma_qw_get_phy_addr(u64 *qw)
+{
+	return (qw[0] >> WFR_SDMA_DESC0_PHY_ADDR_SHIFT) &
+		WFR_SDMA_DESC0_PHY_ADDR_MASK;
+}
+
+/* assumes starting field is zero */
+static inline void wfr_sdma_qw_set_phy_addr(u64 *qw, u64 phy_addr)
+{
+	qw[0] |= (phy_addr & WFR_SDMA_DESC0_PHY_ADDR_MASK) <<
+			WFR_SDMA_DESC0_PHY_ADDR_SHIFT;
+}
+
+static inline bool jkr_sdma_qw_get_first_desc(u64 *qw)
+{
+	return !!(qw[1] & JKR_SDMA_DESC1_FIRST_DESC_FLAG);
+}
+
+static inline void jkr_sdma_qw_set_first_desc(u64 *qw)
+{
+	qw[1] |= JKR_SDMA_DESC1_FIRST_DESC_FLAG;
+}
+
+static inline bool jkr_sdma_qw_get_last_desc(u64 *qw)
+{
+	return !!(qw[1] & JKR_SDMA_DESC1_LAST_DESC_FLAG);
+}
+
+static inline void jkr_sdma_qw_set_last_desc(u64 *qw)
+{
+	qw[1] |= JKR_SDMA_DESC1_LAST_DESC_FLAG;
+}
+
+static inline u32 jkr_sdma_qw_get_byte_count(u64 *qw)
+{
+	return (qw[1] >> JKR_SDMA_DESC1_BYTE_COUNT_SHIFT) &
+		JKR_SDMA_DESC1_BYTE_COUNT_MASK;
+}
+
+/* assumes starting field is zero */
+static inline void jkr_sdma_qw_set_byte_count(u64 *qw, u32 bytes)
+{
+	qw[1] |= ((u64)bytes & JKR_SDMA_DESC1_BYTE_COUNT_MASK) <<
+			JKR_SDMA_DESC1_BYTE_COUNT_SHIFT;
+}
+
+static inline u64 jkr_sdma_qw_get_phy_addr(u64 *qw)
+{
+	return (qw[0] >> JKR_SDMA_DESC0_PHY_ADDR_SHIFT) &
+		JKR_SDMA_DESC0_PHY_ADDR_MASK;
+}
+
+/* assumes starting field is zero */
+static inline void jkr_sdma_qw_set_phy_addr(u64 *qw, u64 phy_addr)
+{
+	qw[0] |= (phy_addr & JKR_SDMA_DESC0_PHY_ADDR_MASK) <<
+			JKR_SDMA_DESC0_PHY_ADDR_SHIFT;
+}
+
+/* Per-chip setter inlining wrapper */
+#define sdma_qw_set(dd, field, ...) do { \
+	if ((dd)->params->chip_type == CHIP_WFR) \
+		wfr_sdma_qw_set_##field(__VA_ARGS__); \
+	else if ((dd)->params->chip_type == CHIP_JKR) \
+		jkr_sdma_qw_set_##field(__VA_ARGS__); \
+	else \
+		WARN_ONCE(1, "Unsupported chip type %u", \
+			  (dd)->params->chip_type); \
+} while (0)
+
+/* Per-chip getter inlining wrapper */
+#define sdma_qw_get(dd, fn, p) \
+	((dd)->params->chip_type == CHIP_WFR ?  wfr_sdma_qw_get_##fn((p)) : \
+	 ((dd)->params->chip_type == CHIP_JKR ? jkr_sdma_qw_get_##fn((p)) : 0))
 
 enum sdma_states {
 	sdma_state_s00_hw_down,
@@ -270,7 +294,6 @@ struct hw_sdma_desc {
 struct sdma_engine {
 	/* read mostly */
 	struct hfi1_devdata *dd;
-	struct hfi1_pportdata *ppd;
 	/* private: */
 	void __iomem *tail_csr;
 	u64 imask;			/* clear interrupt mask */
@@ -346,12 +369,9 @@ struct sdma_engine {
 
 	/* CONFIG SDMA for now, just blindly duplicate */
 	/* private: */
-	struct tasklet_struct sdma_hw_clean_up_task
-		____cacheline_aligned_in_smp;
+	struct work_struct sdma_hw_clean_up_work;
+	struct work_struct sdma_sw_clean_up_work;
 
-	/* private: */
-	struct tasklet_struct sdma_sw_clean_up_task
-		____cacheline_aligned_in_smp;
 	/* private: */
 	struct work_struct err_halt_worker;
 	/* private */
@@ -368,7 +388,7 @@ struct sdma_engine {
 	u32 msix_intr;
 };
 
-int sdma_init(struct hfi1_devdata *dd, u8 port);
+int sdma_init(struct hfi1_devdata *dd);
 void sdma_start(struct hfi1_devdata *dd);
 void sdma_exit(struct hfi1_devdata *dd);
 void sdma_clean(struct hfi1_devdata *dd, size_t num_engines);
@@ -393,16 +413,20 @@ static inline int sdma_empty(struct sdma_engine *sde)
 	return sde->descq_tail == sde->descq_head;
 }
 
-static inline u16 sdma_descq_freecnt(struct sdma_engine *sde)
-{
-	return sde->descq_cnt -
-		(sde->descq_tail -
-		 READ_ONCE(sde->descq_head)) - 1;
-}
-
+/*
+ * Return the number of descriptors in use.  Expects descq_cnt is a
+ * power-of-two.  See sdma_get_descq_cnt().
+ */
 static inline u16 sdma_descq_inprocess(struct sdma_engine *sde)
 {
-	return sde->descq_cnt - sdma_descq_freecnt(sde);
+	return (sde->descq_cnt + sde->descq_tail - READ_ONCE(sde->descq_head))
+		& (sde->descq_cnt - 1);
+}
+
+/* return the number of descriptors available */
+static inline u16 sdma_descq_freecnt(struct sdma_engine *sde)
+{
+	return sde->descq_cnt - 1 - sdma_descq_inprocess(sde);
 }
 
 /*
@@ -445,6 +469,7 @@ void _sdma_txreq_ahgadd(
 
 /**
  * sdma_txinit_ahg() - initialize an sdma_txreq struct with AHG
+ * @dd: device data
  * @tx: tx request to initialize
  * @flags: flags to key last descriptor additions
  * @tlen: total packet length (pbc + headers + data)
@@ -495,15 +520,15 @@ void _sdma_txreq_ahgadd(
  * and RDMA_WRITE_MIDDLE.
  *
  */
-static inline int sdma_txinit_ahg(
-	struct sdma_txreq *tx,
-	u16 flags,
-	u16 tlen,
-	u8 ahg_entry,
-	u8 num_ahg,
-	u32 *ahg,
-	u8 ahg_hlen,
-	void (*cb)(struct sdma_txreq *, int))
+static inline int sdma_txinit_ahg(struct hfi1_devdata *dd,
+				  struct sdma_txreq *tx,
+				  u16 flags,
+				  u16 tlen,
+				  u8 ahg_entry,
+				  u8 num_ahg,
+				  u32 *ahg,
+				  u8 ahg_hlen,
+				  void (*cb)(struct sdma_txreq *, int))
 {
 	if (tlen == 0)
 		return -ENODATA;
@@ -519,8 +544,15 @@ static inline int sdma_txinit_ahg(
 	tx->wait = NULL;
 	tx->packet_len = tlen;
 	tx->tlen = tx->packet_len;
-	tx->descs[0].qw[0] = SDMA_DESC0_FIRST_DESC_FLAG;
+	tx->descs[0].qw[0] = 0;
 	tx->descs[0].qw[1] = 0;
+	/*
+	 * Do not bother with initializing .map_type; sdma_set_map_type()
+	 * should overwrite per-desc bits. sdma_get_map_type() should not be
+	 * called for per-desc bits that haven't been set with
+	 * sdma_set_map_type().
+	 */
+	sdma_qw_set(dd, first_desc, tx->descs[0].qw);
 	if (flags & SDMA_TXREQ_F_AHG_COPY)
 		tx->descs[0].qw[1] |=
 			(((u64)ahg_entry & SDMA_DESC1_HEADER_INDEX_MASK)
@@ -534,6 +566,7 @@ static inline int sdma_txinit_ahg(
 
 /**
  * sdma_txinit() - initialize an sdma_txreq struct (no AHG)
+ * @dd: device data
  * @tx: tx request to initialize
  * @flags: flags to key last descriptor additions
  * @tlen: total packet length (pbc + headers + data)
@@ -563,63 +596,68 @@ static inline int sdma_txinit_ahg(
  * SDMA_TXREQ_S_ABORTED, or SDMA_TXREQ_S_SHUTDOWN.
  *
  */
-static inline int sdma_txinit(
-	struct sdma_txreq *tx,
-	u16 flags,
-	u16 tlen,
-	void (*cb)(struct sdma_txreq *, int))
+static inline int sdma_txinit(struct hfi1_devdata *dd,
+			      struct sdma_txreq *tx,
+			      u16 flags,
+			      u16 tlen,
+			      void (*cb)(struct sdma_txreq *, int))
 {
-	return sdma_txinit_ahg(tx, flags, tlen, 0, 0, NULL, 0, cb);
+	return sdma_txinit_ahg(dd, tx, flags, tlen, 0, 0, NULL, 0, cb);
 }
 
-/* helpers - don't use */
-static inline int sdma_mapping_type(struct sdma_desc *d)
+static inline size_t sdma_mapping_len(struct hfi1_devdata *dd,
+				      struct sdma_desc *d)
 {
-	return (d->qw[1] & SDMA_DESC1_GENERATION_SMASK)
-		>> SDMA_DESC1_GENERATION_SHIFT;
+	return sdma_qw_get(dd, byte_count, d->qw);
 }
 
-static inline size_t sdma_mapping_len(struct sdma_desc *d)
+static inline dma_addr_t sdma_mapping_addr(struct hfi1_devdata *dd,
+					   struct sdma_desc *d)
 {
-	return (d->qw[0] & SDMA_DESC0_BYTE_COUNT_SMASK)
-		>> SDMA_DESC0_BYTE_COUNT_SHIFT;
+	return sdma_qw_get(dd, phy_addr, d->qw);
 }
 
-static inline dma_addr_t sdma_mapping_addr(struct sdma_desc *d)
+static inline void sdma_set_map_type(struct sdma_txreq *tx,
+				     u8 i, u8 type)
 {
-	return (d->qw[0] & SDMA_DESC0_PHY_ADDR_SMASK)
-		>> SDMA_DESC0_PHY_ADDR_SHIFT;
+	int w = BIT_WORD(i * SDMA_MAP_BITS);
+	int offset = (i * SDMA_MAP_BITS) % BITS_PER_LONG;
+	unsigned long shftmask = SDMA_MAP_MASK << offset;
+	unsigned long *mw = &tx->map_type[w];
+	unsigned long new = type << offset;
+
+	/* Per-desc SDMA_MAP_BITS-sized field must never cross word boundary */
+	static_assert(BITS_PER_LONG % SDMA_MAP_BITS == 0);
+	bitmap_replace(mw, mw, &new, &shftmask, SDMA_MAP_BITS);
 }
 
-static inline void make_tx_sdma_desc(
-	struct sdma_txreq *tx,
-	int type,
-	dma_addr_t addr,
-	size_t len,
-	void *pinning_ctx,
-	void (*ctx_get)(void *),
-	void (*ctx_put)(void *))
+static inline u8 sdma_get_map_type(struct sdma_txreq *tx, u8 i)
+{
+	int idx = i * SDMA_MAP_BITS;
+
+	/* Per-desc field must always fit in u8 */
+	static_assert(SDMA_MAP_BITS <= 8);
+	return bitmap_get_value8(tx->map_type, idx) & SDMA_MAP_MASK;
+}
+
+static inline void make_tx_sdma_desc(struct hfi1_devdata *dd,
+				     struct sdma_txreq *tx,
+				     int type,
+				     dma_addr_t addr,
+				     size_t len)
 {
 	struct sdma_desc *desc = &tx->descp[tx->num_desc];
 
+	sdma_set_map_type(tx, tx->num_desc, type);
 	if (!tx->num_desc) {
 		/* qw[0] zero; qw[1] first, ahg mode already in from init */
-		desc->qw[1] |= ((u64)type & SDMA_DESC1_GENERATION_MASK)
-				<< SDMA_DESC1_GENERATION_SHIFT;
 	} else {
 		desc->qw[0] = 0;
-		desc->qw[1] = ((u64)type & SDMA_DESC1_GENERATION_MASK)
-				<< SDMA_DESC1_GENERATION_SHIFT;
+		desc->qw[1] = 0;
 	}
-	desc->qw[0] |= (((u64)addr & SDMA_DESC0_PHY_ADDR_MASK)
-				<< SDMA_DESC0_PHY_ADDR_SHIFT) |
-			(((u64)len & SDMA_DESC0_BYTE_COUNT_MASK)
-				<< SDMA_DESC0_BYTE_COUNT_SHIFT);
 
-	desc->pinning_ctx = pinning_ctx;
-	desc->ctx_put = ctx_put;
-	if (pinning_ctx && ctx_get)
-		ctx_get(pinning_ctx);
+	sdma_qw_set(dd, phy_addr, desc->qw, addr);
+	sdma_qw_set(dd, byte_count, desc->qw, len);
 }
 
 /* helper to extend txreq */
@@ -641,7 +679,7 @@ static inline void _sdma_close_tx(struct hfi1_devdata *dd,
 {
 	u16 last_desc = tx->num_desc - 1;
 
-	tx->descp[last_desc].qw[0] |= SDMA_DESC0_LAST_DESC_FLAG;
+	sdma_qw_set(dd, last_desc, tx->descp[last_desc].qw);
 	tx->descp[last_desc].qw[1] |= dd->default_desc1;
 	if (tx->flags & SDMA_TXREQ_F_URGENT)
 		tx->descp[last_desc].qw[1] |= (SDMA_DESC1_HEAD_TO_HOST_FLAG |
@@ -653,18 +691,11 @@ static inline int _sdma_txadd_daddr(
 	int type,
 	struct sdma_txreq *tx,
 	dma_addr_t addr,
-	u16 len,
-	void *pinning_ctx,
-	void (*ctx_get)(void *),
-	void (*ctx_put)(void *))
+	u16 len)
 {
 	int rval = 0;
 
-	make_tx_sdma_desc(
-		tx,
-		type,
-		addr, len,
-		pinning_ctx, ctx_get, ctx_put);
+	make_tx_sdma_desc(dd, tx, type, addr, len);
 	WARN_ON(len > tx->tlen);
 	tx->num_desc++;
 	tx->tlen -= len;
@@ -688,14 +719,6 @@ static inline int _sdma_txadd_daddr(
  * @page: page to map
  * @offset: offset within the page
  * @len: length in bytes
- * @pinning_ctx: context to be stored on struct sdma_desc .pinning_ctx. Not
- *               added if coalesce buffer is used. E.g. pointer to pinned-page
- *               cache entry for the sdma_desc.
- * @ctx_get: optional function to take reference to @pinning_ctx. Not called if
- *           @pinning_ctx is NULL.
- * @ctx_put: optional function to release reference to @pinning_ctx after
- *           sdma_desc completes. May be called in interrupt context so must
- *           not sleep. Not called if @pinning_ctx is NULL.
  *
  * This is used to add a page/offset/length descriptor.
  *
@@ -710,10 +733,7 @@ static inline int sdma_txadd_page(
 	struct sdma_txreq *tx,
 	struct page *page,
 	unsigned long offset,
-	u16 len,
-	void *pinning_ctx,
-	void (*ctx_get)(void *),
-	void (*ctx_put)(void *))
+	u16 len)
 {
 	dma_addr_t addr;
 	int rval;
@@ -737,8 +757,7 @@ static inline int sdma_txadd_page(
 		return -ENOSPC;
 	}
 
-	return _sdma_txadd_daddr(dd, SDMA_MAP_PAGE, tx, addr, len,
-				 pinning_ctx, ctx_get, ctx_put);
+	return _sdma_txadd_daddr(dd, SDMA_MAP_PAGE, tx, addr, len);
 }
 
 /**
@@ -772,8 +791,7 @@ static inline int sdma_txadd_daddr(
 			return rval;
 	}
 
-	return _sdma_txadd_daddr(dd, SDMA_MAP_NONE, tx, addr, len,
-				 NULL, NULL, NULL);
+	return _sdma_txadd_daddr(dd, SDMA_MAP_NONE, tx, addr, len);
 }
 
 /**
@@ -819,8 +837,7 @@ static inline int sdma_txadd_kvaddr(
 		return -ENOSPC;
 	}
 
-	return _sdma_txadd_daddr(dd, SDMA_MAP_SINGLE, tx, addr, len,
-				 NULL, NULL, NULL);
+	return _sdma_txadd_daddr(dd, SDMA_MAP_SINGLE, tx, addr, len);
 }
 
 struct iowait_work;
@@ -991,11 +1008,7 @@ struct sdma_vl_map {
 	struct sdma_map_elem *map[];
 };
 
-int sdma_map_init(
-	struct hfi1_devdata *dd,
-	u8 port,
-	u8 num_vls,
-	u8 *vl_engines);
+int sdma_map_init(struct hfi1_pportdata *ppd, u8 num_vls, u8 *vl_engines);
 
 /* slow path */
 void _sdma_engine_progress_schedule(struct sdma_engine *sde);
@@ -1015,22 +1028,16 @@ static inline void sdma_engine_progress_schedule(
 	_sdma_engine_progress_schedule(sde);
 }
 
-struct sdma_engine *sdma_select_engine_sc(
-	struct hfi1_devdata *dd,
-	u32 selector,
-	u8 sc5);
-
-struct sdma_engine *sdma_select_engine_vl(
-	struct hfi1_devdata *dd,
-	u32 selector,
-	u8 vl);
-
-struct sdma_engine *sdma_select_user_engine(struct hfi1_devdata *dd,
+struct sdma_engine *sdma_select_engine_sc(struct hfi1_pportdata *ppd,
+					  u32 selector, u8 sc5);
+struct sdma_engine *sdma_select_engine_vl(struct hfi1_pportdata *ppd,
+					  u32 selector, u8 vl);
+struct sdma_engine *sdma_select_user_engine(struct hfi1_pportdata *ppd,
 					    u32 selector, u8 vl);
 ssize_t sdma_get_cpu_to_sde_map(struct sdma_engine *sde, char *buf);
 ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 				size_t count);
-int sdma_engine_get_vl(struct sdma_engine *sde);
+int sdma_engine_get_vl(struct hfi1_pportdata *ppd, struct sdma_engine *sde);
 void sdma_seqfile_dump_sde(struct seq_file *s, struct sdma_engine *);
 void sdma_seqfile_dump_cpu_list(struct seq_file *s, struct hfi1_devdata *dd,
 				unsigned long cpuid);

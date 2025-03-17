@@ -18,37 +18,46 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause);
  * Set the CM reset bit and wait for it to clear.  Use the provided
  * sendctrl register.  This routine has no locking.
  */
-void __cm_reset(struct hfi1_devdata *dd, u64 sendctrl)
+void __cm_reset(struct hfi1_pportdata *ppd, u64 sendctrl)
 {
-	write_csr(dd, SEND_CTRL, sendctrl | SEND_CTRL_CM_RESET_SMASK);
+	struct hfi1_devdata *dd = ppd->dd;
+	int pidx = ppd->hw_pidx;
+
+	write_eport_csr(dd, pidx, dd->params->send_ctrl_reg, sendctrl | SEND_CTRL_CM_RESET_SMASK);
 	while (1) {
 		udelay(1);
-		sendctrl = read_csr(dd, SEND_CTRL);
+		sendctrl = read_eport_csr(dd, pidx, dd->params->send_ctrl_reg);
 		if ((sendctrl & SEND_CTRL_CM_RESET_SMASK) == 0)
 			break;
 	}
 }
 
 /* global control of PIO send */
-void pio_send_control(struct hfi1_devdata *dd, int op)
+void pio_send_control(struct hfi1_pportdata *ppd, int op)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	u64 reg, mask;
 	unsigned long flags;
 	int write = 1;	/* write sendctrl back */
 	int flush = 0;	/* re-read sendctrl to make sure it is flushed */
 	int i;
 
+	/* only WFR needs to write SendCtrl */
+	if (dd->params->chip_type != CHIP_WFR)
+		return;
+
 	spin_lock_irqsave(&dd->sendctrl_lock, flags);
 
-	reg = read_csr(dd, SEND_CTRL);
+	reg = read_eport_csr(dd, ppd->hw_pidx, dd->params->send_ctrl_reg);
 	switch (op) {
 	case PSC_GLOBAL_ENABLE:
-		reg |= SEND_CTRL_SEND_ENABLE_SMASK;
+		reg |= SEND_CTRL_SEND_ENABLE_SMASK |
+		       dd->params->send_ctrl_flush;
 		fallthrough;
 	case PSC_DATA_VL_ENABLE:
 		mask = 0;
-		for (i = 0; i < ARRAY_SIZE(dd->vld); i++)
-			if (!dd->vld[i].mtu)
+		for (i = 0; i < ARRAY_SIZE(ppd->vld); i++)
+			if (!ppd->vld[i].mtu)
 				mask |= BIT_ULL(i);
 		/* Disallow sending on VLs not enabled */
 		mask = (mask & SEND_CTRL_UNSUPPORTED_VL_MASK) <<
@@ -65,7 +74,7 @@ void pio_send_control(struct hfi1_devdata *dd, int op)
 		reg &= ~SEND_CTRL_VL_ARBITER_ENABLE_SMASK;
 		break;
 	case PSC_CM_RESET:
-		__cm_reset(dd, reg);
+		__cm_reset(ppd, reg);
 		write = 0; /* CSR already written (and flushed) */
 		break;
 	case PSC_DATA_VL_DISABLE:
@@ -78,9 +87,12 @@ void pio_send_control(struct hfi1_devdata *dd, int op)
 	}
 
 	if (write) {
-		write_csr(dd, SEND_CTRL, reg);
-		if (flush)
-			(void)read_csr(dd, SEND_CTRL); /* flush write */
+		write_eport_csr(dd, ppd->hw_pidx, dd->params->send_ctrl_reg, reg);
+		if (flush) {
+			/* flush write */
+			(void)read_eport_csr(dd, ppd->hw_pidx,
+					     dd->params->send_ctrl_reg);
+		}
 	}
 
 	spin_unlock_irqrestore(&dd->sendctrl_lock, flags);
@@ -161,9 +173,9 @@ static int wildcard_to_pool(int wc)
 
 static const char *sc_type_names[SC_MAX] = {
 	"kernel",
+	"vl15",
 	"ack",
 	"user",
-	"vl15"
 };
 
 static const char *sc_type_name(int index)
@@ -181,7 +193,10 @@ static const char *sc_type_name(int index)
 int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 {
 	struct mem_pool_info mem_pool_info[NUM_SC_POOLS] = { { 0 } };
-	int total_blocks = (chip_pio_mem_size(dd) / PIO_BLOCK_SIZE) - 1;
+	/* do not use first N blocks */
+	int total_blocks = (chip_pio_mem_size(dd) / PIO_BLOCK_SIZE) -
+				dd->first_pio_block;
+	u32 usable_sc = chip_send_contexts(dd) - dd->first_send_context;
 	int total_contexts = 0;
 	int fixed_blocks;
 	int pool_blocks;
@@ -285,21 +300,43 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 		 * value is checked later when we compare against total
 		 * memory available.
 		 */
-		if (i == SC_ACK) {
-			count = dd->n_krcv_queues;
-		} else if (i == SC_KERNEL) {
-			count = INIT_SC_PER_VL * num_vls;
+		if (count == SCC_PER_KRCVQ) {
+			count = dd->n_krcv_queues * dd->num_pports;
+		} else if (count == SCC_PER_VL) {
+			count = (INIT_SC_PER_VL * num_vls) * dd->num_pports;
 		} else if (count == SCC_PER_CPU) {
-			count = dd->num_rcv_contexts - dd->n_krcv_queues;
+			int pidx;
+
+			/* "user" is the user + netdev contexts */
+			count = 0;
+			for (pidx = 0; pidx < dd->num_pports; pidx++)
+				count += dd->pport[pidx].num_rcv_contexts - dd->n_krcv_queues;
 		} else if (count < 0) {
-			dd_dev_err(
-				dd,
-				"%s send context invalid count wildcard %d\n",
-				sc_type_name(i), count);
+			dd_dev_err(dd,
+				   "%s send context invalid count wildcard %d\n",
+				   sc_type_name(i), count);
 			return -EINVAL;
+		} else {
+			/* config table is per-port - multiply by number of ports */
+			count *= dd->num_pports;
 		}
-		if (total_contexts + count > chip_send_contexts(dd))
-			count = chip_send_contexts(dd) - total_contexts;
+
+		/* only expect SC_USER to possibly overflow */
+		if (total_contexts + count > usable_sc) {
+			if (i != SC_USER) {
+				dd_dev_err(dd,
+					   "%s send context overflow\n",
+					   sc_type_name(i));
+				return -EINVAL;
+			}
+			dd_dev_warn(dd,
+				   "%s send context count reduced by %d, %d -> %d\n",
+				    sc_type_name(i),
+				    count - (usable_sc - total_contexts),
+				    count,
+				    usable_sc - total_contexts);
+			count = usable_sc - total_contexts;
+		}
 
 		total_contexts += count;
 
@@ -398,6 +435,7 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 
 int init_send_contexts(struct hfi1_devdata *dd)
 {
+	u32 num_sc = chip_send_contexts(dd);
 	u16 base;
 	int ret, i, j, context;
 
@@ -405,8 +443,7 @@ int init_send_contexts(struct hfi1_devdata *dd)
 	if (ret)
 		return ret;
 
-	dd->hw_to_sw = kmalloc_array(TXE_NUM_CONTEXTS, sizeof(u8),
-					GFP_KERNEL);
+	dd->hw_to_sw = kmalloc_array(num_sc, sizeof(u16), GFP_KERNEL);
 	dd->send_contexts = kcalloc(dd->num_send_contexts,
 				    sizeof(struct send_context_info),
 				    GFP_KERNEL);
@@ -418,7 +455,7 @@ int init_send_contexts(struct hfi1_devdata *dd)
 	}
 
 	/* hardware context map starts with invalid send context indices */
-	for (i = 0; i < TXE_NUM_CONTEXTS; i++)
+	for (i = 0; i < num_sc; i++)
 		dd->hw_to_sw[i] = INVALID_SCI;
 
 	/*
@@ -426,7 +463,7 @@ int init_send_contexts(struct hfi1_devdata *dd)
 	 * for each context one after another from the global space.
 	 */
 	context = 0;
-	base = 1;
+	base = dd->first_pio_block; /* do not use first N blocks */
 	for (i = 0; i < SC_MAX; i++) {
 		struct sc_config_sizes *scs = &dd->sc_sizes[i];
 
@@ -454,6 +491,7 @@ static int sc_hw_alloc(struct hfi1_devdata *dd, int type, u32 *sw_index,
 		       u32 *hw_context)
 {
 	struct send_context_info *sci;
+	int num_send = chip_send_contexts(dd);
 	u32 index;
 	u32 context;
 
@@ -461,8 +499,11 @@ static int sc_hw_alloc(struct hfi1_devdata *dd, int type, u32 *sw_index,
 			index < dd->num_send_contexts; index++, sci++) {
 		if (sci->type == type && sci->allocated == 0) {
 			sci->allocated = 1;
-			/* use a 1:1 mapping, but make them non-equal */
-			context = chip_send_contexts(dd) - index - 1;
+			/*
+			 * Use a 1:1 mapping, but use back-to-front.  This
+			 * avoids the reserved range 0..dd->first_send_context.
+			 */
+			context = num_send - index - 1;
 			dd->hw_to_sw[context] = index;
 			*sw_index = index;
 			*hw_context = context;
@@ -600,8 +641,9 @@ void sc_set_cr_threshold(struct send_context *sc, u32 new_threshold)
 			| ((new_threshold
 				& SC(CREDIT_CTRL_THRESHOLD_MASK))
 			   << SC(CREDIT_CTRL_THRESHOLD_SHIFT));
-		write_kctxt_csr(sc->dd, sc->hw_context,
-				SC(CREDIT_CTRL), sc->credit_ctrl);
+		write_sctxt_csr(sc->dd, sc->hw_context,
+				sc->dd->params->send_ctxt_credit_ctrl_reg,
+				sc->credit_ctrl);
 
 		/* force a credit return on change to avoid a possible stall */
 		force_return = 1;
@@ -613,20 +655,64 @@ void sc_set_cr_threshold(struct send_context *sc, u32 new_threshold)
 		sc_return_credits(sc);
 }
 
+#define CLEAR_STATIC_RATE_CONTROL_SMASK(r) \
+((r) &= ~SEND_CTXT_CHECK_ENABLE_DISALLOW_PBC_STATIC_RATE_CONTROL_SMASK)
+
+#define SET_STATIC_RATE_CONTROL_SMASK(r) \
+((r) |= SEND_CTXT_CHECK_ENABLE_DISALLOW_PBC_STATIC_RATE_CONTROL_SMASK)
+
 /*
  * set_pio_integrity
  *
  * Set the CHECK_ENABLE register for the send context 'sc'.
  */
-void set_pio_integrity(struct send_context *sc)
+void wfr_set_pio_integrity(struct send_context *sc, enum spi_cmds cmd)
 {
 	struct hfi1_devdata *dd = sc->dd;
 	u32 hw_context = sc->hw_context;
+	u32 pidx = sc->ppd->hw_pidx;
 	int type = sc->type;
+	u64 val;
+	int set;
 
-	write_kctxt_csr(dd, hw_context,
-			SC(CHECK_ENABLE),
-			hfi1_pkt_default_send_ctxt_mask(dd, type));
+	/* DEFAULT does not do a read-modify-write */
+	if (cmd == SPI_DEFAULT) {
+		val = 0;
+	} else {
+		val = read_epsc_csr(dd, pidx, hw_context,
+				    dd->params->send_ctxt_check_enable_reg);
+	}
+
+	switch (cmd) {
+	case SPI_DEFAULT:
+		val = hfi1_pkt_default_send_ctxt_mask(sc->ppd, type);
+		break;
+	case SPI_INIT:
+		set = type == SC_USER ?
+			HFI1_CAP_IS_USET(STATIC_RATE_CTRL) :
+			HFI1_CAP_IS_KSET(STATIC_RATE_CTRL);
+		if (set)
+			CLEAR_STATIC_RATE_CONTROL_SMASK(val);
+		else
+			SET_STATIC_RATE_CONTROL_SMASK(val);
+		break;
+	case SPI_SET_JKEY:
+		val |= SEND_CTXT_CHECK_ENABLE_CHECK_JOB_KEY_SMASK;
+		break;
+	case SPI_CLEAR_JKEY:
+		val &= ~SEND_CTXT_CHECK_ENABLE_CHECK_JOB_KEY_SMASK;
+		break;
+	case SPI_SET_PKEY:
+		val |= SEND_CTXT_CHECK_ENABLE_CHECK_PARTITION_KEY_SMASK;
+		val &= ~SEND_CTXT_CHECK_ENABLE_DISALLOW_KDETH_PACKETS_SMASK;
+		break;
+	case SPI_CLEAR_PKEY:
+		val &= ~SEND_CTXT_CHECK_ENABLE_CHECK_PARTITION_KEY_SMASK;
+		break;
+	}
+	write_epsc_csr(dd, pidx, hw_context,
+		       dd->params->send_ctxt_check_enable_reg, val);
+
 }
 
 static u32 get_buffers_allocated(struct send_context *sc)
@@ -651,9 +737,10 @@ static void reset_buffers_allocated(struct send_context *sc)
  * Allocate a NUMA relative send context structure of the given type along
  * with a HW context.
  */
-struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
+struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 			      uint hdrqentsize, int numa)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	struct send_context_info *sci;
 	struct send_context *sc = NULL;
 	dma_addr_t dma;
@@ -695,6 +782,7 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 	sci->sc = sc;
 
 	sc->dd = dd;
+	sc->ppd = ppd;
 	sc->node = numa;
 	sc->type = type;
 	spin_lock_init(&sc->alloc_lock);
@@ -723,20 +811,20 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 	/* set base and credits */
 	reg = ((sci->credits & SC(CTRL_CTXT_DEPTH_MASK))
 					<< SC(CTRL_CTXT_DEPTH_SHIFT))
-		| ((sci->base & SC(CTRL_CTXT_BASE_MASK))
+		| ((sci->base & MASK_ULL(dd->params->pio_base_bits))
 					<< SC(CTRL_CTXT_BASE_SHIFT));
-	write_kctxt_csr(dd, hw_context, SC(CTRL), reg);
+	write_tctxt_csr(dd, hw_context, dd->params->send_ctxt_ctrl_reg, reg);
 
-	set_pio_integrity(sc);
+	dd->params->set_pio_integrity(sc, SPI_DEFAULT);
 
 	/* unmask all errors */
-	write_kctxt_csr(dd, hw_context, SC(ERR_MASK), (u64)-1);
+	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_err_mask_reg, (u64)-1);
 
 	/* set the default partition key */
-	write_kctxt_csr(dd, hw_context, SC(CHECK_PARTITION_KEY),
-			(SC(CHECK_PARTITION_KEY_VALUE_MASK) &
-			 DEFAULT_PKEY) <<
-			SC(CHECK_PARTITION_KEY_VALUE_SHIFT));
+	write_epsc_csr(dd, ppd->hw_pidx, hw_context, dd->params->send_ctxt_check_partition_key_reg,
+		       (SC(CHECK_PARTITION_KEY_VALUE_MASK) &
+		       DEFAULT_PKEY) <<
+		       SC(CHECK_PARTITION_KEY_VALUE_SHIFT));
 
 	/* per context type checks */
 	if (type == SC_USER) {
@@ -748,13 +836,13 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 	}
 
 	/* set the send context check opcode mask and value */
-	write_kctxt_csr(dd, hw_context, SC(CHECK_OPCODE),
-			((u64)opmask << SC(CHECK_OPCODE_MASK_SHIFT)) |
-			((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
+	write_epsc_csr(dd, ppd->hw_pidx, hw_context, dd->params->send_ctxt_check_opcode_reg,
+		       ((u64)opmask << SC(CHECK_OPCODE_MASK_SHIFT)) |
+		       ((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
 
 	/* set up credit return */
 	reg = dma & SC(CREDIT_RETURN_ADDR_ADDRESS_SMASK);
-	write_kctxt_csr(dd, hw_context, SC(CREDIT_RETURN_ADDR), reg);
+	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_return_addr_reg, reg);
 
 	/*
 	 * Calculate the initial credit return threshold.
@@ -778,20 +866,29 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 						 hdrqentsize));
 	}
 	reg = thresh << SC(CREDIT_CTRL_THRESHOLD_SHIFT);
-	/* add in early return */
-	if (type == SC_USER && HFI1_CAP_IS_USET(EARLY_CREDIT_RETURN))
-		reg |= SC(CREDIT_CTRL_EARLY_RETURN_SMASK);
-	else if (HFI1_CAP_IS_KSET(EARLY_CREDIT_RETURN)) /* kernel, ack */
-		reg |= SC(CREDIT_CTRL_EARLY_RETURN_SMASK);
+
+	/*
+	 * JKR does not support early credit return logic, so early credit return
+	 * capability will not be enabled.
+	 */
+	if (dd->params->chip_type != CHIP_JKR) {
+		/* add in early return */
+		if (type == SC_USER && HFI1_CAP_IS_USET(EARLY_CREDIT_RETURN))
+			reg |= SC(CREDIT_CTRL_EARLY_RETURN_SMASK);
+		else if (HFI1_CAP_IS_KSET(EARLY_CREDIT_RETURN)) /* kernel, ack */
+			reg |= SC(CREDIT_CTRL_EARLY_RETURN_SMASK);
+	}
 
 	/* set up write-through credit_ctrl */
 	sc->credit_ctrl = reg;
-	write_kctxt_csr(dd, hw_context, SC(CREDIT_CTRL), reg);
+	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_ctrl_reg,
+			reg);
 
 	/* User send contexts should not allow sending on VL15 */
 	if (type == SC_USER) {
 		reg = 1ULL << 15;
-		write_kctxt_csr(dd, hw_context, SC(CHECK_VL), reg);
+		write_epsc_csr(dd, ppd->hw_pidx, hw_context,
+			       dd->params->send_ctxt_check_vl_reg, reg);
 	}
 
 	spin_unlock_irqrestore(&dd->sc_lock, flags);
@@ -839,6 +936,7 @@ void sc_free(struct send_context *sc)
 	unsigned long flags;
 	u32 sw_index;
 	u32 hw_context;
+	int pidx;
 
 	if (!sc)
 		return;
@@ -847,6 +945,7 @@ void sc_free(struct send_context *sc)
 	dd = sc->dd;
 	if (!list_empty(&sc->piowait))
 		dd_dev_err(dd, "piowait list not empty!\n");
+	pidx = sc->ppd->hw_pidx;
 	sw_index = sc->sw_index;
 	hw_context = sc->hw_context;
 	sc_disable(sc);	/* make sure the HW is disabled */
@@ -856,13 +955,15 @@ void sc_free(struct send_context *sc)
 	dd->send_contexts[sw_index].sc = NULL;
 
 	/* clear/disable all registers set in sc_alloc */
-	write_kctxt_csr(dd, hw_context, SC(CTRL), 0);
-	write_kctxt_csr(dd, hw_context, SC(CHECK_ENABLE), 0);
-	write_kctxt_csr(dd, hw_context, SC(ERR_MASK), 0);
-	write_kctxt_csr(dd, hw_context, SC(CHECK_PARTITION_KEY), 0);
-	write_kctxt_csr(dd, hw_context, SC(CHECK_OPCODE), 0);
-	write_kctxt_csr(dd, hw_context, SC(CREDIT_RETURN_ADDR), 0);
-	write_kctxt_csr(dd, hw_context, SC(CREDIT_CTRL), 0);
+	write_tctxt_csr(dd, hw_context, dd->params->send_ctxt_ctrl_reg, 0);
+	write_epsc_csr(dd, pidx, hw_context, dd->params->send_ctxt_check_enable_reg, 0);
+	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_err_mask_reg, 0);
+	write_epsc_csr(dd, pidx, hw_context, dd->params->send_ctxt_check_partition_key_reg, 0);
+	write_epsc_csr(dd, pidx, hw_context, dd->params->send_ctxt_check_opcode_reg, 0);
+	write_sctxt_csr(dd, hw_context,
+			dd->params->send_ctxt_credit_return_addr_reg, 0);
+	write_sctxt_csr(dd, hw_context, dd->params->send_ctxt_credit_ctrl_reg,
+			0);
 
 	/* release the index and context for re-use */
 	sc_hw_free(dd, sw_index, hw_context);
@@ -885,11 +986,13 @@ void sc_disable(struct send_context *sc)
 
 	/* do all steps, even if already disabled */
 	spin_lock_irq(&sc->alloc_lock);
-	reg = read_kctxt_csr(sc->dd, sc->hw_context, SC(CTRL));
+	reg = read_tctxt_csr(sc->dd, sc->hw_context,
+			     sc->dd->params->send_ctxt_ctrl_reg);
 	reg &= ~SC(CTRL_CTXT_ENABLE_SMASK);
 	sc->flags &= ~SCF_ENABLED;
 	sc_wait_for_packet_egress(sc, 1);
-	write_kctxt_csr(sc->dd, sc->hw_context, SC(CTRL), reg);
+	write_tctxt_csr(sc->dd, sc->hw_context,
+			sc->dd->params->send_ctxt_ctrl_reg, reg);
 
 	/*
 	 * Flush any waiters.  Once the context is disabled,
@@ -948,7 +1051,7 @@ static bool egress_halted(u64 reg)
 /* is the send context halted? */
 static bool is_sc_halted(struct hfi1_devdata *dd, u32 hw_context)
 {
-	return !!(read_kctxt_csr(dd, hw_context, SC(STATUS)) &
+	return !!(read_sctxt_csr(dd, hw_context, dd->params->send_ctxt_status_reg) &
 		  SC(STATUS_CTXT_HALTED_SMASK));
 }
 
@@ -969,14 +1072,15 @@ static bool is_sc_halted(struct hfi1_devdata *dd, u32 hw_context)
 static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 {
 	struct hfi1_devdata *dd = sc->dd;
+	struct hfi1_pportdata *ppd = sc->ppd;
 	u64 reg = 0;
 	u64 reg_prev;
 	u32 loop = 0;
 
 	while (1) {
 		reg_prev = reg;
-		reg = read_csr(dd, sc->hw_context * 8 +
-			       SEND_EGRESS_CTXT_STATUS);
+		reg = read_eport_csr(dd, ppd->hw_pidx, sc->hw_context * 8 +
+				     dd->params->send_egress_ctxt_status_reg);
 		/* done if any halt bits, SW or HW are set */
 		if (sc->flags & SCF_HALTED ||
 		    is_sc_halted(dd, sc->hw_context) || egress_halted(reg))
@@ -987,18 +1091,17 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 		/* counter is reset if occupancy count changes */
 		if (reg != reg_prev)
 			loop = 0;
-		if (loop > 50000) {
+		if (loop > 50) {
 			/* timed out - bounce the link */
 			dd_dev_err(dd,
 				   "%s: context %u(%u) timeout waiting for packets to egress, remaining count %u, bouncing link\n",
 				   __func__, sc->sw_index,
 				   sc->hw_context, (u32)reg);
-			queue_work(dd->pport->link_wq,
-				   &dd->pport->link_bounce_work);
+			queue_work(ppd->link_wq, &ppd->link_bounce_work);
 			break;
 		}
 		loop++;
-		udelay(1);
+		mdelay(1);
 	}
 
 	if (pause)
@@ -1050,7 +1153,7 @@ int sc_restart(struct send_context *sc)
 	 */
 	loop = 0;
 	while (1) {
-		reg = read_kctxt_csr(dd, sc->hw_context, SC(STATUS));
+		reg = read_sctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_status_reg);
 		if (reg & SC(STATUS_CTXT_HALTED_SMASK))
 			break;
 		if (loop > 100) {
@@ -1160,7 +1263,7 @@ void pio_kernel_unfreeze(struct hfi1_devdata *dd)
 
 /**
  * pio_kernel_linkup() - Re-enable send contexts after linkup event
- * @dd: valid devive data
+ * @ppd: port data
  *
  * When the link goes down, the freeze path is taken.  However, a link down
  * event is different from a freeze because if the send context is re-enabled
@@ -1170,14 +1273,18 @@ void pio_kernel_unfreeze(struct hfi1_devdata *dd)
  * The freeze path now looks at the type of event that occurs and takes this
  * path for link down event.
  */
-void pio_kernel_linkup(struct hfi1_devdata *dd)
+void pio_kernel_linkup(struct hfi1_pportdata *ppd)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	struct send_context *sc;
 	int i;
 
 	for (i = 0; i < dd->num_send_contexts; i++) {
 		sc = dd->send_contexts[i].sc;
 		if (!sc || !(sc->flags & SCF_LINK_DOWN) || sc->type == SC_USER)
+			continue;
+		/* this port only */
+		if (sc->ppd != ppd)
 			continue;
 
 		sc_enable(sc);	/* will clear the sc link down flag */
@@ -1196,9 +1303,9 @@ static int pio_init_wait_progress(struct hfi1_devdata *dd)
 	int max, count = 0;
 
 	/* max is the longest possible HW init time / delay */
-	max = (dd->icode == ICODE_FPGA_EMULATION) ? 120 : 5;
+	max = 5;
 	while (1) {
-		reg = read_csr(dd, SEND_PIO_INIT_CTXT);
+		reg = read_csr(dd, dd->params->send_pio_init_ctxt_reg);
 		if (!(reg & SEND_PIO_INIT_CTXT_PIO_INIT_IN_PROGRESS_SMASK))
 			break;
 		if (count >= max)
@@ -1223,12 +1330,12 @@ void pio_reset_all(struct hfi1_devdata *dd)
 	/* ignore any timeout */
 	if (ret == -EIO) {
 		/* clear the error */
-		write_csr(dd, SEND_PIO_ERR_CLEAR,
+		write_csr(dd, dd->params->send_pio_err_clear_reg,
 			  SEND_PIO_ERR_CLEAR_PIO_INIT_SM_IN_ERR_SMASK);
 	}
 
 	/* reset init all */
-	write_csr(dd, SEND_PIO_INIT_CTXT,
+	write_csr(dd, dd->params->send_pio_init_ctxt_reg,
 		  SEND_PIO_INIT_CTXT_PIO_ALL_CTXT_INIT_SMASK);
 	udelay(2);
 	ret = pio_init_wait_progress(dd);
@@ -1259,7 +1366,8 @@ int sc_enable(struct send_context *sc)
 	 * if the context accounting values have not changed.
 	 */
 	spin_lock_irqsave(&sc->alloc_lock, flags);
-	sc_ctrl = read_kctxt_csr(dd, sc->hw_context, SC(CTRL));
+	sc_ctrl = read_tctxt_csr(dd, sc->hw_context,
+				 dd->params->send_ctxt_ctrl_reg);
 	if ((sc_ctrl & SC(CTRL_CTXT_ENABLE_SMASK)))
 		goto unlock; /* already enabled */
 
@@ -1282,9 +1390,9 @@ int sc_enable(struct send_context *sc)
 	 * is disabled, the halt will not clear until after the PIO init
 	 * engine runs below.
 	 */
-	reg = read_kctxt_csr(dd, sc->hw_context, SC(ERR_STATUS));
+	reg = read_sctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_err_status_reg);
 	if (reg)
-		write_kctxt_csr(dd, sc->hw_context, SC(ERR_CLEAR), reg);
+		write_sctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_err_clear_reg, reg);
 
 	/*
 	 * The HW PIO initialization engine can handle only one init
@@ -1301,7 +1409,7 @@ int sc_enable(struct send_context *sc)
 	pio = ((sc->hw_context & SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_MASK) <<
 	       SEND_PIO_INIT_CTXT_PIO_CTXT_NUM_SHIFT) |
 		SEND_PIO_INIT_CTXT_PIO_SINGLE_CTXT_INIT_SMASK;
-	write_csr(dd, SEND_PIO_INIT_CTXT, pio);
+	write_csr(dd, dd->params->send_pio_init_ctxt_reg, pio);
 	/*
 	 * Wait until the engine is done.  Give the chip the required time
 	 * so, hopefully, we read the register just once.
@@ -1320,12 +1428,13 @@ int sc_enable(struct send_context *sc)
 	 * All is well. Enable the context.
 	 */
 	sc_ctrl |= SC(CTRL_CTXT_ENABLE_SMASK);
-	write_kctxt_csr(dd, sc->hw_context, SC(CTRL), sc_ctrl);
+	write_tctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_ctrl_reg,
+			sc_ctrl);
 	/*
 	 * Read SendCtxtCtrl to force the write out and prevent a timing
 	 * hazard where a PIO write may reach the context before the enable.
 	 */
-	read_kctxt_csr(dd, sc->hw_context, SC(CTRL));
+	read_tctxt_csr(dd, sc->hw_context, dd->params->send_ctxt_ctrl_reg);
 	sc->flags |= SCF_ENABLED;
 
 unlock:
@@ -1341,15 +1450,18 @@ void sc_return_credits(struct send_context *sc)
 		return;
 
 	/* a 0->1 transition schedules a credit return */
-	write_kctxt_csr(sc->dd, sc->hw_context, SC(CREDIT_FORCE),
+	write_sctxt_csr(sc->dd, sc->hw_context,
+			sc->dd->params->send_ctxt_credit_force_reg,
 			SC(CREDIT_FORCE_FORCE_RETURN_SMASK));
 	/*
 	 * Ensure that the write is flushed and the credit return is
 	 * scheduled. We care more about the 0 -> 1 transition.
 	 */
-	read_kctxt_csr(sc->dd, sc->hw_context, SC(CREDIT_FORCE));
+	read_sctxt_csr(sc->dd, sc->hw_context,
+		       sc->dd->params->send_ctxt_credit_force_reg);
 	/* set back to 0 for next time */
-	write_kctxt_csr(sc->dd, sc->hw_context, SC(CREDIT_FORCE), 0);
+	write_sctxt_csr(sc->dd, sc->hw_context,
+			sc->dd->params->send_ctxt_credit_force_reg, 0);
 }
 
 /* allow all in-flight packets to drain on the context */
@@ -1515,8 +1627,9 @@ void sc_add_credit_return_intr(struct send_context *sc)
 	spin_lock_irqsave(&sc->credit_ctrl_lock, flags);
 	if (sc->credit_intr_count == 0) {
 		sc->credit_ctrl |= SC(CREDIT_CTRL_CREDIT_INTR_SMASK);
-		write_kctxt_csr(sc->dd, sc->hw_context,
-				SC(CREDIT_CTRL), sc->credit_ctrl);
+		write_sctxt_csr(sc->dd, sc->hw_context,
+				sc->dd->params->send_ctxt_credit_ctrl_reg,
+				sc->credit_ctrl);
 	}
 	sc->credit_intr_count++;
 	spin_unlock_irqrestore(&sc->credit_ctrl_lock, flags);
@@ -1537,8 +1650,9 @@ void sc_del_credit_return_intr(struct send_context *sc)
 	sc->credit_intr_count--;
 	if (sc->credit_intr_count == 0) {
 		sc->credit_ctrl &= ~SC(CREDIT_CTRL_CREDIT_INTR_SMASK);
-		write_kctxt_csr(sc->dd, sc->hw_context,
-				SC(CREDIT_CTRL), sc->credit_ctrl);
+		write_sctxt_csr(sc->dd, sc->hw_context,
+				sc->dd->params->send_ctxt_credit_ctrl_reg,
+				sc->credit_ctrl);
 	}
 	spin_unlock_irqrestore(&sc->credit_ctrl_lock, flags);
 }
@@ -1757,7 +1871,7 @@ done:
  * This function returns a send context based on the selector and a vl.
  * The mapping fields are protected by RCU
  */
-struct send_context *pio_select_send_context_vl(struct hfi1_devdata *dd,
+struct send_context *pio_select_send_context_vl(struct hfi1_pportdata *ppd,
 						u32 selector, u8 vl)
 {
 	struct pio_vl_map *m;
@@ -1775,17 +1889,17 @@ struct send_context *pio_select_send_context_vl(struct hfi1_devdata *dd,
 	}
 
 	rcu_read_lock();
-	m = rcu_dereference(dd->pio_map);
+	m = rcu_dereference(ppd->pio_map);
 	if (unlikely(!m)) {
 		rcu_read_unlock();
-		return dd->vld[0].sc;
+		return ppd->vld[0].sc;
 	}
 	e = m->map[vl & m->mask];
 	rval = e->ksc[selector & e->mask];
 	rcu_read_unlock();
 
 done:
-	rval = !rval ? dd->vld[0].sc : rval;
+	rval = !rval ? ppd->vld[0].sc : rval;
 	return rval;
 }
 
@@ -1797,12 +1911,12 @@ done:
  *
  * This function returns an send context based on the selector and an sc
  */
-struct send_context *pio_select_send_context_sc(struct hfi1_devdata *dd,
+struct send_context *pio_select_send_context_sc(struct hfi1_pportdata *ppd,
 						u32 selector, u8 sc5)
 {
-	u8 vl = sc_to_vlt(dd, sc5);
+	u8 vl = sc_to_vlt(ppd, sc5);
 
-	return pio_select_send_context_vl(dd, selector, vl);
+	return pio_select_send_context_vl(ppd, selector, vl);
 }
 
 /*
@@ -1827,71 +1941,110 @@ static void pio_map_rcu_callback(struct rcu_head *list)
 	pio_map_free(m);
 }
 
+void print_pio_map(struct hfi1_pportdata *ppd, struct pio_vl_map *map)
+{
+#define PM_SIZE 256 /* print map size */
+	char buf[PM_SIZE];
+	struct pio_map_elem *e;
+	struct send_context *sc;
+	int i, j;
+	int off;
+	u32 sz;
+
+	printk("%s: pidx %d: actual_vls %d, vls %d, mask 0x%x\n", __func__,
+		ppd->hw_pidx, map->actual_vls, map->vls, map->mask);
+	for (i = 0; i < map->vls; i++) {
+		if (i >= map->actual_vls) {
+			printk("%s: <dup of index %d>\n", __func__,
+				i % map->actual_vls);
+			continue;
+		}
+		e = map->map[i];
+		sz = e->mask + 1;
+		off = 0;
+		for (j = 0; j < sz; j++) {
+			sc = e->ksc[j];
+			if (sc) {
+				off += scnprintf(&buf[off], PM_SIZE - off,
+						 " %2d",
+						 sc->sw_index);
+			} else {
+				off += scnprintf(&buf[off], PM_SIZE - off,
+						 " xx");
+			}
+		}
+
+		printk("%s: [%d] mask 0x%02x [%s ]\n", __func__,
+			i, e->mask, buf);
+	}
+}
+
 /*
  * Set credit return threshold for the kernel send context
  */
-static void set_threshold(struct hfi1_devdata *dd, int scontext, int i)
+static void set_threshold(struct hfi1_pportdata *ppd, int scontext, int i)
 {
+	struct send_context *sc = ppd->kernel_send_context[scontext];
 	u32 thres;
 
-	thres = min(sc_percent_to_threshold(dd->kernel_send_context[scontext],
-					    50),
-		    sc_mtu_to_threshold(dd->kernel_send_context[scontext],
-					dd->vld[i].mtu,
-					dd->rcd[0]->rcvhdrqentsize));
-	sc_set_cr_threshold(dd->kernel_send_context[scontext], thres);
+	thres = min(sc_percent_to_threshold(sc, 50),
+		    sc_mtu_to_threshold(sc, sc->ppd->vld[i].mtu,
+					kctxt_hdrqentsize(sc->ppd)));
+	sc_set_cr_threshold(sc, thres);
 }
 
 /*
  * pio_map_init - called when #vls change
  * @dd: hfi1_devdata
- * @port: port number
  * @num_vls: number of vls
- * @vl_scontexts: per vl send context mapping (optional)
  *
- * This routine changes the mapping based on the number of vls.
+ * This routine changes the vl to send context mapping based on the number of
+ * vls and available send contexts.
  *
- * vl_scontexts is used to specify a non-uniform vl/send context
- * loading. NULL implies auto computing the loading and giving each
- * VL an uniform distribution of send contexts per VL.
+ * The auto algorithm computes the sc_per_vl and the number of extra send
+ * contexts. Any extra send contexts are added from the highest VL on down
  *
- * The auto algorithm computers the sc_per_vl and the number of extra
- * send contexts. Any extra send contexts are added from the last VL
- * on down
+ * rcu locking is used to control access to the mapping fields.
  *
- * rcu locking is used here to control access to the mapping fields.
+ * If either the num_vls or vl_scontexts[vl] are non-power of 2, the array
+ * sizes in the struct pio_vl_map and the struct pio_map_elem are rounded up
+ * to the next highest power of 2 and the first entry is reused in a round
+ * robin fashion.
  *
- * If either the num_vls or num_send_contexts are non-power of 2, the
- * array sizes in the struct pio_vl_map and the struct pio_map_elem are
- * rounded up to the next highest power of 2 and the first entry is
- * reused in a round robin fashion.
- *
- * If an error occurs the map change is not done and the mapping is not
- * chaged.
- *
+ * If an error occurs the mapping is not changed.
  */
-int pio_map_init(struct hfi1_devdata *dd, u8 port, u8 num_vls, u8 *vl_scontexts)
+int pio_map_init(struct hfi1_pportdata *ppd, u8 num_vls)
 {
+	struct hfi1_devdata *dd = ppd->dd;
 	int i, j;
 	int extra, sc_per_vl;
-	int scontext = 1;
+	int scontext = 1; /* first non-vl15 kernel_send_context */
 	int num_kernel_send_contexts = 0;
-	u8 lvl_scontexts[OPA_MAX_VLS];
+	int vl_scontexts[OPA_MAX_VLS];
 	struct pio_vl_map *oldmap, *newmap;
 
-	if (!vl_scontexts) {
-		for (i = 0; i < dd->num_send_contexts; i++)
-			if (dd->send_contexts[i].type == SC_KERNEL)
-				num_kernel_send_contexts++;
-		/* truncate divide */
-		sc_per_vl = num_kernel_send_contexts / num_vls;
-		/* extras */
-		extra = num_kernel_send_contexts % num_vls;
-		vl_scontexts = lvl_scontexts;
-		/* add extras from last vl down */
-		for (i = num_vls - 1; i >= 0; i--, extra--)
-			vl_scontexts[i] = sc_per_vl + (extra > 0 ? 1 : 0);
+	/* assign a count of send contexts to each VL */
+	/* count kernel send contexts for this port */
+	for (i = 0; i < dd->num_send_contexts; i++) {
+		if (dd->send_contexts[i].type != SC_KERNEL)
+			continue;
+		if (!dd->send_contexts[i].sc)
+			continue;
+		if (dd->send_contexts[i].sc->ppd != ppd)
+			continue;
+		num_kernel_send_contexts++;
 	}
+	/* truncate divide */
+	sc_per_vl = num_kernel_send_contexts / num_vls;
+	/* extras */
+	extra = num_kernel_send_contexts % num_vls;
+	printk("%s: pidx %d: num_kernel_send_contexts %d, num_vls %d, sc_per_vl %d, extra %d\n",
+		__func__, ppd->hw_pidx, num_kernel_send_contexts,
+		num_vls, sc_per_vl, extra);
+	/* add extras from last vl down */
+	for (i = num_vls - 1; i >= 0; i--, extra--)
+		vl_scontexts[i] = sc_per_vl + (extra > 0 ? 1 : 0);
+
 	/* build new map */
 	newmap = kzalloc(struct_size(newmap, map, roundup_pow_of_two(num_vls)),
 			 GFP_KERNEL);
@@ -1919,10 +2072,11 @@ int pio_map_init(struct hfi1_devdata *dd, u8 port, u8 num_vls, u8 *vl_scontexts)
 			 * adjust credit return threshold
 			 */
 			for (j = 0; j < sz; j++) {
-				if (dd->kernel_send_context[scontext]) {
+				if (ppd->kernel_send_context[scontext]) {
+					printk("%s: map[%d]->ksc[%d] = scontext %d\n", __func__, i, j, scontext);
 					newmap->map[i]->ksc[j] =
-					dd->kernel_send_context[scontext];
-					set_threshold(dd, scontext, i);
+					    ppd->kernel_send_context[scontext];
+					set_threshold(ppd, scontext, i);
 				}
 				if (++scontext >= first_scontext +
 						  vl_scontexts[i])
@@ -1935,13 +2089,14 @@ int pio_map_init(struct hfi1_devdata *dd, u8 port, u8 num_vls, u8 *vl_scontexts)
 		}
 		scontext = first_scontext + vl_scontexts[i];
 	}
+	print_pio_map(ppd, newmap);
 	/* newmap in hand, save old map */
 	spin_lock_irq(&dd->pio_map_lock);
-	oldmap = rcu_dereference_protected(dd->pio_map,
+	oldmap = rcu_dereference_protected(ppd->pio_map,
 					   lockdep_is_held(&dd->pio_map_lock));
 
 	/* publish newmap */
-	rcu_assign_pointer(dd->pio_map, newmap);
+	rcu_assign_pointer(ppd->pio_map, newmap);
 
 	spin_unlock_irq(&dd->pio_map_lock);
 	/* success, free any old map after grace period */
@@ -1956,111 +2111,114 @@ bail:
 
 void free_pio_map(struct hfi1_devdata *dd)
 {
-	/* Free PIO map if allocated */
-	if (rcu_access_pointer(dd->pio_map)) {
-		spin_lock_irq(&dd->pio_map_lock);
-		pio_map_free(rcu_access_pointer(dd->pio_map));
-		RCU_INIT_POINTER(dd->pio_map, NULL);
-		spin_unlock_irq(&dd->pio_map_lock);
-		synchronize_rcu();
+	struct hfi1_pportdata *ppd;
+	int i;
+
+	for (i = 0; i < dd->num_pports; i++) {
+		ppd = dd->pport + i;
+		/* Free PIO map if allocated */
+		if (rcu_access_pointer(ppd->pio_map)) {
+			spin_lock_irq(&dd->pio_map_lock);
+			pio_map_free(rcu_access_pointer(ppd->pio_map));
+			RCU_INIT_POINTER(ppd->pio_map, NULL);
+			spin_unlock_irq(&dd->pio_map_lock);
+			synchronize_rcu();
+		}
+		kfree(ppd->kernel_send_context);
+		ppd->kernel_send_context = NULL;
 	}
-	kfree(dd->kernel_send_context);
-	dd->kernel_send_context = NULL;
 }
 
-int init_pervl_scs(struct hfi1_devdata *dd)
+int init_pervl_scs(struct hfi1_pportdata *ppd)
 {
+	struct hfi1_devdata *dd = ppd->dd;
+	struct send_context *sc;
 	int i;
 	u64 mask, all_vl_mask = (u64)0x80ff; /* VLs 0-7, 15 */
 	u64 data_vls_mask = (u64)0x00ff; /* VLs 0-7 */
 	u32 ctxt;
-	struct hfi1_pportdata *ppd = dd->pport;
+	u8 rcvhdrqentsize = kctxt_hdrqentsize(ppd);
 
-	dd->vld[15].sc = sc_alloc(dd, SC_VL15,
-				  dd->rcd[0]->rcvhdrqentsize, dd->node);
-	if (!dd->vld[15].sc)
+	ppd->vld[15].sc = sc_alloc(ppd, SC_VL15, rcvhdrqentsize, dd->node);
+	if (!ppd->vld[15].sc)
 		return -ENOMEM;
 
-	hfi1_init_ctxt(dd->vld[15].sc);
-	dd->vld[15].mtu = enum_to_mtu(OPA_MTU_2048);
+	hfi1_init_ctxt(ppd->vld[15].sc);
+	ppd->vld[15].mtu = enum_to_mtu(OPA_MTU_2048);
 
-	dd->kernel_send_context = kcalloc_node(dd->num_send_contexts,
-					       sizeof(struct send_context *),
-					       GFP_KERNEL, dd->node);
-	if (!dd->kernel_send_context)
+	ppd->kernel_send_context = kcalloc_node(dd->num_send_contexts,
+					        sizeof(struct send_context *),
+					        GFP_KERNEL, dd->node);
+	if (!ppd->kernel_send_context)
 		goto freesc15;
 
-	dd->kernel_send_context[0] = dd->vld[15].sc;
+	ppd->kernel_send_context[0] = ppd->vld[15].sc;
+	printk("%s: vld[15].sc: sw_index %d\n", __func__, ppd->vld[15].sc->sw_index);
 
 	for (i = 0; i < num_vls; i++) {
-		/*
-		 * Since this function does not deal with a specific
-		 * receive context but we need the RcvHdrQ entry size,
-		 * use the size from rcd[0]. It is guaranteed to be
-		 * valid at this point and will remain the same for all
-		 * receive contexts.
-		 */
-		dd->vld[i].sc = sc_alloc(dd, SC_KERNEL,
-					 dd->rcd[0]->rcvhdrqentsize, dd->node);
-		if (!dd->vld[i].sc)
+		sc = sc_alloc(ppd, SC_KERNEL, rcvhdrqentsize, dd->node);
+		if (!sc)
 			goto nomem;
-		dd->kernel_send_context[i + 1] = dd->vld[i].sc;
-		hfi1_init_ctxt(dd->vld[i].sc);
+		hfi1_init_ctxt(sc);
+		ppd->kernel_send_context[i + 1] = sc;
+		ppd->vld[i].sc = sc;
 		/* non VL15 start with the max MTU */
-		dd->vld[i].mtu = hfi1_max_mtu;
+		ppd->vld[i].mtu = hfi1_max_mtu;
 	}
 	for (i = num_vls; i < INIT_SC_PER_VL * num_vls; i++) {
-		dd->kernel_send_context[i + 1] =
-		sc_alloc(dd, SC_KERNEL, dd->rcd[0]->rcvhdrqentsize, dd->node);
-		if (!dd->kernel_send_context[i + 1])
+		sc = sc_alloc(ppd, SC_KERNEL, rcvhdrqentsize, dd->node);
+		if (!sc)
 			goto nomem;
-		hfi1_init_ctxt(dd->kernel_send_context[i + 1]);
+		hfi1_init_ctxt(sc);
+		ppd->kernel_send_context[i + 1] = sc;
 	}
 
-	sc_enable(dd->vld[15].sc);
-	ctxt = dd->vld[15].sc->hw_context;
+	sc_enable(ppd->vld[15].sc);
+	ctxt = ppd->vld[15].sc->hw_context;
 	mask = all_vl_mask & ~(1LL << 15);
-	write_kctxt_csr(dd, ctxt, SC(CHECK_VL), mask);
+	write_epsc_csr(dd, ppd->hw_pidx, ctxt, dd->params->send_ctxt_check_vl_reg, mask);
 	dd_dev_info(dd,
-		    "Using send context %u(%u) for VL15\n",
-		    dd->vld[15].sc->sw_index, ctxt);
+		    "pidx %d: Using send context %u(%u) for VL15\n",
+		    ppd->hw_pidx, ppd->vld[15].sc->sw_index, ctxt);
 
 	for (i = 0; i < num_vls; i++) {
-		sc_enable(dd->vld[i].sc);
-		ctxt = dd->vld[i].sc->hw_context;
+		sc_enable(ppd->vld[i].sc);
+		ctxt = ppd->vld[i].sc->hw_context;
 		mask = all_vl_mask & ~(data_vls_mask);
-		write_kctxt_csr(dd, ctxt, SC(CHECK_VL), mask);
+		write_epsc_csr(dd, ppd->hw_pidx, ctxt, dd->params->send_ctxt_check_vl_reg, mask);
 	}
 	for (i = num_vls; i < INIT_SC_PER_VL * num_vls; i++) {
-		sc_enable(dd->kernel_send_context[i + 1]);
-		ctxt = dd->kernel_send_context[i + 1]->hw_context;
+		sc_enable(ppd->kernel_send_context[i + 1]);
+		ctxt = ppd->kernel_send_context[i + 1]->hw_context;
 		mask = all_vl_mask & ~(data_vls_mask);
-		write_kctxt_csr(dd, ctxt, SC(CHECK_VL), mask);
+		write_epsc_csr(dd, ppd->hw_pidx, ctxt, dd->params->send_ctxt_check_vl_reg, mask);
 	}
 
-	if (pio_map_init(dd, ppd->port - 1, num_vls, NULL))
+	if (pio_map_init(ppd, num_vls))
 		goto nomem;
 	return 0;
 
 nomem:
 	for (i = 0; i < num_vls; i++) {
-		sc_free(dd->vld[i].sc);
-		dd->vld[i].sc = NULL;
+		sc_free(ppd->vld[i].sc);
+		ppd->vld[i].sc = NULL;
 	}
 
 	for (i = num_vls; i < INIT_SC_PER_VL * num_vls; i++)
-		sc_free(dd->kernel_send_context[i + 1]);
+		sc_free(ppd->kernel_send_context[i + 1]);
 
-	kfree(dd->kernel_send_context);
-	dd->kernel_send_context = NULL;
+	kfree(ppd->kernel_send_context);
+	ppd->kernel_send_context = NULL;
 
 freesc15:
-	sc_free(dd->vld[15].sc);
+	sc_free(ppd->vld[15].sc);
+	ppd->vld[15].sc = NULL;
 	return -ENOMEM;
 }
 
 int init_credit_return(struct hfi1_devdata *dd)
 {
+	size_t bytes = chip_send_contexts(dd) * sizeof(struct credit_return);
 	int ret;
 	int i;
 
@@ -2073,8 +2231,6 @@ int init_credit_return(struct hfi1_devdata *dd)
 		goto done;
 	}
 	for_each_node_with_cpus(i) {
-		int bytes = TXE_NUM_CONTEXTS * sizeof(struct credit_return);
-
 		set_dev_node(&dd->pcidev->dev, i);
 		dd->cr_base[i].va = dma_alloc_coherent(&dd->pcidev->dev,
 						       bytes,
@@ -2102,6 +2258,7 @@ free_cr_base:
 
 void free_credit_return(struct hfi1_devdata *dd)
 {
+	size_t bytes = chip_send_contexts(dd) * sizeof(struct credit_return);
 	int i;
 
 	if (!dd->cr_base)
@@ -2109,8 +2266,7 @@ void free_credit_return(struct hfi1_devdata *dd)
 	for (i = 0; i < node_affinity.num_possible_nodes; i++) {
 		if (dd->cr_base[i].va) {
 			dma_free_coherent(&dd->pcidev->dev,
-					  TXE_NUM_CONTEXTS *
-					  sizeof(struct credit_return),
+					  bytes,
 					  dd->cr_base[i].va,
 					  dd->cr_base[i].dma);
 		}
@@ -2135,7 +2291,8 @@ void seqfile_dump_sci(struct seq_file *s, u32 i,
 		   sc->fill, sc->free, sc->fill_wrap, sc->alloc_free);
 	seq_printf(s, "  credit_intr_count %u credit_ctrl 0x%llx\n",
 		   sc->credit_intr_count, sc->credit_ctrl);
-	reg = read_kctxt_csr(sc->dd, sc->hw_context, SC(CREDIT_STATUS));
+	reg = read_sctxt_csr(sc->dd, sc->hw_context,
+			     sc->dd->params->send_ctxt_credit_status_reg);
 	seq_printf(s, "  *hw_free %llu CurrentFree %llu LastReturned %llu\n",
 		   (le64_to_cpu(*sc->hw_free) & CR_COUNTER_SMASK) >>
 		    CR_COUNTER_SHIFT,

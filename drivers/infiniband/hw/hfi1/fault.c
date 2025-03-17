@@ -48,14 +48,21 @@ static int _fault_stats_seq_show(struct seq_file *s, void *v)
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
 	struct hfi1_ctxtdata *rcd;
+	int pidx;
 
-	for (j = 0; j < dd->first_dyn_alloc_ctxt; j++) {
-		rcd = hfi1_rcd_get_by_index(dd, j);
-		if (rcd) {
-			n_packets += rcd->opstats->stats[i].n_packets;
-			n_bytes += rcd->opstats->stats[i].n_bytes;
+	for (pidx = 0; pidx < dd->num_pports; pidx++) {
+		struct hfi1_pportdata *ppd = dd->pport + pidx;
+
+		for (j = ppd->rcv_context_base;
+		     j < ppd->first_dyn_alloc_ctxt;
+		     j++) {
+			rcd = hfi1_rcd_get_by_index(dd, j);
+			if (rcd) {
+				n_packets += rcd->opstats->stats[i].n_packets;
+				n_bytes += rcd->opstats->stats[i].n_bytes;
+			}
+			hfi1_rcd_put(rcd);
 		}
-		hfi1_rcd_put(rcd);
 	}
 	for_each_possible_cpu(j) {
 		struct hfi1_opcode_stats_perctx *sp =

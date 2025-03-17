@@ -8,6 +8,7 @@
 #include <linux/bitmap.h>
 
 #include "hfi.h"
+#include "file_ops.h"
 #include "common.h"
 #include "sdma.h"
 
@@ -36,12 +37,10 @@ static void set_mgmt_allowed(struct hfi1_pportdata *ppd)
  */
 static void add_full_mgmt_pkey(struct hfi1_pportdata *ppd)
 {
-	struct hfi1_devdata *dd = ppd->dd;
-
 	/* Sanity check - ppd->pkeys[2] should be 0, or already initialized */
 	if (!((ppd->pkeys[2] == 0) || (ppd->pkeys[2] == FULL_MGMT_P_KEY)))
-		dd_dev_warn(dd, "%s pkey[2] already set to 0x%x, resetting it to 0x%x\n",
-			    __func__, ppd->pkeys[2], FULL_MGMT_P_KEY);
+		ppd_dev_warn(ppd, "%s pkey[2] already set to 0x%x, resetting it to 0x%x\n",
+			     __func__, ppd->pkeys[2], FULL_MGMT_P_KEY);
 	ppd->pkeys[2] = FULL_MGMT_P_KEY;
 	(void)hfi1_set_ib_cfg(ppd, HFI1_IB_CFG_PKEYS, 0);
 	hfi1_event_pkey_change(ppd->dd, ppd->port);
@@ -107,18 +106,21 @@ static void signal_ib_event(struct hfi1_pportdata *ppd, enum ib_event_type ev)
  * This is called outside an interrupt.
  *
  */
-void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup)
+void handle_linkup_change(struct hfi1_pportdata *ppd, u32 linkup)
 {
-	struct hfi1_pportdata *ppd = &dd->pport[0];
+	struct hfi1_devdata *dd = ppd->dd;
 	enum ib_event_type ev;
 
+	if (dd->cport) {
+		ppd_dev_err(ppd, "%s should not be called for JKR\n", __func__);
+		return;
+	}
 	if (!(ppd->linkup ^ !!linkup))
 		return;	/* no change, nothing to do */
 
 	if (linkup) {
 		/*
-		 * Quick linkup and all link up on the simulator does not
-		 * trigger or implement:
+		 * Quick linkup does not trigger or implement:
 		 *	- VerifyCap interrupt
 		 *	- VerifyCap frames
 		 * But rather moves directly to LinkUp.
@@ -130,10 +132,10 @@ void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup)
 		 * NOTE: This uses this device's vAU, vCU, and vl15_init for
 		 * the remote values.  Both sides must be using the values.
 		 */
-		if (quick_linkup || dd->icode == ICODE_FUNCTIONAL_SIMULATOR) {
-			set_up_vau(dd, dd->vau);
-			set_up_vl15(dd, dd->vl15_init);
-			assign_remote_cm_au_table(dd, dd->vcu);
+		if (quick_linkup) {
+			set_up_vau(ppd, dd->vau);
+			set_up_vl15(ppd, dd->vl15_init);
+			assign_remote_cm_au_table(ppd, dd->vcu);
 		}
 
 		ppd->neighbor_guid =
@@ -147,10 +149,10 @@ void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup)
 		ppd->neighbor_fm_security =
 			read_csr(dd, DC_DC8051_STS_REMOTE_FM_SECURITY) &
 				 DC_DC8051_STS_LOCAL_FM_SECURITY_DISABLED_MASK;
-		dd_dev_info(dd,
-			    "Neighbor Guid %llx, Type %d, Port Num %d\n",
-			    ppd->neighbor_guid, ppd->neighbor_type,
-			    ppd->neighbor_port_number);
+		ppd_dev_info(ppd,
+			     "Neighbor Guid %llx, Type %d, Port Num %d\n",
+			     ppd->neighbor_guid, ppd->neighbor_type,
+			     ppd->neighbor_port_number);
 
 		/* HW needs LINK_UP_DELAY to settle, give it that chance */
 		udelay(LINK_UP_DELAY);
@@ -178,10 +180,10 @@ void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup)
 
 		/* clear HW details of the previous connection */
 		ppd->actual_vls_operational = 0;
-		reset_link_credits(dd);
+		reset_link_credits(ppd);
 
 		/* freeze after a link down to guarantee a clean egress */
-		start_freeze_handling(ppd, FREEZE_SELF | FREEZE_LINK_DOWN);
+		start_freeze_handling(dd, FREEZE_SELF | FREEZE_LINK_DOWN);
 
 		ev = IB_EVENT_PORT_ERR;
 
@@ -193,6 +195,110 @@ void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup)
 		/* notify IB of the link change */
 		signal_ib_event(ppd, ev);
 	}
+}
+
+/* Special version of handle_linkup_change() for systems with a CPORT */
+void cport_handle_linkup_change(struct hfi1_pportdata *ppd,
+				struct opa_port_info *pi, u32 linkup)
+{
+	struct hfi1_devdata *dd = ppd->dd;
+	enum ib_event_type ev;
+
+	if (!(ppd->linkup ^ !!linkup))
+		return;	/* no change, nothing to do */
+
+	if (linkup) {
+		ppd->neighbor_guid = be64_to_cpu(pi->neigh_node_guid);
+		ppd->neighbor_port_number = pi->neigh_port_num;
+		ppd->neighbor_type = pi->port_neigh_mode & OPA_PI_MASK_NEIGH_NODE_TYPE;
+		ppd->mgmt_allowed = !!(pi->port_neigh_mode &
+				       OPA_PI_MASK_NEIGH_MGMT_ALLOWED);
+		ppd->neighbor_fm_security = !!(pi->port_neigh_mode &
+					       OPA_PI_MASK_NEIGH_FW_AUTH_BYPASS);
+
+		ppd_dev_info(ppd,
+			     "Neighbor Guid %llx, Type %d, Port Num %d\n",
+			     ppd->neighbor_guid, ppd->neighbor_type,
+			     ppd->neighbor_port_number);
+
+		if (ppd->mgmt_allowed) {
+			/* XXX - will the CPORT do this?
+			 * Must we do GET PKEY_TABLE ourselves?
+			 */
+			if (!(ppd->pkeys[2] == 0 || ppd->pkeys[2] == FULL_MGMT_P_KEY))
+				ppd_dev_warn(ppd, "%s pkey[2] already set to 0x%x, "
+					     "resetting it to 0x%x\n",
+					     __func__, ppd->pkeys[2], FULL_MGMT_P_KEY);
+			ppd->pkeys[2] = FULL_MGMT_P_KEY;
+			hfi1_event_pkey_change(ppd->dd, ppd->port);
+		}
+
+		/* physical link went up */
+		ppd->linkup = 1;
+		ppd->offline_disabled_reason =
+			HFI1_ODR_MASK(OPA_LINKDOWN_REASON_NONE);
+
+		/* link widths are not available until the link is fully up */
+		ppd->link_width_enabled = be16_to_cpu(pi->link_width.enabled);
+		ppd->link_width_supported = be16_to_cpu(pi->link_width.supported);
+		ppd->link_width_active = be16_to_cpu(pi->link_width.active);
+		ppd->link_width_downgrade_supported =
+				be16_to_cpu(pi->link_width_downgrade.supported);
+		ppd->link_width_downgrade_enabled =
+				be16_to_cpu(pi->link_width_downgrade.enabled);
+		ppd->link_width_downgrade_tx_active =
+				be16_to_cpu(pi->link_width_downgrade.tx_active);
+		ppd->link_width_downgrade_rx_active =
+				be16_to_cpu(pi->link_width_downgrade.rx_active);
+		/* XXX - presumably, speeds should also be set here */
+		ppd->link_speed_supported = be16_to_cpu(pi->link_speed.supported);
+		ppd->link_speed_active = be16_to_cpu(pi->link_speed.active);
+		ppd->link_speed_enabled = be16_to_cpu(pi->link_speed.enabled);
+
+	} else {
+		/* physical link went down */
+		ppd->linkup = 0;
+
+		/* clear HW details of the previous connection */
+		ppd->actual_vls_operational = 0;
+
+		/* what's left from reset_link_credits() */
+		dd->vl15buf_cached = 0;
+
+		start_linkdown_handling(ppd);
+
+		ev = IB_EVENT_PORT_ERR;
+
+		/* XXX - setup notifications in user contexts (plain kmem).
+		 * But this should only apply to contexts used for this port.
+		 */
+		hfi1_set_uevent_bits(ppd, _HFI1_EVENT_LINKDOWN_BIT);
+
+		/* if we are down, the neighbor is down */
+		ppd->neighbor_normal = 0;
+
+		/* notify IB of the link change */
+		signal_ib_event(ppd, ev);
+	}
+}
+
+/**
+ * go_port_active - All steps needed when the port goes active.
+ * @ppd: port structure
+ *
+ * Take non-chip specific steps for transition from INIT to ACTIVE.  This
+ * routine expects the port to already in INIT.  This routine is not
+ * responsible for setting the state.
+ */
+void go_port_active(struct hfi1_pportdata *ppd)
+{
+	struct ib_event event = { 0 };
+
+	/* Signal the IB layer that the port has gone active */
+	event.device = &ppd->dd->verbs_dev.rdi.ibdev;
+	event.element.port_num = ppd->port;
+	event.event = IB_EVENT_PORT_ACTIVE;
+	ib_dispatch_event(&event);
 }
 
 /*
