@@ -20,7 +20,7 @@
 #define PCIE		0
 
 #define ASIC_NUM_SCRATCH 4
-#define CCE_ERR_INT_CNT 0
+#define WFR_CCE_ERR_INT_CNT 0
 #define CCE_MISC_INT_CNT 2
 #define CCE_NUM_32_BIT_COUNTERS 3
 #define CCE_NUM_32_BIT_INT_COUNTERS 6

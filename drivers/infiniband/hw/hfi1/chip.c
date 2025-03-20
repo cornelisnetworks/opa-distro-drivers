@@ -27,6 +27,7 @@
 #include "debugfs.h"
 #include "fault.h"
 #include "netdev.h"
+#include "chip_registers_jkr.h"
 
 uint num_vls = HFI1_MAX_VLS_SUPPORTED;
 module_param(num_vls, uint, S_IRUGO);
@@ -4039,8 +4040,6 @@ def_access_ibp_counter(rc_crwaits);
 static struct cntr_entry shared_dev_cntrs[SHARED_DEV_CNTR_LAST] = {
 [C_CCE_PCI_CR_ST] = CCE_PERF_DEV_CNTR_ELEM("CcePciCrSt",
 			CCE_PCIE_POSTED_CRDT_STALL_CNT, CNTR_NORMAL),
-[C_CCE_ERR_INT] = CCE_INT_DEV_CNTR_ELEM(CceErrInt, CCE_ERR_INT_CNT,
-			CNTR_NORMAL),
 [C_CCE_SDMA_INT] = CCE_INT_DEV_CNTR_ELEM(CceSdmaInt, CCE_SDMA_INT_CNT,
 			CNTR_NORMAL),
 [C_CCE_MISC_INT] = CCE_INT_DEV_CNTR_ELEM(CceMiscInt, CCE_MISC_INT_CNT,
@@ -4999,12 +4998,24 @@ struct cntr_entry wfr_dev_cntrs[WFR_NUM_DEV_CNTRS] = {
 				CNTR_NORMAL),
 [A(C_CCE_PIO_WR_ST)] = CCE_PERF_DEV_CNTR_ELEM("CcePioWrSt", CCE_PIO_WR_STALL_CNT,
 				CNTR_NORMAL),
+[A(C_CCE_ERR_INT)] = CCE_INT_DEV_CNTR_ELEM(CceErrInt, WFR_CCE_ERR_INT_CNT,
+				CNTR_NORMAL),
 #undef A
 };
 
 struct cntr_entry jkr_dev_cntrs[JKR_NUM_DEV_CNTRS] = {
 #define A(x) ((x) - JKR_DEV_CNTR_FIRST) /* absolute number */
 [A(C_CCE_RW_ST_BY_R)] = CCE_PERF_DEV_CNTR_ELEM("CceRdWrStByRd", 0, CNTR_NORMAL),
+[A(C_CCE_OTHER_INT)] = CCE_INT_DEV_CNTR_ELEM(CceOtherInt, JKR_C_CCE_OTHER_INT_CNT,
+				CNTR_NORMAL),
+[A(C_CCE_PBC_ERR_INT)] = CCE_INT_DEV_CNTR_ELEM(CcePbcErrInt, JKR_C_CCE_PBC_ERR_INT_CNT,
+				CNTR_NORMAL),
+[A(C_CCE_PIO_ERR_INT)] = CCE_INT_DEV_CNTR_ELEM(CcePioErrInt, JKR_C_CCE_PIO_ERR_INT_CNT,
+				CNTR_NORMAL),
+[A(C_CCE_SDMA_ERR_INT)] = CCE_INT_DEV_CNTR_ELEM(CceSdmaErrInt, JKR_C_CCE_SDMA_ERR_INT_CNT,
+				CNTR_NORMAL),
+[A(C_CCE_CSR_ERR_INT)] = CCE_INT_DEV_CNTR_ELEM(CceCsrErrInt, JKR_C_CCE_CSR_ERR_INT_CNT,
+				CNTR_NORMAL),
 #undef A
 };
 

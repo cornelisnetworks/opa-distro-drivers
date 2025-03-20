@@ -791,7 +791,6 @@ static inline int idx_from_vl(int vl)
 /* shared device counter indexes */
 enum {
 	C_CCE_PCI_CR_ST,
-	C_CCE_ERR_INT,
 	C_CCE_SDMA_INT,
 	C_CCE_MISC_INT,
 	C_CCE_RCV_AV_INT,
@@ -1142,6 +1141,7 @@ enum {
 	C_DC_PG_STS_TX_MBE_CNT,
 	C_CCE_PCI_TR_ST,
 	C_CCE_PIO_WR_ST,
+	C_CCE_ERR_INT,
 	WFR_DEV_CNTR_LAST  /* keep last */
 };
 
@@ -1150,6 +1150,11 @@ enum {
 /* JKR device counter indexes */
 enum {
 	C_CCE_RW_ST_BY_R = JKR_DEV_CNTR_FIRST,
+	C_CCE_OTHER_INT,
+	C_CCE_PBC_ERR_INT,
+	C_CCE_PIO_ERR_INT,
+	C_CCE_SDMA_ERR_INT,
+	C_CCE_CSR_ERR_INT,
 	JKR_DEV_CNTR_LAST  /* keep last */
 };
 
