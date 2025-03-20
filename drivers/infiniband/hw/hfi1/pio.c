@@ -1941,44 +1941,6 @@ static void pio_map_rcu_callback(struct rcu_head *list)
 	pio_map_free(m);
 }
 
-static void print_pio_map(struct hfi1_pportdata *ppd, struct pio_vl_map *map)
-{
-#define PM_SIZE 256 /* print map size */
-	char buf[PM_SIZE];
-	struct pio_map_elem *e;
-	struct send_context *sc;
-	int i, j;
-	int off;
-	u32 sz;
-
-	printk("%s: pidx %d: actual_vls %d, vls %d, mask 0x%x\n", __func__,
-		ppd->hw_pidx, map->actual_vls, map->vls, map->mask);
-	for (i = 0; i < map->vls; i++) {
-		if (i >= map->actual_vls) {
-			printk("%s: <dup of index %d>\n", __func__,
-				i % map->actual_vls);
-			continue;
-		}
-		e = map->map[i];
-		sz = e->mask + 1;
-		off = 0;
-		for (j = 0; j < sz; j++) {
-			sc = e->ksc[j];
-			if (sc) {
-				off += scnprintf(&buf[off], PM_SIZE - off,
-						 " %2d",
-						 sc->sw_index);
-			} else {
-				off += scnprintf(&buf[off], PM_SIZE - off,
-						 " xx");
-			}
-		}
-
-		printk("%s: [%d] mask 0x%02x [%s ]\n", __func__,
-			i, e->mask, buf);
-	}
-}
-
 /*
  * Set credit return threshold for the kernel send context
  */
@@ -2038,9 +2000,6 @@ int pio_map_init(struct hfi1_pportdata *ppd, u8 num_vls)
 	sc_per_vl = num_kernel_send_contexts / num_vls;
 	/* extras */
 	extra = num_kernel_send_contexts % num_vls;
-	printk("%s: pidx %d: num_kernel_send_contexts %d, num_vls %d, sc_per_vl %d, extra %d\n",
-		__func__, ppd->hw_pidx, num_kernel_send_contexts,
-		num_vls, sc_per_vl, extra);
 	/* add extras from last vl down */
 	for (i = num_vls - 1; i >= 0; i--, extra--)
 		vl_scontexts[i] = sc_per_vl + (extra > 0 ? 1 : 0);
@@ -2073,7 +2032,6 @@ int pio_map_init(struct hfi1_pportdata *ppd, u8 num_vls)
 			 */
 			for (j = 0; j < sz; j++) {
 				if (ppd->kernel_send_context[scontext]) {
-					printk("%s: map[%d]->ksc[%d] = scontext %d\n", __func__, i, j, scontext);
 					newmap->map[i]->ksc[j] =
 					    ppd->kernel_send_context[scontext];
 					set_threshold(ppd, scontext, i);
@@ -2089,7 +2047,6 @@ int pio_map_init(struct hfi1_pportdata *ppd, u8 num_vls)
 		}
 		scontext = first_scontext + vl_scontexts[i];
 	}
-	print_pio_map(ppd, newmap);
 	/* newmap in hand, save old map */
 	spin_lock_irq(&dd->pio_map_lock);
 	oldmap = rcu_dereference_protected(ppd->pio_map,
@@ -2153,7 +2110,6 @@ int init_pervl_scs(struct hfi1_pportdata *ppd)
 		goto freesc15;
 
 	ppd->kernel_send_context[0] = ppd->vld[15].sc;
-	printk("%s: vld[15].sc: sw_index %d\n", __func__, ppd->vld[15].sc->sw_index);
 
 	for (i = 0; i < num_vls; i++) {
 		sc = sc_alloc(ppd, SC_KERNEL, rcvhdrqentsize, dd->node);
