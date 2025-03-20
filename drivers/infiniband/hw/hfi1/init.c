@@ -2505,7 +2505,6 @@ int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 				   amt, rcd->ctxt);
 			goto bail;
 		}
-		printk("%s: ctxt %d, rcvhdrq 0x%llx, rcvhdrq_dma 0x%llx, amt 0x%x\n", __func__, rcd->ctxt, (unsigned long long)rcd->rcvhdrq, (unsigned long long)rcd->rcvhdrq_dma, amt);
 
 		if (HFI1_CAP_KGET_MASK(rcd->flags, DMA_RTAIL) ||
 		    HFI1_CAP_UGET_MASK(rcd->flags, DMA_RTAIL)) {

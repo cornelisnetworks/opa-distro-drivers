@@ -370,8 +370,6 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 	int ret = 0;
 	u16 ctxt;
 	u16 subctxt;
-	int do_dma_print = 0;
-	int do_mapio_print = 0;
 
 	if (!uctxt || !(vma->vm_flags & VM_SHARED)) {
 		ret = -EINVAL;
@@ -451,16 +449,6 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 		memlen = rcvhdrq_size(uctxt);
 		memvirt = uctxt->rcvhdrq;
 		memdma = uctxt->rcvhdrq_dma;
-		printk("%s: RCV_HDRQ ctxt %d, memlen 0x%lx, memvirt 0x%llx, memdma 0x%llx\n", __func__, uctxt->ctxt, memlen, (unsigned long long)memvirt, (unsigned long long)memdma);
-		printk("%s: RCV_HDRQ memvirt[0..1] 0x%016lx 0x%016lx\n", __func__,
-			((unsigned long *)memvirt)[0],
-			((unsigned long *)memvirt)[1]);
-		if (((unsigned long *)memvirt)[1] == ~0ul) {
-			unsigned long val = 0xdeadbeef5a5a5a5a;
-			printk("%s: RCV_HDRQ changing [1] to 0x%016lx\n", __func__, val);
-			((unsigned long *)memvirt)[1] = val;
-		}
-		do_dma_print = 1;
 		break;
 	case RCV_EGRBUF: {
 		unsigned long vm_start_save;
@@ -536,34 +524,6 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 		flags |= VM_DONTCOPY | VM_DONTEXPAND;
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 		mapio = 1;
-		printk("%s: UREGS ctxt %d, memlen 0x%lx, memaddr 0x%016llx\n", __func__, uctxt->ctxt, memlen, (unsigned long long)memaddr);
-		printk("%s: UREGS vma vm_ops->fault %px %pS\n", __func__, vma->vm_ops->fault, vma->vm_ops->fault);
-		/*
-		 * Attempt a direct read, without using readq() - sorta.
-		 * This may not be the same as the mmap.  We have mapped
-		 * the BAR into 2 segments, kregbase1 and kregbase2.  For
-		 * JKR, this is the whole first half of the BAR (the second
-		 * half contains the RcvArray).
-		 */
-		{
-		u32 offset = dd->params->rcv_hdr_tail_reg +
-				(uctxt->ctxt * dd->params->rxe_uctxt_stride);
-		void __iomem *io_addr;
-		u64 *direct;
-
-		// this is hfi1_addr_from_offset()
-		if (offset >= dd->base2_start)
-			io_addr = dd->kregbase2 + (offset - dd->base2_start);
-		else
-			io_addr = dd->kregbase1 + offset;
-		// end of hfi1_addr_from_offset()
-
-		// direct access will crash the node
-		direct = (u64 *)io_addr; // remove the __iomem and set type
-		//printk("%s: UREGS direct 0x%lx, direct[0..1] 0x%016llx 0x%016llx\n", __func__, (unsigned long)direct, direct[0], direct[1]);
-		printk("%s: UREGS direct 0x%lx, offset 0x%x, base2_start 0x%x, pysaddr 0x%lx, kregbase1 0x%lx, kregbase2 0x%lx\n", __func__, (unsigned long)direct, offset, dd->base2_start, (unsigned long)dd->physaddr, (unsigned long)dd->kregbase1, (unsigned long)dd->kregbase2);
-		}
-		do_mapio_print = 1;
 		break;
 	case EVENTS:
 		/*
@@ -662,15 +622,11 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 	} else if (memdma) {
 		ret = dma_mmap_coherent(&dd->pcidev->dev, vma,
 					memvirt, memdma, memlen);
-		if (do_dma_print)
-			printk("%s: memdma mmmap ret %d, vma start 0x%016lx, end 0x%016lx, memlen 0x%lx\n", __func__, ret, vma->vm_start, vma->vm_end, memlen);
 	} else if (mapio) {
 		ret = io_remap_pfn_range(vma, vma->vm_start,
 					 PFN_DOWN(memaddr),
 					 memlen,
 					 vma->vm_page_prot);
-		if (do_mapio_print)
-			printk("%s: mapio mmmap ret %d, vma start 0x%016lx, end 0x%016lx, memlen 0x%lx\n", __func__, ret, vma->vm_start, vma->vm_end, memlen);
 	} else if (memvirt) {
 		ret = remap_pfn_range(vma, vma->vm_start,
 				      PFN_DOWN(__pa(memvirt)),
