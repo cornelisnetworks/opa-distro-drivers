@@ -34,8 +34,7 @@ struct pinning_interface {
 			 struct hfi1_pin_stats *stats);
 	void (*put)(void *ptr);
 };
-
-#define PINNING_MAX_INTERFACES BIT(HFI1_MEMINFO_TYPE_ENTRY_BITS)
+#define PINNING_MAX_INTERFACES (1UL << (HFI1_MEMINFO_TYPE_ENTRY_BITS))
 
 struct pinning_state {
 	void *interface[PINNING_MAX_INTERFACES];

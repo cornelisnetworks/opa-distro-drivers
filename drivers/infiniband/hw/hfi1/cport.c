@@ -258,7 +258,9 @@ int cport_send_req(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, i
 {
 	int ret;
 	struct cport_work *msg;
-	DEFINE_SEMAPHORE(comp, 0);
+	DEFINE_SEMAPHORE(comp);
+	/* XXX Do we need to do a down() here? It defaults to 1 I think*/
+	down(&comp);
 
 	might_sleep();
 
