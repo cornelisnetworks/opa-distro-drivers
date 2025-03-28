@@ -157,7 +157,7 @@ rpmversion=$(echo "$DEFAULT_KERNEL_VERSION" | sed -e 's/-/_/g')
 rpmrequires=$(echo "$DEFAULT_KERNEL_VERSION" | sed -e 's/.[^.]*$//')
 
 # get kernel(-devel) rpm version and release values
-if [ $distro = 'rhel' ]
+if [ $distro = 'rhel' ] || [ $distro = 'rocky' ]
 then
 	kernel_rpmver=$(rpm -q --qf %{VERSION} kernel-$(uname -r))
 	kmod_subdir=extra
