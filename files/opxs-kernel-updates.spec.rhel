@@ -113,13 +113,14 @@ for flavor in %flavors_to_build ; do
 done
 (targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma
  mkdir -p $targetdir
+ srcdir=$PWD
  cd %kdir
- sh ./scripts/headers_install.sh include/uapi/rdma/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
- sh ./scripts/headers_install.sh include/uapi/rdma/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl.h $targetdir/rdma_user_ioctl.h
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl_cmds.h $targetdir/rdma_user_ioctl_cmds.h
  targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi
  mkdir -p $targetdir
- sh ./scripts/headers_install.sh include/uapi/rdma/hfi/hfi1_user.h $targetdir/hfi1_user.h
- sh ./scripts/headers_install.sh include/uapi/rdma/hfi/hfi1_ioctl.h $targetdir/hfi1_ioctl.h)
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_user.h $targetdir/hfi1_user.h
+ sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_ioctl.h $targetdir/hfi1_ioctl.h)
 
 %files devel
 %defattr(-,root,root,-)
