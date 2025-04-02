@@ -74,12 +74,9 @@ void gen_start_port(struct hfi1_pportdata *ppd)
 	// see the point.  No one has set ppd->guids[] this early.
 	guid = ppd->guids[HFI1_PORT_GUID_INDEX];
 	if (!guid) {
-		/*
-		 * 100G STL HAS says bits 34:32 are port number, 1-7
-		 * 200G STL HAS says bits 31:30 are port number, 0-3
-		 */
+		/* OPA spec says bits 34:32 are port number, 1-7 */
 		if (dd->base_guid)
-			guid = (dd->base_guid & ~(0x1fULL << 30)) | ((u64)ppd->port << 32) | ((u64)ppd->hw_pidx << 30);
+			guid = (dd->base_guid & ~(7ULL << 32)) | ((u64)ppd->port << 32);
 		ppd->guids[HFI1_PORT_GUID_INDEX] = guid;
 		pr_warn("%s: ppd->guids[HFI1_PORT_GUID_INDEX] = 0x%llx",
 			__func__, guid);
