@@ -862,8 +862,6 @@ static int assign_ctxt(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	pidx = uinfo.pad & 0x1;
 	kdeth_rcv_hdr = (uinfo.pad >> 1) & 0x1f; /* 5 bits: 0-31 */
 	unused = uinfo.pad >> 6;
-	dd_dev_info(fd->dd, "User pad: pidx %d, kdeth_rcv_hdr %d, unused 0x%x\n",
-	            pidx, kdeth_rcv_hdr, unused);
 	fail = false;
 	if (pidx >= fd->dd->num_pports)
 		fail = true;
