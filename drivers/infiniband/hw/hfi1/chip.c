@@ -13375,6 +13375,14 @@ int hfi1_tempsense_rd(struct hfi1_devdata *dd, struct hfi1_temp *temp)
 				    __func__);
 		return -EINVAL;
 	}
+
+	if (dd->params->chip_type == CHIP_JKR) {
+		/* TODO ask CPORT for ASIC temperature */
+		dd_dev_info(dd, "%s: tempsense not implemented for JKR\n",
+			    __func__);
+		return -EINVAL;
+	}
+
 	reg = read_csr(dd, ASIC_STS_THERM);
 	temp->curr = ((reg >> ASIC_STS_THERM_CURR_TEMP_SHIFT) &
 		      ASIC_STS_THERM_CURR_TEMP_MASK);
