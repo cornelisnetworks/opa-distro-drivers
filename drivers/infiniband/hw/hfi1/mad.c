@@ -5459,9 +5459,14 @@ int hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 	return ret;
 }
 
-static int cport_set_opa_nodedesc(struct hfi1_pportdata *ppd,
-				  struct opa_smp *smp,
-				  u8 *data)
+/*
+ * The driver received a GET or SET NODE_DESC from CPORT.
+ * Currently, we only tell CPORT what the NodedDescription should be,
+ * according to the IB device. We don't allow anyone to change that.
+ */
+static int cport_do_opa_nodedesc(struct hfi1_pportdata *ppd,
+				 struct opa_smp *smp,
+				 u8 *data)
 {
 	struct hfi1_devdata *dd = ppd->dd;
 	struct opa_node_description *nd = (struct opa_node_description *)data;
@@ -6033,7 +6038,7 @@ static int cport_subn_set_opa(struct hfi1_pportdata *ppd, struct opa_smp *smp)
 
 	switch (smp->attr_id) {
 	case IB_SMP_ATTR_NODE_DESC:
-		sts = cport_set_opa_nodedesc(ppd, smp, data);
+		sts = cport_do_opa_nodedesc(ppd, smp, data);
 		break;
 	case IB_SMP_ATTR_NODE_INFO:
 		sts = cport_set_opa_nodeinfo(ppd, smp, data);
@@ -6108,6 +6113,10 @@ static int cport_subn_opa(struct hfi1_pportdata *ppd, struct opa_mad *mad)
 		sts = cport_subn_set_opa(ppd, smp);
 		break;
 	case IB_MGMT_METHOD_GET:
+		if (smp->attr_id == IB_SMP_ATTR_NODE_DESC) {
+			sts = cport_do_opa_nodedesc(ppd, smp, opa_get_smp_data(smp));
+			break;
+		}
 #ifdef CPORT_MAD_TRACE
 #ifndef GET_PORT_INFO_DEBUG
 		if (smp->attr_id != IB_SMP_ATTR_PORT_INFO)
