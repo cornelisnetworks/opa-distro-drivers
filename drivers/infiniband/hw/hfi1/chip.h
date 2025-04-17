@@ -1278,6 +1278,7 @@ void hfi1_deinit_vnic_rsm(struct hfi1_pportdata *ppd);
 
 irqreturn_t general_interrupt(int irq, void *data);
 irqreturn_t sdma_interrupt(int irq, void *data);
+irqreturn_t sdma_interrupt_thr(int irq, void *data);
 irqreturn_t receive_context_interrupt(int irq, void *data);
 irqreturn_t receive_context_thread(int irq, void *data);
 irqreturn_t receive_context_interrupt_napi(int irq, void *data);
