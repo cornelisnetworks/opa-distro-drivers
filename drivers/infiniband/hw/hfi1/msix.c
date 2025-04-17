@@ -200,7 +200,7 @@ int msix_request_sdma_irq(struct sdma_engine *sde)
 
 	snprintf(name, sizeof(name), DRIVER_NAME "_%d sdma%d",
 		 sde->dd->unit, sde->this_idx);
-	nr = msix_request_irq(sde->dd, sde, sdma_interrupt, NULL,
+	nr = msix_request_irq(sde->dd, sde, sdma_interrupt, sdma_interrupt_thr,
 			      IRQ_SDMA, name);
 	if (nr < 0)
 		return nr;
