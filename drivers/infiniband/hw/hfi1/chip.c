@@ -56,6 +56,10 @@ uint loopback;
 module_param_named(loopback, loopback, uint, S_IRUGO);
 MODULE_PARM_DESC(loopback, "Put into loopback mode (1 = serdes, 3 = external cable");
 
+int sdma_yield = 1000;	/* how often to yield when in thrd intr handler */
+module_param_named(sdma_yield, sdma_yield, int, S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(sdma_yield, "How long to run threaded SDMA irq without yield, mS");
+
 /* Other driver tunables */
 uint rcv_intr_dynamic = 1; /* enable dynamic mode for rcv int mitigation*/
 static ushort crc_14b_sideband = 1;
@@ -8340,6 +8344,17 @@ irqreturn_t general_interrupt(int irq, void *data)
 	return handled;
 }
 
+static inline void __hfi1_sde_eoi_intr(struct sdma_engine *sde, u32 off, u64 status)
+{
+	struct hfi1_devdata *dd = sde->dd;
+
+	/* clear the interrupt(s) *after* handling them */
+	write_csr(dd, CCE_INT_CLEAR + off, status);
+	/* TODO: which intr to force? */
+	if (sdma_work_pending(sde))
+		write_csr(dd, CCE_INT_FORCE + off, sde->int_mask);
+}
+
 irqreturn_t sdma_interrupt(int irq, void *data)
 {
 	struct sdma_engine *sde = data;
@@ -8359,11 +8374,46 @@ irqreturn_t sdma_interrupt(int irq, void *data)
 	off = 8 * (dd->params->is_sdma_start / 64);
 	status = read_csr(dd, CCE_INT_STATUS + off) & sde->imask;
 	if (likely(status)) {
-		/* clear the interrupt(s) */
-		write_csr(dd, CCE_INT_CLEAR + off, status);
-
 		/* handle the interrupt(s) */
 		sdma_engine_interrupt(sde, status);
+		if (sdma_work_pending(sde))
+			return IRQ_WAKE_THREAD;
+		__hfi1_sde_eoi_intr(sde, off, status);
+	} else {
+		dd_dev_info_ratelimited(dd, "SDMA engine %u interrupt, but no status bits set\n",
+					sde->this_idx);
+	}
+	return IRQ_HANDLED;
+}
+
+irqreturn_t sdma_interrupt_thr(int irq, void *data)
+{
+	struct sdma_engine *sde = data;
+	struct hfi1_devdata *dd = sde->dd;
+	u64 status;
+	u32 off;
+	unsigned long ty;
+	unsigned long flags;
+
+	/* This read_csr is really bad in the hot path */
+	off = 8 * (dd->params->is_sdma_start / 64);
+	status = read_csr(dd, CCE_INT_STATUS + off) & sde->imask;
+	ty = jiffies + msecs_to_jiffies(sdma_yield);
+	if (likely(status)) {
+again:
+		/* handle the interrupt(s) */
+		sdma_engine_interrupt(sde, status);
+
+		if (sdma_work_pending(sde)) {
+			if (time_after(jiffies, ty)) {
+				cond_resched();
+				ty = jiffies + msecs_to_jiffies(sdma_yield);
+			}
+			goto again;
+		}
+		local_irq_save(flags);
+		__hfi1_sde_eoi_intr(sde, off, status);
+		local_irq_restore(flags);
 	} else {
 		dd_dev_info_ratelimited(dd, "SDMA engine %u interrupt, but no status bits set\n",
 					sde->this_idx);

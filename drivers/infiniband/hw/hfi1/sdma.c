@@ -1906,6 +1906,15 @@ retry:
 		sdma_desc_avail(sde, sdma_descq_freecnt(sde));
 }
 
+bool sdma_work_pending(struct sdma_engine *sde)
+{
+	u16 hwhead, swhead;
+
+	hwhead = sdma_gethead(sde);
+	swhead = sde->descq_head & sde->sdma_mask;
+	return (swhead != hwhead);
+}
+
 /*
  * sdma_engine_interrupt() - interrupt handler for engine
  * @sde: sdma engine

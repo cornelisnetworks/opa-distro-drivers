@@ -909,6 +909,7 @@ static inline unsigned sdma_progress(struct sdma_engine *sde, unsigned seq,
 /* for use by interrupt handling */
 void sdma_engine_error(struct sdma_engine *sde, u64 status);
 void sdma_engine_interrupt(struct sdma_engine *sde, u64 status);
+bool sdma_work_pending(struct sdma_engine *sde);
 
 /*
  *
