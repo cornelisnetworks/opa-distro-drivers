@@ -8,7 +8,7 @@
 
 #include "sdma_defs.h"
 
-/* increased for AHG */
+/* nominal descriptor count with expected padding */
 #define NUM_DESC 6
 
 /*
@@ -84,6 +84,10 @@ struct sdma_txreq {
 	u16 coalesce_idx;
 	/* private: flags */
 	u16                         flags;
+	/* number of no-op descriptors to add */
+	u8 num_pad;
+	/* number avail descriptors needed before coalesce or expansion */
+	u8 desc_margin;
 	/* packed bitfield with enough space for SDMA_MAP_* values
 	 * for up to 64 descriptors at 2 bits per descriptor
 	 */
