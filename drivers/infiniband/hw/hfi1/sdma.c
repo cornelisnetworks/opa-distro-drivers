@@ -45,6 +45,22 @@ static uint enable_jkr_sdma_mem_init = 0;
 module_param(enable_jkr_sdma_mem_init, uint, S_IRUGO);
 MODULE_PARM_DESC(enable_jkr_sdma_mem_init, "Enable JKR SDMA memory write workaround (default 0)");
 
+static uint sdma_single_descriptor;
+module_param(sdma_single_descriptor, uint, S_IRUGO);
+MODULE_PARM_DESC(sdma_single_descriptor, "Enable SDMA single descriptor (default 0)");
+
+static uint sdma_threshold;
+module_param(sdma_threshold, uint, S_IRUGO);
+MODULE_PARM_DESC(sdma_threshold, "Non-zero will enable SDMA threshold, using this value as the threshold (default 0=disabled)");
+
+uint pad_sdma_desc;
+module_param(pad_sdma_desc, uint, S_IRUGO);
+MODULE_PARM_DESC(pad_sdma_desc, "Pad submitted SDMA descriptors to multiple of N, valid values are 0,4,8,16,32 (default 0)");
+
+uint sdma_align;
+module_param(sdma_align, uint, S_IRUGO);
+MODULE_PARM_DESC(sdma_align, "Align SDMA descriptor fetch addresses, valid values are 0=none, 1=256-all, 2=256-head-tail, 3=256-tail (default 0)");
+
 #define SDMA_WAIT_BATCH_SIZE 20
 /* max wait time for a SDMA engine to indicate it has halted */
 #define SDMA_ERR_HALT_TIMEOUT 10 /* ms */
@@ -1358,6 +1374,9 @@ void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 	}
 }
 
+/* no-op SDMA descriptor */
+static struct hw_sdma_desc sdma_pad;
+
 /**
  * sdma_init() - called when device probed
  * @dd: hfi1_devdata
@@ -1393,6 +1412,32 @@ int sdma_init(struct hfi1_devdata *dd)
 	dd_dev_info(dd, "SDMA chip_sdma_engines: %u\n", chip_sdma_engines(dd));
 	dd_dev_info(dd, "SDMA chip_sdma_mem_size: %u\n",
 		    chip_sdma_mem_size(dd));
+
+	if (dd->params->chip_type == CHIP_JKR) {
+		switch (pad_sdma_desc) {
+		case 0: case 4: case 8: case 16: case 32:
+			break;
+		default:
+			dd_dev_err(dd, "Invalid pad_sdma_desc parameter %d, setting to zero\n",
+				   pad_sdma_desc);
+			pad_sdma_desc = 0;
+			break;
+		}
+		switch (sdma_align) {
+		case ALIGN_NONE:
+		case ALIGN_256_ALL:
+		case ALIGN_256_HEAD_TAIL:
+		case ALIGN_256_TAIL:
+			break;
+		default:
+			dd_dev_err(dd, "Invalid sdma_align parameter %d, setting to %d\n",
+				   sdma_align, ALIGN_256_HEAD_TAIL);
+			sdma_align = ALIGN_256_HEAD_TAIL;
+		}
+	} else {
+		pad_sdma_desc = 0;
+		sdma_align = 0;
+	}
 
 	per_sdma_credits =
 		chip_sdma_mem_size(dd) / (num_engines * SDMA_BLOCK_SIZE);
@@ -1716,9 +1761,10 @@ void __sdma_txclean(
 	kfree(tx->coalesce_buf);
 	tx->coalesce_buf = NULL;
 	/* kmalloc'ed descp */
-	if (unlikely(tx->desc_limit > ARRAY_SIZE(tx->descs))) {
-		tx->desc_limit = ARRAY_SIZE(tx->descs);
+	if (unlikely(tx->descp != tx->descs)) {
 		kfree(tx->descp);
+		tx->descp = tx->descs;
+		tx->desc_limit = ARRAY_SIZE(tx->descs);
 	}
 }
 
@@ -2004,6 +2050,14 @@ static void sdma_sendctrl(struct sdma_engine *sde, unsigned op)
 
 	sde->p_senddmactrl |= set_senddmactrl;
 	sde->p_senddmactrl &= ~clr_senddmactrl;
+	// conditionally set SDmaSingleDescriptor
+	if (sdma_single_descriptor)
+		sde->p_senddmactrl |= (1uLL << 5);
+	// conditionally set SDmaThresholdEnable - JKR only
+	if (sdma_threshold && sde->dd->params->chip_type == CHIP_JKR) {
+		sde->p_senddmactrl |= (1uLL << 4);
+		write_sde_csr(sde, sde->dd->params->send_dma_priority_thld_reg, sdma_threshold);
+	}
 
 	if (op & SDMA_SENDCTRL_OP_CLEANUP)
 		write_sde_csr(sde, sde->dd->params->send_dma_ctrl_reg,
@@ -2451,6 +2505,20 @@ static inline u16 submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx)
 	for (i = 1; i < tx->num_desc; i++, descp++) {
 		u64 qw[2];
 
+		if (i == tx->num_desc - 1) {
+			u16 j;
+
+			qw[0] = sdma_pad.qw[0];
+			for (j = 0; j < tx->num_pad; j++) {
+				qw[1] = add_gen(sde, sdma_pad.qw[1]);
+				sde->descq[tail].qw[0] = cpu_to_le64(qw[0]);
+				sde->descq[tail].qw[1] = cpu_to_le64(qw[1]);
+				trace_hfi1_sdma_descriptor(sde, qw,
+							   tail, &sde->descq[tail]);
+				tail = ++sde->descq_tail & sde->sdma_mask;
+			}
+		}
+
 		qw[0] = descp->qw[0];
 		if (skip) {
 			/* edits don't have generation */
@@ -2473,7 +2541,7 @@ static inline u16 submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx)
 	WARN_ON_ONCE(sde->tx_ring[sde->tx_tail & sde->sdma_mask]);
 #endif
 	sde->tx_ring[sde->tx_tail++ & sde->sdma_mask] = tx;
-	sde->desc_avail -= tx->num_desc;
+	sde->desc_avail -= tx->num_desc + tx->num_pad;
 	return tail;
 }
 
@@ -2489,7 +2557,7 @@ static int sdma_check_progress(
 	int ret;
 
 	sde->desc_avail = sdma_descq_freecnt(sde);
-	if (tx->num_desc <= sde->desc_avail)
+	if (tx->num_desc + tx->num_pad <= sde->desc_avail)
 		return -EAGAIN;
 	/* pulse the head_lock */
 	if (wait && iowait_ioww_to_iow(wait)->sleep) {
@@ -2540,7 +2608,7 @@ int sdma_send_txreq(struct sdma_engine *sde,
 retry:
 	if (unlikely(!__sdma_running(sde)))
 		goto unlock_noconn;
-	if (unlikely(tx->num_desc > sde->desc_avail))
+	if (unlikely(tx->num_desc + tx->num_pad > sde->desc_avail))
 		goto nodesc;
 	tail = submit_tx(sde, tx);
 	if (wait)
@@ -2617,7 +2685,7 @@ retry:
 		tx->wait = iowait_ioww_to_iow(wait);
 		if (unlikely(!__sdma_running(sde)))
 			goto unlock_noconn;
-		if (unlikely(tx->num_desc > sde->desc_avail))
+		if (unlikely(tx->num_desc + tx->num_pad > sde->desc_avail))
 			goto nodesc;
 		if (unlikely(tx->tlen)) {
 			ret = -EINVAL;
@@ -3182,137 +3250,110 @@ static void __sdma_process_event(struct sdma_engine *sde,
 /*
  * _extend_sdma_tx_descs() - helper to extend txreq
  *
- * This is called once the initial nominal allocation
- * of descriptors in the sdma_txreq is exhausted.
+ * Called when the initial nominal allocation of descriptors in the sdma_txreq
+ * is exhausted.
  *
- * The code will bump the allocation up to the max
- * of MAX_DESC (64) descriptors. There doesn't seem
- * much point in an interim step. The last descriptor
- * is reserved for coalesce buffer in order to support
+ * The code will bump the allocation up to the max of MAX_DESC (64) descriptors.
+ * There doesn't seem much point in an interim step.  The last descriptor or
+ * two is reserved for coalesce buffer and possible pad in order to support
  * cases where input packet has >MAX_DESC iovecs.
- *
  */
-static int _extend_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx)
+int _extend_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx)
 {
 	int i;
 	struct sdma_desc *descp;
 
-	/* Handle last descriptor */
-	if (unlikely((tx->num_desc == (MAX_DESC - 1)))) {
-		/* if tlen is 0, it is for padding, release last descriptor */
-		if (!tx->tlen) {
-			tx->desc_limit = MAX_DESC;
-		} else if (!tx->coalesce_buf) {
-			/* allocate coalesce buffer with space for padding */
-			tx->coalesce_buf = kmalloc(tx->tlen + sizeof(u32),
-						   GFP_ATOMIC);
-			if (!tx->coalesce_buf)
-				goto enomem;
-			tx->coalesce_idx = 0;
-		}
-		return 0;
-	}
-
-	if (unlikely(tx->num_desc == MAX_DESC))
-		goto enomem;
-
 	descp = kmalloc_array(MAX_DESC, sizeof(struct sdma_desc), GFP_ATOMIC);
-	if (!descp)
-		goto enomem;
+	if (!descp) {
+		__sdma_txclean(dd, tx);
+		return -ENOMEM;
+	}
 	tx->descp = descp;
+	tx->desc_limit = MAX_DESC;
 
-	/* reserve last descriptor for coalescing */
-	tx->desc_limit = MAX_DESC - 1;
 	/* copy ones already built */
 	for (i = 0; i < tx->num_desc; i++)
 		tx->descp[i] = tx->descs[i];
 	return 0;
-enomem:
-	__sdma_txclean(dd, tx);
-	return -ENOMEM;
 }
 
 /*
- * ext_coal_sdma_tx_descs() - extend or coalesce sdma tx descriptors
+ * do_coalesce() - coalesce this tx buffer
  *
- * This is called once the initial nominal allocation of descriptors
- * in the sdma_txreq is exhausted.
+ * Called when the data in this buffer must be coalesced.
  *
- * This function calls _extend_sdma_tx_descs to extend or allocate
- * coalesce buffer. If there is a allocated coalesce buffer, it will
- * copy the input packet data into the coalesce buffer. It also adds
- * coalesce buffer descriptor once when whole packet is received.
+ * If needed, create the coalesce buffer.  Copy the current data into the
+ * coalesce buffer.  If this is the last data, dmamap the buffer and add
+ * its descriptor.
  *
  * Return:
  * <0 - error
- * 0 - coalescing, don't populate descriptor
- * 1 - continue with populating descriptor
+ *  0 - success
  */
-int ext_coal_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx,
-			   int type, void *kvaddr, struct page *page,
-			   unsigned long offset, u16 len)
+int do_coalesce(struct hfi1_devdata *dd, struct sdma_txreq *tx,
+		int type, void *kvaddr, struct page *page,
+		unsigned long offset, u16 len)
 {
 	int pad_len, rval;
 	dma_addr_t addr;
 
-	rval = _extend_sdma_tx_descs(dd, tx);
-	if (rval) {
-		__sdma_txclean(dd, tx);
-		return rval;
+	if (!tx->coalesce_buf) {
+		/* allocate coalesce buffer with space for padding */
+		tx->coalesce_buf = kmalloc(tx->tlen + sizeof(u32), GFP_ATOMIC);
+		if (!tx->coalesce_buf) {
+			rval = -ENOMEM;
+			goto fail;
+		}
+		tx->coalesce_idx = 0;
 	}
 
-	/* If coalesce buffer is allocated, copy data into it */
-	if (tx->coalesce_buf) {
-		if (type == SDMA_MAP_NONE) {
-			__sdma_txclean(dd, tx);
-			return -EINVAL;
-		}
-
-		if (type == SDMA_MAP_PAGE) {
-			kvaddr = kmap_local_page(page);
-			kvaddr += offset;
-		} else if (WARN_ON(!kvaddr)) {
-			__sdma_txclean(dd, tx);
-			return -EINVAL;
-		}
-
-		memcpy(tx->coalesce_buf + tx->coalesce_idx, kvaddr, len);
-		tx->coalesce_idx += len;
-		if (type == SDMA_MAP_PAGE)
-			kunmap_local(kvaddr);
-
-		/* If there is more data, return */
-		if (tx->tlen - tx->coalesce_idx)
-			return 0;
-
-		/* Whole packet is received; add any padding */
-		pad_len = tx->packet_len & (sizeof(u32) - 1);
-		if (pad_len) {
-			pad_len = sizeof(u32) - pad_len;
-			memset(tx->coalesce_buf + tx->coalesce_idx, 0, pad_len);
-			/* padding is taken care of for coalescing case */
-			tx->packet_len += pad_len;
-			tx->tlen += pad_len;
-		}
-
-		/* dma map the coalesce buffer */
-		addr = dma_map_single(&dd->pcidev->dev,
-				      tx->coalesce_buf,
-				      tx->tlen,
-				      DMA_TO_DEVICE);
-
-		if (unlikely(dma_mapping_error(&dd->pcidev->dev, addr))) {
-			__sdma_txclean(dd, tx);
-			return -ENOSPC;
-		}
-
-		/* Add descriptor for coalesce buffer */
-		tx->desc_limit = MAX_DESC;
-		return _sdma_txadd_daddr(dd, SDMA_MAP_SINGLE, tx,
-					 addr, tx->tlen);
+	if (type == SDMA_MAP_NONE) {
+		rval = -EINVAL;
+		goto fail;
 	}
 
-	return 1;
+	if (type == SDMA_MAP_PAGE) {
+		kvaddr = kmap_local_page(page);
+		kvaddr += offset;
+	} else if (WARN_ON(!kvaddr)) {
+		rval = -EINVAL;
+		goto fail;
+	}
+
+	memcpy(tx->coalesce_buf + tx->coalesce_idx, kvaddr, len);
+	tx->coalesce_idx += len;
+	if (type == SDMA_MAP_PAGE)
+		kunmap_local(kvaddr);
+
+	/* if there is more data, return */
+	if (tx->tlen != tx->coalesce_idx)
+		return 0;
+
+	/* Whole packet is received; add any padding */
+	pad_len = pad_length(tx);
+	if (pad_len) {
+		memset(tx->coalesce_buf + tx->coalesce_idx, 0, pad_len);
+		/* padding is taken care of for coalescing case */
+		tx->packet_len += pad_len;
+		tx->tlen += pad_len;
+	}
+
+	/* dma map the coalesce buffer */
+	addr = dma_map_single(&dd->pcidev->dev,
+			      tx->coalesce_buf,
+			      tx->tlen,
+			      DMA_TO_DEVICE);
+
+	if (unlikely(dma_mapping_error(&dd->pcidev->dev, addr))) {
+		rval = -ENOSPC;
+		goto fail;
+	}
+
+	return _sdma_txadd_daddr(dd, SDMA_MAP_SINGLE, tx, addr, tx->tlen);
+
+fail:
+	__sdma_txclean(dd, tx);
+	return rval;
 }
 
 /* Update sdes when the lmc changes */
@@ -3337,27 +3378,6 @@ void sdma_update_lmc(struct hfi1_devdata *dd, u64 mask, u32 lid)
 		sde = &dd->per_sdma[i];
 		write_sde_csr(sde, SD(CHECK_SLID), sreg);
 	}
-}
-
-/* tx not dword sized - pad */
-int _pad_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx)
-{
-	int rval = 0;
-
-	if ((unlikely(tx->num_desc == tx->desc_limit))) {
-		rval = _extend_sdma_tx_descs(dd, tx);
-		if (rval) {
-			__sdma_txclean(dd, tx);
-			return rval;
-		}
-	}
-
-	/* finish the one just added */
-	make_tx_sdma_desc(dd, tx, SDMA_MAP_NONE, dd->sdma_pad_phys,
-			  sizeof(u32) - (tx->packet_len & (sizeof(u32) - 1)));
-	tx->num_desc++;
-	_sdma_close_tx(dd, tx);
-	return rval;
 }
 
 /*

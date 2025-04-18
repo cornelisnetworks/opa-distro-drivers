@@ -5556,6 +5556,10 @@ int update_from_opa_portinfo(struct hfi1_pportdata *ppd,
 		ibp->rvp.gid_prefix = pi->subnet_prefix;
 		event.event = IB_EVENT_GID_CHANGE;
 		ib_dispatch_event(&event);
+
+		/* Refresh ipoib with new subnet prefixes from updated ib_gid_table */
+		event.event = IB_EVENT_CLIENT_REREGISTER;
+		ib_dispatch_event(&event);
 	}
 	ibp->rvp.mkey_lease_period = be16_to_cpu(pi->mkey_lease_period);
 
