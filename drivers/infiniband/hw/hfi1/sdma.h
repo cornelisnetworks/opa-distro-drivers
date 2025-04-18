@@ -467,6 +467,47 @@ void _sdma_txreq_ahgadd(
 	u32 *ahg,
 	u8 ahg_hlen);
 
+/*
+ * Padding is needed if the data is not a multiple of 4 bytes.  This will
+ * only possibly be true for 9B packets.  The packet_len for 16B packets will
+ * already be padded to a multiple of 8 bytes.
+ */
+static inline int needs_pad(u16 packet_len)
+{
+	return (packet_len & 0x3) != 0;
+}
+
+/* return the number of bytes needed to pad to a multiple of 4 */
+static inline int pad_length(struct sdma_txreq *tx)
+{
+	return (4 - (tx->packet_len & 0x3)) & 0x3;
+}
+
+#define ALIGN_NONE          0
+#define ALIGN_256_ALL       1
+#define ALIGN_256_HEAD_TAIL 2
+#define ALIGN_256_TAIL      3
+extern uint sdma_align;
+
+/* return the max number of descriptors a segment might need */
+static inline int calc_num_desc(u16 packet_len)
+{
+	if (sdma_align == ALIGN_256_HEAD_TAIL)
+		return 3; /* head, mid, tail */
+	if (sdma_align == ALIGN_NONE)
+		return 1; /* all */
+	if (sdma_align == ALIGN_256_TAIL)
+		return 2; /* head+mid, tail */
+	/*
+	 * Conservative ALIGN_ALL case - split on every 256 byte fetch
+	 * boundary.  The returned number must be the same for the whole
+	 * packet - not just the current segment.
+	 *
+	 * A 10240 sized packet could have at most 41 descriptors.
+	 */
+	return (round_up(packet_len, 256) >> 8) + 1;
+}
+
 /**
  * sdma_txinit_ahg() - initialize an sdma_txreq struct with AHG
  * @dd: device data
@@ -544,6 +585,7 @@ static inline int sdma_txinit_ahg(struct hfi1_devdata *dd,
 	tx->wait = NULL;
 	tx->packet_len = tlen;
 	tx->tlen = tx->packet_len;
+	tx->desc_margin = calc_num_desc(tx->packet_len) + needs_pad(tx->packet_len);
 	tx->descs[0].qw[0] = 0;
 	tx->descs[0].qw[1] = 0;
 	/*
@@ -640,11 +682,12 @@ static inline u8 sdma_get_map_type(struct sdma_txreq *tx, u8 i)
 	return bitmap_get_value8(tx->map_type, idx) & SDMA_MAP_MASK;
 }
 
-static inline void make_tx_sdma_desc(struct hfi1_devdata *dd,
-				     struct sdma_txreq *tx,
-				     int type,
-				     dma_addr_t addr,
-				     size_t len)
+/* do the work, caller is responsible for all checking */
+static inline void _make_tx_sdma_desc(struct hfi1_devdata *dd,
+				      struct sdma_txreq *tx,
+				      int type,
+				      dma_addr_t addr,
+				      size_t len)
 {
 	struct sdma_desc *desc = &tx->descp[tx->num_desc];
 
@@ -658,19 +701,115 @@ static inline void make_tx_sdma_desc(struct hfi1_devdata *dd,
 
 	sdma_qw_set(dd, phy_addr, desc->qw, addr);
 	sdma_qw_set(dd, byte_count, desc->qw, len);
+	tx->num_desc++;
 }
 
-/* helper to extend txreq */
-int ext_coal_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx,
-			   int type, void *kvaddr, struct page *page,
-			   unsigned long offset, u16 len);
-int _pad_sdma_tx_descs(struct hfi1_devdata *, struct sdma_txreq *);
+
+/*
+ * Create one or more descriptors to fetch len bytes.  Enough descriptor room
+ * is guaranteed by the time this function is called.
+ */
+static inline void make_tx_sdma_desc(struct hfi1_devdata *dd,
+				     struct sdma_txreq *tx,
+				     int type,
+				     dma_addr_t addr,
+				     size_t len)
+{
+#define ALIGN_SIZE 256
+#define ALIGN_MASK (ALIGN_SIZE - 1)
+	switch (sdma_align) {
+	case ALIGN_256_ALL:
+		/* align head */
+		if (addr & ALIGN_MASK) {
+			size_t clen = ALIGN_SIZE - (addr & ALIGN_MASK);
+
+			if (clen > len)
+				clen = len;
+			_make_tx_sdma_desc(dd, tx, type, addr, clen);
+			len -= clen;
+			addr += clen;
+		}
+		/* now aligned, split into full sized chunks */
+		while (len >= ALIGN_SIZE) {
+			_make_tx_sdma_desc(dd, tx, type, addr, ALIGN_SIZE);
+			len -= ALIGN_SIZE;
+			addr += ALIGN_SIZE;
+		}
+		/* tail overhang */
+		if (len) {
+			_make_tx_sdma_desc(dd, tx, type, addr, len);
+		}
+		break;
+
+	case ALIGN_256_HEAD_TAIL: {
+		size_t clen;
+
+		/* align head */
+		if (addr & ALIGN_MASK) {
+			clen = ALIGN_SIZE - (addr & ALIGN_MASK);
+			if (clen > len)
+				clen = len;
+			_make_tx_sdma_desc(dd, tx, type, addr, clen);
+			len -= clen;
+			addr += clen;
+		}
+		/* aligned start to aligned tail */
+		clen = len & ~ALIGN_MASK;
+		if (clen) {
+			_make_tx_sdma_desc(dd, tx, type, addr, clen);
+			len -= clen;
+			addr += clen;
+		}
+		/* tail overhang */
+		if (len) {
+			_make_tx_sdma_desc(dd, tx, type, addr, len);
+		}
+		break;
+	}
+
+	case ALIGN_256_TAIL: {
+		dma_addr_t end = addr + len;
+		bool same = (addr & ~ALIGN_MASK) == (end & ~ALIGN_MASK);
+		size_t tail_len = end & ALIGN_MASK;
+		size_t clen = len - tail_len;
+
+		/* start to aligned tail */
+		if (clen && !same) {
+			_make_tx_sdma_desc(dd, tx, type, addr, clen);
+			len -= clen;
+			addr += clen;
+		}
+		/* tail overhang */
+		if (len) {
+			_make_tx_sdma_desc(dd, tx, type, addr, len);
+		}
+		break;
+	}
+
+	default:
+		_make_tx_sdma_desc(dd, tx, type, addr, len);
+		break;
+	}
+#undef ALIGN_SIZE
+#undef ALIGN_MASK
+}
+
 void __sdma_txclean(struct hfi1_devdata *, struct sdma_txreq *);
 
 static inline void sdma_txclean(struct hfi1_devdata *dd, struct sdma_txreq *tx)
 {
 	if (tx->num_desc)
 		__sdma_txclean(dd, tx);
+}
+
+extern uint pad_sdma_desc;
+
+/* calculate the number of no-op descriptors to add */
+static inline int sdma_desc_pad_count(struct sdma_txreq *tx)
+{
+	if (pad_sdma_desc)
+		return round_up(tx->num_desc, pad_sdma_desc) - tx->num_desc;
+	return 0;
 }
 
 /* helpers used by public routines */
@@ -684,33 +823,57 @@ static inline void _sdma_close_tx(struct hfi1_devdata *dd,
 	if (tx->flags & SDMA_TXREQ_F_URGENT)
 		tx->descp[last_desc].qw[1] |= (SDMA_DESC1_HEAD_TO_HOST_FLAG |
 					       SDMA_DESC1_INT_REQ_FLAG);
+	tx->num_pad = sdma_desc_pad_count(tx);
 }
 
-static inline int _sdma_txadd_daddr(
-	struct hfi1_devdata *dd,
-	int type,
-	struct sdma_txreq *tx,
-	dma_addr_t addr,
-	u16 len)
+/* return true if the current buffer must coalesce */
+static inline bool must_coalesce(struct sdma_txreq *tx)
 {
-	int rval = 0;
+	return tx->num_desc + tx->desc_margin >= MAX_DESC;
+}
+
+/* return true if the current buffer forces an extension */
+static inline bool need_desc_extension(struct sdma_txreq *tx)
+{
+	return (tx->desc_limit == ARRAY_SIZE(tx->descs)) &&
+	       (tx->num_desc + tx->desc_margin >= ARRAY_SIZE(tx->descs));
+}
+int _extend_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx);
+
+static inline int _sdma_txadd_daddr(struct hfi1_devdata *dd,
+				    int type,
+				    struct sdma_txreq *tx,
+				    dma_addr_t addr,
+				    u16 len)
+{
+	int rval;
+
+	WARN_ON(len > tx->tlen);
+	if (need_desc_extension(tx)) {
+		rval = _extend_sdma_tx_descs(dd, tx);
+		if (rval)
+			return rval;
+	}
 
 	make_tx_sdma_desc(dd, tx, type, addr, len);
-	WARN_ON(len > tx->tlen);
-	tx->num_desc++;
 	tx->tlen -= len;
-	/* special cases for last */
+
+	/* special case for last */
 	if (!tx->tlen) {
-		if (tx->packet_len & (sizeof(u32) - 1)) {
-			rval = _pad_sdma_tx_descs(dd, tx);
-			if (rval)
-				return rval;
-		} else {
-			_sdma_close_tx(dd, tx);
+		int pad_len = pad_length(tx);
+
+		if (pad_len) {
+			make_tx_sdma_desc(dd, tx, SDMA_MAP_NONE,
+					  dd->sdma_pad_phys, pad_len);
 		}
+		_sdma_close_tx(dd, tx);
 	}
-	return rval;
+	return 0;
 }
+
+int do_coalesce(struct hfi1_devdata *dd, struct sdma_txreq *tx,
+		int type, void *kvaddr, struct page *page,
+		unsigned long offset, u16 len);
 
 /**
  * sdma_txadd_page() - add a page to the sdma_txreq
@@ -736,14 +899,10 @@ static inline int sdma_txadd_page(
 	u16 len)
 {
 	dma_addr_t addr;
-	int rval;
 
-	if ((unlikely(tx->num_desc == tx->desc_limit))) {
-		rval = ext_coal_sdma_tx_descs(dd, tx, SDMA_MAP_PAGE,
-					      NULL, page, offset, len);
-		if (rval <= 0)
-			return rval;
-	}
+	if (unlikely(must_coalesce(tx)))
+		return do_coalesce(dd, tx, SDMA_MAP_PAGE,
+				   NULL, page, offset, len);
 
 	addr = dma_map_page(
 		       &dd->pcidev->dev,
@@ -782,14 +941,9 @@ static inline int sdma_txadd_daddr(
 	dma_addr_t addr,
 	u16 len)
 {
-	int rval;
-
-	if ((unlikely(tx->num_desc == tx->desc_limit))) {
-		rval = ext_coal_sdma_tx_descs(dd, tx, SDMA_MAP_NONE,
-					      NULL, NULL, 0, 0);
-		if (rval <= 0)
-			return rval;
-	}
+	if (unlikely(must_coalesce(tx)))
+		return do_coalesce(dd, tx, SDMA_MAP_NONE,
+				   NULL, NULL, 0, 0);
 
 	return _sdma_txadd_daddr(dd, SDMA_MAP_NONE, tx, addr, len);
 }
@@ -817,14 +971,10 @@ static inline int sdma_txadd_kvaddr(
 	u16 len)
 {
 	dma_addr_t addr;
-	int rval;
 
-	if ((unlikely(tx->num_desc == tx->desc_limit))) {
-		rval = ext_coal_sdma_tx_descs(dd, tx, SDMA_MAP_SINGLE,
-					      kvaddr, NULL, 0, len);
-		if (rval <= 0)
-			return rval;
-	}
+	if (unlikely(must_coalesce(tx)))
+		return do_coalesce(dd, tx, SDMA_MAP_SINGLE,
+				   kvaddr, NULL, 0, len);
 
 	addr = dma_map_single(
 		       &dd->pcidev->dev,
@@ -899,7 +1049,7 @@ static inline unsigned sdma_progress(struct sdma_engine *sde, unsigned seq,
 {
 	if (read_seqretry(&sde->head_lock, seq)) {
 		sde->desc_avail = sdma_descq_freecnt(sde);
-		if (tx->num_desc > sde->desc_avail)
+		if (tx->num_desc + tx->num_pad > sde->desc_avail)
 			return 0;
 		return 1;
 	}

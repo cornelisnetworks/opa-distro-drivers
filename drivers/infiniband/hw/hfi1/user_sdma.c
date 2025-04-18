@@ -103,6 +103,8 @@ static void activate_packet_queue(struct iowait *wait, int reason)
 	wake_up(&wait->wait_dma);
 };
 
+#define HEADER_ALIGN 256 /* memory alignment for header descriptors */
+
 int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 				struct hfi1_filedata *fd)
 {
@@ -148,7 +150,7 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 		 fd->subctxt);
 	pq->txreq_cache = kmem_cache_create(buf,
 					    sizeof(struct user_sdma_txreq),
-					    L1_CACHE_BYTES,
+					    HEADER_ALIGN,
 					    SLAB_HWCACHE_ALIGN,
 					    NULL);
 	if (!pq->txreq_cache) {
