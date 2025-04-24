@@ -920,13 +920,22 @@ void hfi1_put_irq_affinity(struct hfi1_devdata *dd,
 	struct cpu_mask_set *set = NULL;
 	struct hfi1_affinity_node *entry;
 
+	/*
+	 * Generic IRQ irq_*() functions have their own internal locking.
+	 * Calling the irq_*() functions while holding node_affinity.lock
+	 * risks deadlock with IRQ affinity updater tasks.
+	 * So unregister the IRQ affinity update handler before acquiring
+	 * node_affinity.lock.
+	 */
+	if (msix->type == IRQ_SDMA)
+		hfi1_cleanup_sdma_notifier(msix);
+
 	mutex_lock(&node_affinity.lock);
 	entry = node_affinity_lookup(dd->node);
 
 	switch (msix->type) {
 	case IRQ_SDMA:
 		set = &entry->def_intr;
-		hfi1_cleanup_sdma_notifier(msix);
 		break;
 	case IRQ_GENERAL:
 		/* Don't do accounting for general contexts */
