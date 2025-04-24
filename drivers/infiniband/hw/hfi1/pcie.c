@@ -19,6 +19,25 @@
  */
 
 /*
+ * Prevent upstream errors from being reported if a software stray read
+ * occurs in a write-only BAR range.
+ */
+static void mask_aer_unsupported_request(struct pci_dev *pdev)
+{
+	u32 mask;
+	int aer;
+
+	aer = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
+	if (!aer)
+		return;
+	pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_MASK, &mask);
+	if (mask & PCI_ERR_UNC_UNSUP)
+		return;
+	mask |= PCI_ERR_UNC_UNSUP; /* mask Unsupported Request */
+	pci_write_config_dword(pdev, aer + PCI_ERR_UNCOR_MASK, mask);
+}
+
+/*
  * Do all the common PCIe setup and initialization.
  */
 int hfi1_pcie_init(struct hfi1_devdata *dd)
@@ -65,6 +84,8 @@ int hfi1_pcie_init(struct hfi1_devdata *dd)
 	}
 
 	pci_set_master(pdev);
+	if (dd->params->chip_type == CHIP_JKR)
+		mask_aer_unsupported_request(pdev);
 	return 0;
 
 bail:
