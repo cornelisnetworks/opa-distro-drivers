@@ -5376,12 +5376,23 @@ pass_thru:
 
 	if (pass) {
 		mad_result = IB_MAD_RESULT_SUCCESS;
-		ret = cport_send_only_mad(dd, sb, in_mad, mad_len);
+		if (dd->is_vf)
+			ret = vf2pf_send_only_mad(dd, sb, in_mad, mad_len);
+		else
+			ret = cport_send_only_mad(dd, sb, in_mad, mad_len);
 		if (ret)
 			mad_result = IB_MAD_RESULT_FAILURE;
 		return mad_result;
 	}
-	ret = cport_send_recv_mad(dd, sb, in_mad, mad_len, out_mad, out_mad_size);
+	if (dd->is_vf) {
+		long to = cport_mad_to <= 0 ? MAX_SCHEDULE_TIMEOUT :
+					      (cport_mad_to + 2) * HZ;
+
+		ret = vf2pf_send_recv_mad(dd, sb, in_mad, mad_len,
+					  out_mad, out_mad_size, to);
+	} else {
+		ret = cport_send_recv_mad(dd, sb, in_mad, mad_len, out_mad, out_mad_size);
+	}
 	if (ret) {
 		mad_result = IB_MAD_RESULT_FAILURE;
 		goto done;
@@ -5409,16 +5420,13 @@ int vf_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 		   const struct ib_mad *in_mad, struct ib_mad *out_mad,
 		   size_t *out_mad_size, u16 *out_mad_pkey_index)
 {
-	int mad_result;
-
 	/*
-	 * TODO: implement VF MAD processing...
-	 *
-	 * May require forwarding to PF0 for CPORT processing.
+	 * If this requires any different/additional processing,
+	 * place that here. cport_process_mad() checks dd->is_vf to
+	 * determine how to pass the MAD (ultimately) to CPORT.
 	 */
-	mad_result = IB_MAD_RESULT_FAILURE;
-
-	return mad_result;
+	return cport_process_mad(ibdev, mad_flags, port, in_wc, in_grh, in_mad,
+				 out_mad, out_mad_size,  out_mad_pkey_index);
 }
 
 /**
