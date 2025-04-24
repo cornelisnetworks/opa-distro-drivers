@@ -28,6 +28,8 @@ enum {
 	VF2PF_RXERSM_OP,
 	VF2PF_QPMAP_OP,
 	VF2PF_STOP,
+	VF2PF_MAD_SNDRCV,
+	VF2PF_MAD_SND,
 	VF2PF_READY,
 
 	PF0_PUSH_PI,
@@ -137,6 +139,16 @@ struct pf0_pushvlt_msg {
 	u8 pidx;
 	u64 sc2vl[4];
 };
+
+/* allocate full size MAD always */
+struct vf2pf_mad {
+	struct vf2pf_hdr hdr;
+	u8 sb;
+	u8 _pad[7];
+	struct opa_smp mad; /* contains result MAD if requested */
+};
+
+#define VF2PF_MAD_OVERHEAD	sizeof(u64)
 
 struct vf2pf_devops {
 	int num_ctxts;

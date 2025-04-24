@@ -554,6 +554,73 @@ int pf2vf_push_sc2vlt(struct hfi1_pportdata *ppd, int si_mask)
 	return ret;
 }
 
+int vf2pf_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len)
+{
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_mad *msg;
+	void *mem;
+	int ret;
+
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		return cport_send_only_mad(pdd, sb, mad, len);
+	}
+	/* TODO: need some sanity checks for 'len'? */
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_mad *)hdr;
+	msg->hdr.op = VF2PF_MAD_SND;
+	msg->hdr.len = len + VF2PF_MAD_OVERHEAD;
+	msg->sb = sb;
+	memcpy(&msg->mad, mad, len);
+	ret = vf2pf_send(dd, 0, mem);
+	if (!ret)
+		ret = hdr->status;
+	kfree(mem);
+	return ret;
+}
+
+int vf2pf_send_recv_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len,
+			void *omad, size_t *omad_len, long to)
+{
+	struct vf2pf_hdr *hdr;
+	struct vf2pf_mad *msg;
+	void *mem;
+	int ret;
+
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		return cport_send_recv_mad(pdd, sb, mad, len, omad, omad_len);
+	}
+	/* TODO: need some sanity checks for 'len'? */
+	mem = msg_alloc(dd, &hdr);
+	if (!mem)
+		return -ENOMEM;
+	msg = (struct vf2pf_mad *)hdr;
+	msg->hdr.op = VF2PF_MAD_SNDRCV;
+	msg->hdr.len = len + VF2PF_MAD_OVERHEAD;
+	msg->sb = sb;
+	memcpy(&msg->mad, mad, len);
+	ret = vf2pf_send_recv(dd, 0, mem, -to); /* -to: signal use semaphore */
+	if (!ret)
+		ret = hdr->status;
+	if (!ret) {
+		int olen = msg->hdr.len - VF2PF_MAD_OVERHEAD;
+
+		if (olen > *omad_len) {
+			dd_dev_warn(dd, "VF2PF MAD resp length 0x%x > 0x%lx, truncating\n",
+				    olen, *omad_len);
+			olen = *omad_len;
+		}
+		memcpy(omad, &msg->mad, olen);
+	}
+	kfree(mem);
+	return ret;
+}
+
 static void vf2pf_syncup(struct hfi1_devdata *dd, int si)
 {
 	atomic_or(1 << si, &dd->rsrcs.sync_pending);
@@ -665,6 +732,26 @@ void vf2pf_rcv_msg(struct hfi1_devdata *dd, struct vf2pf_hdr *hdr, void *buf)
 		if (vf2pf_dev->deinit)
 			vf2pf_dev->deinit(dd, hdr->si);
 		return;	/* no response */
+	}
+	case VF2PF_MAD_SND: {
+		struct vf2pf_mad *msg = (struct vf2pf_mad *)hdr;
+
+		ret = cport_send_only_mad(dd, msg->sb, &msg->mad,
+					  msg->hdr.len - VF2PF_MAD_OVERHEAD);
+		if (ret)
+			dd_dev_err(dd, "Failed to send MAD to CPORT (%d)\n", ret);
+		return;	/* no response */
+	}
+	case VF2PF_MAD_SNDRCV: {
+		struct vf2pf_mad *msg = (struct vf2pf_mad *)hdr;
+		size_t olen = sizeof(msg->mad);
+
+		ret = cport_send_recv_mad(dd, msg->sb,
+					  &msg->mad, msg->hdr.len - VF2PF_MAD_OVERHEAD,
+					  &msg->mad, &olen);
+		if (!ret)
+			msg->hdr.len = olen;
+		break;
 	}
 	case VF2PF_READY: {
 		vf2pf_syncup(dd, hdr->si);
