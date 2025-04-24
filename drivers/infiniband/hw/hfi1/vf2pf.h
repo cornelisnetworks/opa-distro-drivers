@@ -45,6 +45,9 @@ u16 vf2pf_get_qp_map(struct hfi1_devdata *dd, int pidx, u16 idx);
 int pf2vf_push_portinfo(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 			struct opa_port_info *pi, int si_mask);
 int pf2vf_push_sc2vlt(struct hfi1_pportdata *ppd, int si_mask);
+int vf2pf_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len);
+int vf2pf_send_recv_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len,
+			void *omad, size_t *omad_len, long to);
 void vf2pf_ready(struct hfi1_devdata *dd);
 
 #endif /* _VF2PF_H */
