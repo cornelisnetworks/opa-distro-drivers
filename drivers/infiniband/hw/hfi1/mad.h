@@ -405,6 +405,7 @@ int hfi1_mad_init(struct hfi1_devdata *dd);
 int hfi1_mad_deinit(struct hfi1_devdata *dd);
 int get_sc2vlt_tables(struct hfi1_pportdata *ppd, void *data);
 
+int cport_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len);
 int cport_send_recv_mad(struct hfi1_devdata *dd, u8 sb,
 			const void *mad, int len,
 			void *omad, size_t *omad_len);
