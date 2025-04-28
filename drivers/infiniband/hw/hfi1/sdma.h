@@ -487,16 +487,15 @@ static inline int pad_length(struct sdma_txreq *tx)
 #define ALIGN_256_ALL       1
 #define ALIGN_256_HEAD_TAIL 2
 #define ALIGN_256_TAIL      3
-extern uint sdma_align;
 
 /* return the max number of descriptors a segment might need */
-static inline int calc_num_desc(u16 packet_len)
+static inline int calc_num_desc(struct hfi1_devdata *dd, u16 packet_len)
 {
-	if (sdma_align == ALIGN_256_HEAD_TAIL)
+	if (dd->sdma_align == ALIGN_256_HEAD_TAIL)
 		return 3; /* head, mid, tail */
-	if (sdma_align == ALIGN_NONE)
+	if (dd->sdma_align == ALIGN_NONE)
 		return 1; /* all */
-	if (sdma_align == ALIGN_256_TAIL)
+	if (dd->sdma_align == ALIGN_256_TAIL)
 		return 2; /* head+mid, tail */
 	/*
 	 * Conservative ALIGN_ALL case - split on every 256 byte fetch
@@ -585,7 +584,7 @@ static inline int sdma_txinit_ahg(struct hfi1_devdata *dd,
 	tx->wait = NULL;
 	tx->packet_len = tlen;
 	tx->tlen = tx->packet_len;
-	tx->desc_margin = calc_num_desc(tx->packet_len) + needs_pad(tx->packet_len);
+	tx->desc_margin = calc_num_desc(dd, tx->packet_len) + needs_pad(tx->packet_len);
 	tx->descs[0].qw[0] = 0;
 	tx->descs[0].qw[1] = 0;
 	/*
@@ -717,7 +716,7 @@ static inline void make_tx_sdma_desc(struct hfi1_devdata *dd,
 {
 #define ALIGN_SIZE 256
 #define ALIGN_MASK (ALIGN_SIZE - 1)
-	switch (sdma_align) {
+	switch (dd->sdma_align) {
 	case ALIGN_256_ALL:
 		/* align head */
 		if (addr & ALIGN_MASK) {
@@ -802,13 +801,12 @@ static inline void sdma_txclean(struct hfi1_devdata *dd, struct sdma_txreq *tx)
 		__sdma_txclean(dd, tx);
 }
 
-extern uint pad_sdma_desc;
-
 /* calculate the number of no-op descriptors to add */
-static inline int sdma_desc_pad_count(struct sdma_txreq *tx)
+static inline int sdma_desc_pad_count(struct hfi1_devdata *dd,
+				      struct sdma_txreq *tx)
 {
-	if (pad_sdma_desc)
-		return round_up(tx->num_desc, pad_sdma_desc) - tx->num_desc;
+	if (dd->pad_sdma_desc)
+		return round_up(tx->num_desc, dd->pad_sdma_desc) - tx->num_desc;
 	return 0;
 }
 
@@ -823,7 +821,7 @@ static inline void _sdma_close_tx(struct hfi1_devdata *dd,
 	if (tx->flags & SDMA_TXREQ_F_URGENT)
 		tx->descp[last_desc].qw[1] |= (SDMA_DESC1_HEAD_TO_HOST_FLAG |
 					       SDMA_DESC1_INT_REQ_FLAG);
-	tx->num_pad = sdma_desc_pad_count(tx);
+	tx->num_pad = sdma_desc_pad_count(dd, tx);
 }
 
 /* return true if the current buffer must coalesce */
