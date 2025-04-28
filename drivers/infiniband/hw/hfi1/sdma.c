@@ -49,17 +49,30 @@ static uint sdma_single_descriptor;
 module_param(sdma_single_descriptor, uint, S_IRUGO);
 MODULE_PARM_DESC(sdma_single_descriptor, "Enable SDMA single descriptor (default 0)");
 
-static uint sdma_threshold;
-module_param(sdma_threshold, uint, S_IRUGO);
-MODULE_PARM_DESC(sdma_threshold, "Non-zero will enable SDMA threshold, using this value as the threshold (default 0=disabled)");
+static int sdma_threshold = -1;
+module_param(sdma_threshold, int, S_IRUGO);
+MODULE_PARM_DESC(sdma_threshold, "Non-zero will enable SDMA threshold, using this value as the threshold");
 
-uint pad_sdma_desc;
-module_param(pad_sdma_desc, uint, S_IRUGO);
-MODULE_PARM_DESC(pad_sdma_desc, "Pad submitted SDMA descriptors to multiple of N, valid values are 0,4,8,16,32 (default 0)");
+static int pad_sdma_desc = -1;
+module_param(pad_sdma_desc, int, S_IRUGO);
+MODULE_PARM_DESC(pad_sdma_desc, "Pad submitted SDMA descriptors to multiple of N, valid values are 0,4,8,16,32");
 
-uint sdma_align;
-module_param(sdma_align, uint, S_IRUGO);
-MODULE_PARM_DESC(sdma_align, "Align SDMA descriptor fetch addresses, valid values are 0=none, 1=256-all, 2=256-head-tail, 3=256-tail (default 0)");
+static int sdma_align = -1;
+module_param(sdma_align, int, S_IRUGO);
+MODULE_PARM_DESC(sdma_align, "Align SDMA descriptor fetch addresses, valid values are 0=none, 1=256-all, 2=256-head-tail, 3=256-tail");
+
+#define JKR_DEFAULT_SDMA_CREDITS_LIMIT 1568
+/*
+ * -1 => module parameter not set during load, use
+ * JKR_DEFAULT_SDMA_CREDITS_LIMIT.
+ *
+ * Use this to distinguish between user intentionally setting
+ * jkr_sdma_credits_limit > 6272/num_sdma and the per-SDMA credit limit
+ * happening to be > 6272/num_sdma because of value of num_sdma.
+ */
+static int jkr_sdma_credits_limit = -1;
+module_param(jkr_sdma_credits_limit, int, S_IRUGO);
+MODULE_PARM_DESC(jkr_sdma_credits_limit, "Limit JKR per-SDMA engine buffer credits. Cannot be greater than 6272/num_sdma. Must be even. 0=no limit. Default 1568");
 
 #define SDMA_WAIT_BATCH_SIZE 20
 /* max wait time for a SDMA engine to indicate it has halted */
@@ -1374,6 +1387,46 @@ void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 	}
 }
 
+static u32 sdma_per_engine_credits(struct hfi1_devdata *dd,
+				   u32 num_engines)
+{
+	u32 per_sdma_credits =
+		chip_sdma_mem_size(dd) / (num_engines * SDMA_BLOCK_SIZE);
+	u32 limit = jkr_sdma_credits_limit < 0 ?
+		JKR_DEFAULT_SDMA_CREDITS_LIMIT :
+		jkr_sdma_credits_limit;
+
+	if (dd->params->chip_type != CHIP_JKR || !jkr_sdma_credits_limit)
+		goto rounddown;
+
+	if (limit > per_sdma_credits) {
+		/*
+		 * Only warn user if they actually set jkr_sdma_credits_limit,
+		 * not if jkr_sdma_credits_limit > per_sdma_credits because of
+		 * num_sdma.
+		 */
+		if (jkr_sdma_credits_limit > 0)
+			dd_dev_info(dd, "Ignoring jkr_sdma_credits_limit (%u) > per_sdma_credits (%u)\n",
+				    limit, per_sdma_credits);
+	} else if (limit < 2) {
+		/* Min 2 to make sure JKR doesn't round down to 0 */
+		dd_dev_info(dd, "Ignoring jkr_sdma_credits_limit %u < 2\n",
+			    limit);
+	} else {
+		u32 was = per_sdma_credits;
+
+		per_sdma_credits = limit & ~1;
+		dd_dev_info(dd, "Setting per_sdma_credits to %u (was %u) from jkr_sdma_credits_limit module param\n",
+			    per_sdma_credits, was);
+	}
+rounddown:
+	/* non-WFR hardware requires an even number of credits */
+	if (dd->params->chip_type != CHIP_WFR && (per_sdma_credits & 1))
+		per_sdma_credits &= ~1;
+
+	return per_sdma_credits;
+}
+
 /* no-op SDMA descriptor */
 static struct hw_sdma_desc sdma_pad;
 
@@ -1397,6 +1450,7 @@ int sdma_init(struct hfi1_devdata *dd)
 	void *curr_head;
 	struct hfi1_pportdata *ppd;
 	u32 per_sdma_credits;
+	u32 chip_engines;
 	uint idle_cnt = sdma_idle_cnt;
 	size_t num_engines = dd->num_sdma;
 	int ret = -ENOMEM;
@@ -1413,38 +1467,63 @@ int sdma_init(struct hfi1_devdata *dd)
 	dd_dev_info(dd, "SDMA chip_sdma_mem_size: %u\n",
 		    chip_sdma_mem_size(dd));
 
+	dd->sdma_threshold = sdma_threshold;
+	dd->pad_sdma_desc = pad_sdma_desc;
+	dd->sdma_align = sdma_align;
+	/* fill in defaults if parameter not specified */
 	if (dd->params->chip_type == CHIP_JKR) {
-		switch (pad_sdma_desc) {
-		case 0: case 4: case 8: case 16: case 32:
-			break;
-		default:
-			dd_dev_err(dd, "Invalid pad_sdma_desc parameter %d, setting to zero\n",
-				   pad_sdma_desc);
-			pad_sdma_desc = 0;
-			break;
-		}
-		switch (sdma_align) {
-		case ALIGN_NONE:
-		case ALIGN_256_ALL:
-		case ALIGN_256_HEAD_TAIL:
-		case ALIGN_256_TAIL:
-			break;
-		default:
-			dd_dev_err(dd, "Invalid sdma_align parameter %d, setting to %d\n",
-				   sdma_align, ALIGN_256_HEAD_TAIL);
-			sdma_align = ALIGN_256_HEAD_TAIL;
+		bool amd = boot_cpu_data.x86_vendor == X86_VENDOR_AMD;
+
+		if (amd) {
+			if (dd->sdma_threshold == -1)
+				dd->sdma_threshold = 32;
+			if (dd->pad_sdma_desc == -1)
+				dd->pad_sdma_desc = 32;
+			if (dd->sdma_align == -1)
+				dd->sdma_align = ALIGN_256_HEAD_TAIL;
+		} else {
+			if (dd->sdma_threshold == -1)
+				dd->sdma_threshold = 0;
+			if (dd->pad_sdma_desc == -1)
+				dd->pad_sdma_desc = 0;
+			if (dd->sdma_align == -1)
+				dd->sdma_align = ALIGN_NONE;
 		}
 	} else {
-		pad_sdma_desc = 0;
-		sdma_align = 0;
+		if (dd->sdma_threshold == -1)
+			dd->sdma_threshold = 0;
+		if (dd->pad_sdma_desc == -1)
+			dd->pad_sdma_desc = 0;
+		if (dd->sdma_align == -1)
+			dd->sdma_align = ALIGN_NONE;
 	}
+	/* sanity check parameters */
+	switch (dd->pad_sdma_desc) {
+	case 0: case 4: case 8: case 16: case 32:
+		break;
+	default:
+		dd_dev_err(dd, "Invalid pad_sdma_desc parameter %d, setting to zero\n",
+			   dd->pad_sdma_desc);
+		dd->pad_sdma_desc = 0;
+		break;
+	}
+	switch (dd->sdma_align) {
+	case ALIGN_NONE:
+	case ALIGN_256_ALL:
+	case ALIGN_256_HEAD_TAIL:
+	case ALIGN_256_TAIL:
+		break;
+	default:
+		dd_dev_err(dd, "Invalid sdma_align parameter %d, setting to %d\n",
+			   dd->sdma_align, ALIGN_256_HEAD_TAIL);
+		dd->sdma_align = ALIGN_256_HEAD_TAIL;
+		break;
+	}
+	dd_dev_info(dd, "SDMA threshold,pad,align: %d,%d,%d\n",
+		    dd->sdma_threshold, dd->pad_sdma_desc,
+		    dd->sdma_align);
 
-	per_sdma_credits =
-		chip_sdma_mem_size(dd) / (num_engines * SDMA_BLOCK_SIZE);
-
-	/* non-WFR hardware requires an even number of credits */
-	if (dd->params->chip_type != CHIP_WFR && (per_sdma_credits & 1))
-		per_sdma_credits &= ~1;
+	per_sdma_credits = sdma_per_engine_credits(dd, num_engines);
 
 	/* set up freeze waitqueue */
 	init_waitqueue_head(&dd->sdma_unfreeze_wq);
@@ -1545,6 +1624,11 @@ int sdma_init(struct hfi1_devdata *dd)
 		if (!sde->tx_ring)
 			goto bail;
 	}
+	/* Clear SendDmaCfgMemory on disabled engines */
+	chip_engines = chip_sdma_engines(dd);
+	for (this_idx = num_engines; this_idx < chip_engines; ++this_idx)
+		write_sdmacfg_csr(dd, this_idx, dd->params->send_dma_cfg_memory_reg, 0);
+
 
 	dd->sdma_heads_size = L1_CACHE_BYTES * num_engines;
 	/* Allocate memory for DMA of head registers to memory */
@@ -2018,6 +2102,7 @@ void sdma_engine_error(struct sdma_engine *sde, u64 status)
 
 static void sdma_sendctrl(struct sdma_engine *sde, unsigned op)
 {
+	struct hfi1_devdata *dd = sde->dd;
 	u64 set_senddmactrl = 0;
 	u64 clr_senddmactrl = 0;
 	unsigned long flags;
@@ -2054,17 +2139,17 @@ static void sdma_sendctrl(struct sdma_engine *sde, unsigned op)
 	if (sdma_single_descriptor)
 		sde->p_senddmactrl |= (1uLL << 5);
 	// conditionally set SDmaThresholdEnable - JKR only
-	if (sdma_threshold && sde->dd->params->chip_type == CHIP_JKR) {
+	if (dd->sdma_threshold) {
 		sde->p_senddmactrl |= (1uLL << 4);
-		write_sde_csr(sde, sde->dd->params->send_dma_priority_thld_reg, sdma_threshold);
+		write_sde_csr(sde, dd->params->send_dma_priority_thld_reg, dd->sdma_threshold);
 	}
 
 	if (op & SDMA_SENDCTRL_OP_CLEANUP)
-		write_sde_csr(sde, sde->dd->params->send_dma_ctrl_reg,
+		write_sde_csr(sde, dd->params->send_dma_ctrl_reg,
 			      sde->p_senddmactrl |
 			      SD(CTRL_SDMA_CLEANUP_SMASK));
 	else
-		write_sde_csr(sde, sde->dd->params->send_dma_ctrl_reg, sde->p_senddmactrl);
+		write_sde_csr(sde, dd->params->send_dma_ctrl_reg, sde->p_senddmactrl);
 
 	spin_unlock_irqrestore(&sde->senddmactrl_lock, flags);
 
@@ -2486,7 +2571,7 @@ static inline u64 add_gen(struct sdma_engine *sde, u64 qw1)
  * first descriptor.
  *
  */
-static inline u16 submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx)
+static inline u16 _submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx, u8 pad)
 {
 	int i;
 	u16 tail;
@@ -2505,11 +2590,11 @@ static inline u16 submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx)
 	for (i = 1; i < tx->num_desc; i++, descp++) {
 		u64 qw[2];
 
-		if (i == tx->num_desc - 1) {
+		if (i == tx->num_desc - 1 && pad) {
 			u16 j;
 
 			qw[0] = sdma_pad.qw[0];
-			for (j = 0; j < tx->num_pad; j++) {
+			for (j = 0; j < pad; j++) {
 				qw[1] = add_gen(sde, sdma_pad.qw[1]);
 				sde->descq[tail].qw[0] = cpu_to_le64(qw[0]);
 				sde->descq[tail].qw[1] = cpu_to_le64(qw[1]);
@@ -2541,8 +2626,16 @@ static inline u16 submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx)
 	WARN_ON_ONCE(sde->tx_ring[sde->tx_tail & sde->sdma_mask]);
 #endif
 	sde->tx_ring[sde->tx_tail++ & sde->sdma_mask] = tx;
-	sde->desc_avail -= tx->num_desc + tx->num_pad;
+	sde->desc_avail -= tx->num_desc + pad;
 	return tail;
+}
+
+static inline u16 submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx)
+{
+	if (sde->dd->pad_sdma_desc)
+		trace_hfi1_sdma_pad(sde->this_idx, 1, sde->dd->pad_sdma_desc,
+				    tx->num_desc, tx->num_pad);
+	return _submit_tx(sde, tx, tx->num_pad);
 }
 
 /*
@@ -2673,26 +2766,75 @@ nodesc:
 int sdma_send_txlist(struct sdma_engine *sde, struct iowait_work *wait,
 		     struct list_head *tx_list, u16 *count_out)
 {
+	struct hfi1_devdata *dd = sde->dd;
 	struct sdma_txreq *tx, *tx_next;
 	int ret = 0;
 	unsigned long flags;
 	u16 tail = INVALID_TAIL;
+	u16 desc_avail;
+	u16 cur_descs;
+	u8 pkts;
 	u32 submit_count = 0, flush_count = 0, total_count;
 
 	spin_lock_irqsave(&sde->tail_lock, flags);
 retry:
+	cur_descs = 0;
+	pkts = 0;
+	desc_avail = sde->desc_avail;
+	if (dd->pad_sdma_desc)
+		desc_avail = round_down(desc_avail, dd->pad_sdma_desc);
+
 	list_for_each_entry_safe(tx, tx_next, tx_list, list) {
+		u8 pad = 0;
+
 		tx->wait = iowait_ioww_to_iow(wait);
 		if (unlikely(!__sdma_running(sde)))
 			goto unlock_noconn;
-		if (unlikely(tx->num_desc + tx->num_pad > sde->desc_avail))
+		if (unlikely(tx->num_desc > desc_avail))
 			goto nodesc;
 		if (unlikely(tx->tlen)) {
 			ret = -EINVAL;
 			goto update_tail;
 		}
 		list_del_init(&tx->list);
-		tail = submit_tx(sde, tx);
+		cur_descs += tx->num_desc;
+		desc_avail -= tx->num_desc;
+		pkts++;
+
+		/*
+		 * Only add padding descriptors to last packet before tail
+		 * update so that tail update is a dd->pad_sdma_desc multiple.
+		 *
+		 * Look ahead to see if the next packet will cause a tail
+		 * update. If so, this packet is the last packet, so pad out
+		 * its descriptors as necessary. The next packet will start its
+		 * own update block.
+		 */
+		if (dd->pad_sdma_desc) {
+			bool last = false;
+
+			/* No more packets */
+			if (list_empty(tx_list))
+				last = true;
+			/* Next packet will goto nodesc, then update_tail */
+			else if (tx_next->num_desc > desc_avail)
+				last = true;
+			/* Next packet will goto update_tail */
+			else if (unlikely(tx_next->tlen))
+				last = true;
+			else if (((submit_count + 1) & SDMA_TAIL_UPDATE_THRESH) == 0)
+				last = true;
+
+			if (last) {
+				pad = (u8)(round_up(cur_descs, dd->pad_sdma_desc) - cur_descs);
+				trace_hfi1_sdma_pad(sde->this_idx, pkts, dd->pad_sdma_desc,
+						    cur_descs, pad);
+				cur_descs += pad;
+				desc_avail -= pad;
+			}
+		}
+
+		tail = _submit_tx(sde, tx, pad);
 		submit_count++;
 		if (tail != INVALID_TAIL &&
 		    (submit_count & SDMA_TAIL_UPDATE_THRESH) == 0) {

@@ -1728,6 +1728,10 @@ struct hfi1_devdata {
 
 	/* Keeps track of IPoIB RSM rule users */
 	DECLARE_BITMAP(rsm_rule_bitmap, MAX_RSM_RULES);
+	/* per-device tuning */
+	int sdma_threshold;
+	int pad_sdma_desc;
+	int sdma_align;
 };
 
 /* 8051 firmware version helper */
