@@ -1084,10 +1084,10 @@ enum {
 };
 
 /* chip specific counter start points - keep a separate range per chip */
-#define WFR_DEV_CNTR_FIRST 0x100
-#define JKR_DEV_CNTR_FIRST 0x200
-#define WFR_PORT_CNTR_FIRST 0x100
-#define JKR_PORT_CNTR_FIRST 0x200
+#define WFR_DEV_CNTR_FIRST 0x200
+#define JKR_DEV_CNTR_FIRST 0x400
+#define WFR_PORT_CNTR_FIRST 0x200
+#define JKR_PORT_CNTR_FIRST 0x400
 
 /* WFR device counter indexes */
 enum {

@@ -1155,6 +1155,28 @@ DEFINE_EVENT(/* complete */
 	TP_ARGS(txq)
 );
 
+TRACE_EVENT(hfi1_sdma_pad,
+	TP_PROTO(u8 idx, u8 pkts, u16 pad, u16 pkt_descs, u16 pad_descs),
+	TP_ARGS(idx, pkts, pad, pkt_descs, pad_descs),
+	TP_STRUCT__entry(
+		__field(u8, idx)
+		__field(u8, pkts)
+		__field(u16, pad)
+		__field(u16, pkt_descs)
+		__field(u16, pad_descs)
+	),
+	TP_fast_assign(
+		__entry->idx = idx;
+		__entry->pkts = pkts;
+		__entry->pad = pad;
+		__entry->pkt_descs = pkt_descs;
+		__entry->pad_descs = pad_descs;
+	),
+	TP_printk("SDE (%u) pkts %u pad_sdma_desc %u packet descriptors %u padding descriptors %u\n",
+		  __entry->idx, __entry->pkts, __entry->pad, __entry->pkt_descs,
+		  __entry->pad_descs)
+);
+
 #endif /* __HFI1_TRACE_TX_H */
 
 #undef TRACE_INCLUDE_PATH
