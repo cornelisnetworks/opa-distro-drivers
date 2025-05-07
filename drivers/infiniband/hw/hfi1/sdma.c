@@ -2056,8 +2056,10 @@ bool sdma_work_pending(struct sdma_engine *sde)
  */
 void sdma_engine_interrupt(struct sdma_engine *sde, u64 status)
 {
+	unsigned long flags;
+
 	trace_hfi1_sdma_engine_interrupt(sde, status);
-	write_seqlock(&sde->head_lock);
+	write_seqlock_irqsave(&sde->head_lock, flags);
 	sdma_set_desc_cnt(sde, sdma_desct_intr);
 	if (status & sde->idle_mask)
 		sde->idle_int_cnt++;
@@ -2066,7 +2068,7 @@ void sdma_engine_interrupt(struct sdma_engine *sde, u64 status)
 	else if (status & sde->int_mask)
 		sde->sdma_int_cnt++;
 	sdma_make_progress(sde, status);
-	write_sequnlock(&sde->head_lock);
+	write_sequnlock_irqrestore(&sde->head_lock, flags);
 }
 
 /**

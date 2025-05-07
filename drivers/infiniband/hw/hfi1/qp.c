@@ -246,14 +246,9 @@ void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 		/*
 		 * Set or replace associated receive context based on the new
 		 * port number.  Note: At call time, qp->port_num is updated,
-		 * but qp->ipqp.port is not updated.
+		 * but qp->ibqp.port is not updated.
 		 */
 		priv->rcd = qp_to_rcd(qp);
-		if (!priv->rcd) {
-			// FIXME: should we error out here?  How?
-			// Even if we error out, we are still vunerable to a NULL rcd.
-			printk("%s: not able to find a rcd for QP 0x%x\n", __func__, qp->ibqp.qp_num);
-		}
 	}
 
 	opfn_qp_init(qp, attr, attr_mask);

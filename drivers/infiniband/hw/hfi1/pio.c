@@ -204,6 +204,7 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 	int cp_total;		/* centipercent total */
 	int ab_total;		/* absolute block total */
 	int extra;
+	int pidx;
 	int i;
 
 	/*
@@ -301,24 +302,33 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 		 * memory available.
 		 */
 		if (count == SCC_PER_KRCVQ) {
-			count = dd->n_krcv_queues * dd->num_pports;
+			count = 0;
+			for (pidx = 0; pidx < dd->num_pports; pidx++)
+				count += dd->pport[pidx].n_krcv_queues;
 		} else if (count == SCC_PER_VL) {
-			count = (INIT_SC_PER_VL * num_vls) * dd->num_pports;
+			count = 0;
+			for (pidx = 0; pidx < dd->num_pports; pidx++) {
+				count += port_available_pidx(dd, pidx) ?
+						INIT_SC_PER_VL * num_vls : 0;
+			}
 		} else if (count == SCC_PER_CPU) {
-			int pidx;
-
 			/* "user" is the user + netdev contexts */
 			count = 0;
 			for (pidx = 0; pidx < dd->num_pports; pidx++)
-				count += dd->pport[pidx].num_rcv_contexts - dd->n_krcv_queues;
+				count += dd->pport[pidx].num_rcv_contexts - dd->pport[pidx].n_krcv_queues;
 		} else if (count < 0) {
 			dd_dev_err(dd,
 				   "%s send context invalid count wildcard %d\n",
 				   sc_type_name(i), count);
 			return -EINVAL;
 		} else {
-			/* config table is per-port - multiply by number of ports */
-			count *= dd->num_pports;
+			/* config table is per-port - add active ports */
+			int port_count = count;
+
+			count = 0;
+			for (pidx = 0; pidx < dd->num_pports; pidx++)
+				count += port_available_pidx(dd, pidx) ?
+						port_count : 0;
 		}
 
 		/* only expect SC_USER to possibly overflow */
@@ -2094,11 +2104,17 @@ int init_pervl_scs(struct hfi1_pportdata *ppd)
 	struct hfi1_devdata *dd = ppd->dd;
 	struct send_context *sc;
 	int i;
-	u64 mask, all_vl_mask = (u64)0x80ff; /* VLs 0-7, 15 */
-	u64 data_vls_mask = (u64)0x00ff; /* VLs 0-7 */
+	u64 mask;
+	const u64 all_vl_mask = (u64)0x80ff; /* VLs 0-7, 15 */
+	const u64 data_vls_mask = (u64)0x00ff; /* VLs 0-7 */
 	u32 ctxt;
-	u8 rcvhdrqentsize = kctxt_hdrqentsize(ppd);
+	u8 rcvhdrqentsize;
 
+	/* do nothing for an unavailable port */
+	if (!port_available_ppd(ppd))
+		return 0;
+
+	rcvhdrqentsize = kctxt_hdrqentsize(ppd);
 	ppd->vld[15].sc = sc_alloc(ppd, SC_VL15, rcvhdrqentsize, dd->node);
 	if (!ppd->vld[15].sc)
 		return -ENOMEM;

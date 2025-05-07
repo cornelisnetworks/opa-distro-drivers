@@ -65,7 +65,7 @@ bool hfi1_can_pin_pages(struct hfi1_devdata *dd, struct mm_struct *mm,
 		 */
 		usr_ctxts = 0;
 		for (pidx = 0; pidx < dd->num_pports; pidx++)
-			usr_ctxts += dd->pport[pidx].num_rcv_contexts - dd->n_krcv_queues;
+			usr_ctxts += dd->pport[pidx].num_rcv_contexts - dd->pport[pidx].n_krcv_queues;
 		if (nlocked + npages > (ulimit_pages / usr_ctxts / 4))
 			return false;
 	}

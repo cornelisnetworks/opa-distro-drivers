@@ -923,6 +923,10 @@ struct hfi1_pportdata {
 	u16 num_user_contexts;
 	/* Lowest context number which can be used by user processes or VNIC */
 	u16 first_dyn_alloc_ctxt;
+	/* number of kernel recieve queues (includes control context) */
+	u16 n_krcv_queues;
+	/* number of reserved contexts for netdev usage */
+	u16 num_netdev_contexts;
 	/* current number of receive user ctxts available for this port */
 	u32 freectxts;
 	/* starting RcvArray entry for this port */
@@ -1466,8 +1470,6 @@ struct hfi1_devdata {
 	u64 z_send_schedule;
 
 	u64 __percpu *send_schedule;
-	/* number of reserved contexts for netdev usage */
-	u16 num_netdev_contexts;
 	/* number of pio send contexts in use by the driver */
 	u32 num_send_contexts;
 	/* first RcvArray entroy to use */
@@ -1569,7 +1571,6 @@ struct hfi1_devdata {
 	u16 vl15buf_cached;
 
 	/* Misc small ints */
-	u16 n_krcv_queues;
 
 	u16 irev;	/* implementation revision */
 	u32 dc8051_ver; /* 8051 firmware version */
@@ -1829,6 +1830,19 @@ void hfi1_make_ud_req_16B(struct rvt_qp *qp,
 			  struct hfi1_pkt_state *ps,
 			  struct rvt_swqe *wqe);
 
+/* return true if the port is available for use */
+static inline bool port_available_ppd(struct hfi1_pportdata *ppd)
+{
+	/* check is only valid after set_up_context_variables() is called */
+	return ppd->n_krcv_queues != 0;
+}
+
+/* return true if the port index available for use */
+static inline bool port_available_pidx(struct hfi1_devdata *dd, int pidx)
+{
+	return port_available_ppd(&dd->pport[pidx]);
+}
+
 /* receive packet handler dispositions */
 #define RCV_PKT_OK      0x0 /* keep going */
 #define RCV_PKT_LIMIT   0x1 /* stop, hit limit, start thread */
@@ -1934,15 +1948,21 @@ static inline u8 get_hdrqentsize(struct hfi1_ctxtdata *rcd)
 	return rcd->rcvhdrqentsize;
 }
 
+#define DEFAULT_HDRQ_ENTSIZE 32
 /**
  * kctxt_hdrqentsize - return hdrq entry size for a port kernel context
  * @ppd: target port structure
  */
 static inline u8 kctxt_hdrqentsize(struct hfi1_pportdata *ppd)
 {
-	/* use port's first rcv context */
-	struct hfi1_ctxtdata *rcd = ppd->dd->rcd[ppd->rcv_context_base];
+	struct hfi1_ctxtdata *rcd;
 
+	/* use default if port not available */
+	if (!port_available_ppd(ppd))
+		return DEFAULT_HDRQ_ENTSIZE;
+
+	/* use port's first rcv context */
+	rcd = ppd->dd->rcd[ppd->rcv_context_base];
 	return get_hdrqentsize(rcd);
 }
 
@@ -2610,6 +2630,7 @@ extern struct mutex hfi1_mutex;
 #define PCI_DEVICE_ID_INTEL1 0x24f1
 #define PCI_VENDOR_ID_CORNELIS 0x434e
 #define PCI_DEVICE_ID_CORNELIS1 0x0001
+#define PCI_SUBDEVICE_CN5000_DUAL_PORT 0x0002
 
 /* create a ULL mask out of the given number of bits */
 #define MASK_ULL(bits) ((1ull << (bits)) - 1)
