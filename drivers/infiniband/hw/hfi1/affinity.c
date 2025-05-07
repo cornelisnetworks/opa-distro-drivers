@@ -631,6 +631,8 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 			cpumask_set_cpu(curr_cpu, &entry->rcv_intr.mask);
 			cpumask_set_cpu(curr_cpu, &entry->general_intr_mask);
 		} else {
+			int count;
+
 			/*
 			 * The general/control context will be the first CPU in
 			 * the default list, so it is removed from the default
@@ -642,13 +644,26 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 						&entry->def_intr.mask);
 
 			/*
+			 * This count determination is fine for single cards,
+			 * but makes following assumption for multiple cards:
+			 *
+			 * Each hfi1 device has the same number of ports with
+			 * the same number of kernel contexts as the current
+			 * one.  However, JKR has 1 or 2 ports, depending on
+			 * the card type and user enable, while WFR always has
+			 * 1 port.
+			 */
+			count = 0;
+			for (i = 0; i < dd->num_pports; i++)
+				if (dd->pport[i].n_krcv_queues)
+					count += dd->pport[i].n_krcv_queues - 1;
+			count *= hfi1_per_node_cntr[dd->node];
+
+			/*
 			 * Remove the remaining kernel receive queues from
 			 * the default list and add them to the receive list.
 			 */
-			for (i = 0;
-			     i < (dd->n_krcv_queues - 1) *
-				  hfi1_per_node_cntr[dd->node];
-			     i++) {
+			for (i = 0; i < count; i++) {
 				cpumask_clear_cpu(curr_cpu,
 						  &entry->def_intr.mask);
 				cpumask_set_cpu(curr_cpu,

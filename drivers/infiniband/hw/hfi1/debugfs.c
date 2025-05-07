@@ -99,7 +99,7 @@ static int _opcode_stats_seq_show(struct seq_file *s, void *v)
 	int pidx;
 
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		for (j = 0; j < dd->n_krcv_queues; j++) {
+		for (j = 0; j < dd->pport[pidx].n_krcv_queues; j++) {
 			u16 ctxt = dd->pport[pidx].rcv_context_base + j;
 
 			rcd = hfi1_rcd_get_by_index(dd, ctxt);

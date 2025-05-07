@@ -526,7 +526,7 @@ static uint rcvhdrcnt = 2048; /* 2x the max eager buffer count */
 module_param_named(rcvhdrcnt, rcvhdrcnt, uint, S_IRUGO);
 MODULE_PARM_DESC(rcvhdrcnt, "Receive header queue count (default 2048)");
 
-static uint hfi1_hdrq_entsize = 32;
+static uint hfi1_hdrq_entsize = DEFAULT_HDRQ_ENTSIZE;
 module_param_named(hdrq_entsize, hfi1_hdrq_entsize, uint, 0444);
 MODULE_PARM_DESC(hdrq_entsize, "Size of header queue entries: 2 - 8B, 16 - 64B, 32 - 128B (default)");
 
@@ -793,7 +793,7 @@ int hfi1_create_kctxts(struct hfi1_devdata *dd)
 	for (i = 0; i < dd->num_pports; i++) {
 		struct hfi1_pportdata *ppd = dd->pport + i;
 
-		for (j = 0; j < dd->n_krcv_queues; j++) {
+		for (j = 0; j < ppd->n_krcv_queues; j++) {
 			u16 ctxt = ppd->rcv_context_base + j;
 
 			ret = hfi1_create_kctxt(ppd, ctxt);
@@ -807,7 +807,7 @@ bail:
 	for (i = 0; i < dd->num_pports; i++) {
 		struct hfi1_pportdata *ppd = dd->pport + i;
 
-		for (j = 0; j < dd->n_krcv_queues; j++) {
+		for (j = 0; j < ppd->n_krcv_queues; j++) {
 			u16 ctxt = ppd->rcv_context_base + j;
 
 			hfi1_free_ctxt(dd->rcd[ctxt]);
@@ -1350,7 +1350,7 @@ static void enable_chip(struct hfi1_devdata *dd)
 	for (i = 0; i < dd->num_pports; i++) {
 		struct hfi1_pportdata *ppd = dd->pport + i;
 
-		for (j = 0; j < dd->n_krcv_queues; j++) {
+		for (j = 0; j < ppd->n_krcv_queues; j++) {
 			u16 ctxt = ppd->rcv_context_base + j;
 
 			rcd = hfi1_rcd_get_by_index(dd, ctxt);
@@ -1539,7 +1539,7 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 	for (pidx = 0; dd->rcd && pidx < dd->num_pports; pidx++) {
 		ppd = dd->pport + pidx;
 
-		for (i = 0; i < dd->n_krcv_queues; ++i) {
+		for (i = 0; i < ppd->n_krcv_queues; ++i) {
 			u16 ctxt = ppd->rcv_context_base + i;
 			/*
 			 * Set up the (kernel) rcvhdr queue and egr TIDs.  If
