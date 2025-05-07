@@ -368,14 +368,6 @@ int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 	INIT_LIST_HEAD(&qpriv->tid_wait);
 
 	if (init_attr->qp_type == IB_QPT_RC && HFI1_CAP_IS_KSET(TID_RDMA)) {
-		// FIXME: This is not going to work if there is no rcd.
-		// Maybe use another way to get dd?  This, for example:
-		//struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
-		// FIXME: does anything else in this sequence need qpriv->rcd?
-		// Yes, dammit:
-		// 1. hfi1_init_trdma_req() [in both loops!] assigns rcd in
-		//    each priv->tid_req in loop.
-		//
 		struct hfi1_devdata *dd = qpriv->rcd->dd;
 
 		qpriv->pages = kzalloc_node(TID_RDMA_MAX_PAGES *
@@ -701,14 +693,8 @@ void hfi1_tid_rdma_flush_wait(struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 
-	if (!priv->rcd) {
-		struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
-		/* if no context, then nothing to flush */
-		// FIXME: should I print anything at all?
-		dd_dev_err(dd, "%s: no rcd for QP 0x%x\n", __func__,
-			   qp->ibqp.qp_num);
+	if (!priv->rcd)
 		return;
-	}
 	_tid_rdma_flush_wait(qp, &priv->rcd->flow_queue);
 	_tid_rdma_flush_wait(qp, &priv->rcd->rarr_queue);
 }
