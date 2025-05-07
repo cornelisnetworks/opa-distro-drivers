@@ -241,6 +241,10 @@ static void check_cport_state(struct work_struct *work)
 #endif
 
 	for (pidx = 0; pidx < dd->params->num_ports; ++pidx) {
+		if (!port_available_pidx(dd, pidx)) {
+			ppd_dev_info(&dd->pport[pidx], "Skipping port state check - port not available\n");
+			continue;
+		}
 		mad = cport_get_portinfo(dd, pidx + 1);
 		if (IS_ERR(mad)) {
 			ret = PTR_ERR(mad);

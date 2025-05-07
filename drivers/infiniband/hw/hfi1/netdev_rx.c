@@ -194,14 +194,15 @@ static int hfi1_netdev_rxq_init(struct hfi1_netdev_rx *rx)
 	int i;
 	int rc;
 	struct hfi1_devdata *dd = rx->dd;
-	struct net_device *dev = rx->rx_napi;
+	struct hfi1_pportdata *ppd = rx->ppd;
+	struct net_device *dev = &rx->rx_napi;
 
-	rx->num_rx_q = dd->num_netdev_contexts;
+	rx->num_rx_q = ppd->num_netdev_contexts;
 	rx->rxq = kcalloc_node(rx->num_rx_q, sizeof(*rx->rxq),
 			       GFP_KERNEL, dd->node);
 
 	if (!rx->rxq) {
-		dd_dev_err(dd, "Unable to allocate netdev queue data\n");
+		ppd_dev_err(ppd, "Unable to allocate netdev queue data\n");
 		return (-ENOMEM);
 	}
 
@@ -215,7 +216,7 @@ static int hfi1_netdev_rxq_init(struct hfi1_netdev_rx *rx)
 		hfi1_rcd_get(rxq->rcd);
 		rxq->rx = rx;
 		rxq->rcd->napi = &rxq->napi;
-		dd_dev_info(dd, "Setting rcv queue %d napi to context %d\n",
+		ppd_dev_info(ppd, "Setting rcv queue %d napi to context %d\n",
 			    i, rxq->rcd->ctxt);
 		/*
 		 * Disable BUSY_POLL on this NAPI as this is not supported
@@ -231,7 +232,7 @@ static int hfi1_netdev_rxq_init(struct hfi1_netdev_rx *rx)
 	return 0;
 
 bail_context_irq_failure:
-	dd_dev_err(dd, "Unable to allot receive context\n");
+	ppd_dev_err(ppd, "Unable to allot receive context\n");
 	hfi1_netdev_rxq_deinit(rx);
 	return rc;
 }

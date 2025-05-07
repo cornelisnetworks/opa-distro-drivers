@@ -258,7 +258,9 @@ int cport_send_req(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, i
 {
 	int ret;
 	struct cport_work *msg;
-	DEFINE_SEMAPHORE(comp, 0);
+	struct semaphore comp;
+
+	sema_init(&comp, 0);
 
 	might_sleep();
 
@@ -753,6 +755,9 @@ int cport_exit(struct hfi1_devdata *dd)
 {
 	if (!dd->cport)
 		return 0;
+
+	/* flush all cport queued tasks (plus anything else on this queue) */
+	flush_workqueue(dd->hfi1_wq);
 
 	/* Disable intr source for MCTXT from CPORT (to PF0) */
 	set_intr_bits(dd, JKR_MCTXT_CPORT_TO_PCIE_INT, JKR_MCTXT_CPORT_TO_PCIE_INT, false);

@@ -17,6 +17,7 @@ int msix_initialize(struct hfi1_devdata *dd)
 {
 	u32 total;
 	int ret;
+	int pidx;
 	struct hfi1_msix_entry *entries;
 
 	/*
@@ -27,8 +28,9 @@ int msix_initialize(struct hfi1_devdata *dd)
 	 *	one for each VNIC context
 	 *      ...any new IRQs should be added here.
 	 */
-	total = 1 + dd->num_sdma + (dd->num_pports *
-		(dd->n_krcv_queues + dd->num_netdev_contexts));
+	total = 1 + dd->num_sdma;
+	for (pidx = 0; pidx < dd->num_pports; pidx++)
+		total += dd->pport[pidx].n_krcv_queues + dd->pport[pidx].num_netdev_contexts;
 
 	if (total >= CCE_NUM_MSIX_VECTORS)
 		return -EINVAL;
@@ -291,7 +293,7 @@ int msix_request_irqs(struct hfi1_devdata *dd)
 	}
 
 	for (i = 0; i < dd->num_pports; i++) {
-		for (j = 0; j < dd->n_krcv_queues; j++) {
+		for (j = 0; j < dd->pport[i].n_krcv_queues; j++) {
 			u16 ctxt = dd->pport[i].rcv_context_base + j;
 			struct hfi1_ctxtdata *rcd = hfi1_rcd_get_by_index(dd, ctxt);
 
