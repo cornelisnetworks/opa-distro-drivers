@@ -10233,6 +10233,10 @@ static void set_send_length(struct hfi1_pportdata *ppd)
 	int i, j;
 	u32 thres;
 
+	/* per-vl send contexts are not present if port is not available */
+	if (!port_available_ppd(ppd))
+		return;
+
 	for (i = 0; i < ppd->vls_supported; i++) {
 		if (ppd->vld[i].mtu > maxvlmtu)
 			maxvlmtu = ppd->vld[i].mtu;
@@ -13689,6 +13693,22 @@ static int reduce_rcv_ctxts(struct hfi1_devdata *dd, u32 *counts, int amount,
 	return ret;
 }
 
+/* return true if the fabric is reachable on the card */
+/* this function does not range validate pidx */
+static bool hardware_pidx_available(struct hfi1_devdata *dd, int pidx)
+{
+	/* only need to check JKR */
+	if (dd->params->chip_type != CHIP_JKR)
+		return true;
+
+	/* dual port JKR has all ports available */
+	if (dd->pcidev->subsystem_device == PCI_SUBDEVICE_CN5000_DUAL_PORT)
+		return true;
+
+	/* single port JKR only has port 2 available */
+	return pidx == 1;
+}
+
 /*
  * Decide how to divide resources between ports.  Resources include
  * receive contexts, RSM table, RcvArray, and send contexts.
@@ -13703,12 +13723,12 @@ static int reduce_rcv_ctxts(struct hfi1_devdata *dd, u32 *counts, int amount,
  * These fields are set:
  *
  * dd:
- *   n_krcv_queues	  - number of kernel contexts for each port
- *			      (includes control context)
- *   num_netdev_contexts  - number of reserved netdev contexts for each port
  *   rcv_entries	  - details on RcvArray entries for each port
  *   num_send_contexts	  - number of PIO send contexts being used
  * ppd:
+ *   n_krcv_queues	  - number of kernel contexts for each port
+ *			      (includes control context)
+ *   num_netdev_contexts  - number of reserved netdev contexts for each port
  *   num_rcv_contexts	  - number of contexts being used for this port
  *   num_user_conexts	  - number of user contexts for this port
  *   rcv_context_base	  - first context for this port
@@ -13719,89 +13739,76 @@ static int reduce_rcv_ctxts(struct hfi1_devdata *dd, u32 *counts, int amount,
  */
 static int set_up_context_variables(struct hfi1_devdata *dd)
 {
-	unsigned long num_kernel_contexts;
-	u16 num_netdev_contexts;
+	u32 num_kernel_contexts[LARGEST_NUM_PORTS];
+	u32 num_netdev_contexts[LARGEST_NUM_PORTS];
+	u32 def_kernel_contexts;
+	u32 def_netdev_contexts;
 	int ret;
 	int pidx;
 	int base;
 	int rmt_count;
 	int rcv_pool_count;
+	int total_netdev;
 	int rcvarray_avail;
 	int max_eager_allowed;
 	int total_groups;
 	int over;
 	char *limited;
-	u32 per_port_send;
 	u32 total_rcv;
-	u32 sc_needed;
 	u32 n_usr_ctxts[LARGEST_NUM_PORTS];
 	u32 send_contexts = chip_send_contexts(dd) - dd->first_send_context;
 	u32 rcv_contexts = chip_rcv_contexts(dd) - dd->first_rcv_context;
 	bool recalculated = false;
 
 	/*
-	 * Calculate the number of per-port kernel receive contexts.
+	 * Calculate the default number of per-port kernel receive contexts.
+	 *
+	 * n_krcvqs is the sum of module parameter kernel receive contexts,
+	 * krcvqs[].  It does not include the control context, so add that.
 	 */
 	if (n_krcvqs)
-		/*
-		 * n_krcvqs is the sum of module parameter kernel receive
-		 * contexts, krcvqs[].  It does not include the control
-		 * context, so add that.
-		 */
-		num_kernel_contexts = n_krcvqs + 1;
+		def_kernel_contexts = n_krcvqs + 1;
 	else
-		num_kernel_contexts = DEFAULT_KRCVQS + 1;
-	/*
-	 * Every kernel receive context needs an ACK send context.
-	 * For each port, one send context is allocated for each VL{0-7} and
-	 * VL15.
-	 */
-	per_port_send = num_kernel_contexts + num_vls + 1;
-	sc_needed = dd->num_pports * per_port_send;
-	if (send_contexts < sc_needed) {
-		int reduce;
+		def_kernel_contexts = DEFAULT_KRCVQS + 1;
 
-		over = sc_needed - send_contexts;
-		reduce = DIV_ROUND_UP(over, dd->num_pports);
-
-		/* this can go negative if not enough send contexts */
-		if ((long)num_kernel_contexts - (long)reduce < 2) {
-			dd_dev_err(dd,
-				   "Cannot allocate enough send contexts, have %d, need %d\n",
-				   send_contexts,
-				   sc_needed);
-			return -EINVAL;
-		}
-		dd_dev_err(dd,
-			   "Reducing # kernel rcv contexts from %lu to %lu\n",
-			   num_kernel_contexts,
-			   num_kernel_contexts - reduce);
-		num_kernel_contexts -= reduce;
-	}
+	def_netdev_contexts = hfi1_num_netdev_contexts(dd,
+						       HFI1_MAX_NETDEV_CTXTS,
+						       &node_affinity.real_cpu_mask);
 
 	/* obtain requested user context numbers from module parameters */
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		int count = get_num_user_contexts(dd, pidx);
 		/*
-		 * Per-port user contexts defaults to negative if unset.
+		 * Per-port user contexts defaults to negative if unset in
+		 * the module parameter.
+		 * - unavailable ports always have zero user contexts no
+		 *   matter what the parameter says
 		 * - default to 1 user context per real (non-HT) CPU core
-		 * - else use the module parameter
 		 */
+		if (!hardware_pidx_available(dd, pidx))
+			count = 0;
 		if (count < 0)
 			count = cpumask_weight(&node_affinity.real_cpu_mask);
 		n_usr_ctxts[pidx] = count;
+
+		/* no user contexts implies no port */
+		if (count == 0) {
+			num_kernel_contexts[pidx] = 0;
+			num_netdev_contexts[pidx] = 0;
+		} else {
+			num_kernel_contexts[pidx] = def_kernel_contexts;
+			num_netdev_contexts[pidx] = def_netdev_contexts;
+		}
 	}
 
 do_recalc:
 	/*
 	 * Adjust the counts given a global max.
 	 */
-	num_netdev_contexts =
-		hfi1_num_netdev_contexts(dd, HFI1_MAX_NETDEV_CTXTS,
-					 &node_affinity.real_cpu_mask);
 	total_rcv = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		total_rcv += num_kernel_contexts + num_netdev_contexts +
+		total_rcv += num_kernel_contexts[pidx] +
+			     num_netdev_contexts[pidx] +
 			     n_usr_ctxts[pidx];
 	}
 
@@ -13828,12 +13835,15 @@ do_recalc:
 	 */
 	rmt_count = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
+		/* no RMT used if port is not available */
+		if (num_kernel_contexts[pidx] == 0)
+			continue;
 		rmt_count += (HFI1_CAP_IS_KSET(TID_RDMA)
-					? (num_kernel_contexts - 1) : 0)
+					? (num_kernel_contexts[pidx] - 1) : 0)
 			     + n_usr_ctxts[pidx]
-			     + num_netdev_contexts
+			     + num_netdev_contexts[pidx]
 			     + NUM_NETDEV_MAP_ENTRIES
-			     + qos_rmt_entries(num_kernel_contexts - 1, NULL, NULL);
+			     + qos_rmt_entries(num_kernel_contexts[pidx] - 1, NULL, NULL);
 	}
 
 	if (rmt_count > NUM_MAP_ENTRIES) {
@@ -13848,31 +13858,29 @@ do_recalc:
 	 * user/netdev contexts
 	 */
 
-	/* some context resources are symmetric */
-	dd->n_krcv_queues = num_kernel_contexts;
-	dd->num_netdev_contexts = num_netdev_contexts;
-
 	dd_dev_info(dd, "rcv contexts: avail %d\n", rcv_contexts);
 	base = dd->first_rcv_context;
 	total_rcv = 0; /* recalculate */
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		struct hfi1_pportdata *ppd = &dd->pport[pidx];
 
-		ppd->num_rcv_contexts = num_kernel_contexts +
-					num_netdev_contexts +
+		ppd->n_krcv_queues = num_kernel_contexts[pidx];
+		ppd->num_netdev_contexts = num_netdev_contexts[pidx];
+		ppd->num_rcv_contexts = num_kernel_contexts[pidx] +
+					num_netdev_contexts[pidx] +
 					n_usr_ctxts[pidx];
 		ppd->num_user_contexts = n_usr_ctxts[pidx];
 		ppd->rcv_context_base = base;
 		ppd->freectxts = ppd->num_user_contexts;
 		ppd->first_dyn_alloc_ctxt = ppd->rcv_context_base
-					    + num_kernel_contexts;
+					    + num_kernel_contexts[pidx];
 		dd_dev_info(dd,
 			    "  pidx[%d]: base %d, used %d (kernel %d, netdev %u, user %u)\n",
 			    pidx,
 			    ppd->rcv_context_base,
 			    ppd->num_rcv_contexts,
-			    dd->n_krcv_queues,
-			    dd->num_netdev_contexts,
+			    ppd->n_krcv_queues,
+			    ppd->num_netdev_contexts,
 			    ppd->num_user_contexts);
 
 		base += ppd->num_rcv_contexts;
@@ -13893,7 +13901,10 @@ do_recalc:
 	dd->rcv_entries.group_size = RCV_INCREMENT;
 	rcvarray_avail = chip_rcv_array_count(dd) - dd->first_rcvarray_entry;
 	total_groups = rcvarray_avail / dd->rcv_entries.group_size;
-	dd->rcv_entries.ngroups = total_groups / total_rcv;
+	if (total_rcv)
+		dd->rcv_entries.ngroups = total_groups / total_rcv;
+	else
+		dd->rcv_entries.ngroups = 0; /* alternate: total_groups */
 	max_eager_allowed = dd->params->max_eager_entries * 2;
 	if (dd->rcv_entries.ngroups * dd->rcv_entries.group_size >
 	    max_eager_allowed) {
@@ -13939,16 +13950,17 @@ do_recalc:
 	 * context count and go back to re-calculate the resources.
 	 */
 	rcv_pool_count = 0;
+	total_netdev = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		struct hfi1_pportdata *ppd = &dd->pport[pidx];
 
-		rcv_pool_count += dd->num_netdev_contexts + ppd->num_user_contexts;
+		rcv_pool_count += ppd->num_netdev_contexts + ppd->num_user_contexts;
+		total_netdev += ppd->num_netdev_contexts;
 	}
 
 	if (rcv_pool_count > dd->sc_sizes[SC_USER].count) {
 		const char *action = recalculated ? "fail"
 						  : "recalculating";
-		int total_netdev = dd->num_netdev_contexts * dd->num_pports;
 
 		dd_dev_info(dd, "too many user rc %d vs sc %d - %s",
 			    rcv_pool_count,
@@ -14965,7 +14977,9 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 
 	if (!rmt)
 		goto bail;
-	rmt_entries = qos_rmt_entries(dd->n_krcv_queues - 1, &m, &n);
+	if (!ppd->n_krcv_queues)
+		goto bail;
+	rmt_entries = qos_rmt_entries(ppd->n_krcv_queues - 1, &m, &n);
 	if (rmt_entries == 0)
 		goto bail;
 	qpns_per_vl = 1 << m;
@@ -15039,9 +15053,11 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 bail:
 	ppd->qos_shift = 1;
 
-	/* map everything to this port's kernel contexts */
-	init_qpmap_table(ppd, ppd->rcv_context_base + FIRST_KERNEL_KCTXT,
-			 ppd->rcv_context_base + dd->n_krcv_queues - 1);
+	if (ppd->n_krcv_queues) {
+		/* map everything to this port's kernel contexts */
+		init_qpmap_table(ppd, ppd->rcv_context_base + FIRST_KERNEL_KCTXT,
+				 ppd->rcv_context_base + ppd->n_krcv_queues - 1);
+	}
 }
 
 static void init_qos(struct hfi1_devdata *dd, struct rsm_map_table *rmt)
@@ -15075,6 +15091,10 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 	u8 offset;
 	u32 total_cnt;
 	int rule_index;
+
+	/* do nothing if port is not availble */
+	if (!port_available_ppd(ppd))
+		return;
 
 	if (HFI1_CAP_IS_KSET(TID_RDMA))
 		/* Exclude control context */
@@ -16104,7 +16124,7 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 
 	ret = start_cport(dd);
 	if (ret)
-		goto bail_cleanup;
+		goto bail_clean_early_intr;
 
 	/* needs to be done before we look for the peer device */
 	dd->params->read_guid(dd);
