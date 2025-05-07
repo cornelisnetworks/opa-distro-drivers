@@ -509,6 +509,16 @@ void hfi1_do_send(struct rvt_qp *qp, bool in_thread)
 	ps.dev = to_idev(qp->ibqp.device);
 	ps.ibp = to_iport(qp->ibqp.device, qp->port_num);
 	ps.ppd = ppd_from_ibp(ps.ibp);
+	/* complete with error any sends that arrive on an unavailable port */
+	if (!port_available_ppd(ps.ppd)) {
+		struct rvt_swqe *wqe;
+
+		if (qp->s_last != READ_ONCE(qp->s_head)) {
+			wqe = rvt_get_swqe_ptr(qp, qp->s_last);
+			rvt_send_complete(qp, wqe, IB_WC_GENERAL_ERR);
+		}
+		return;
+	}
 	ps.in_thread = in_thread;
 	ps.wait = iowait_get_ib_work(&priv->s_iowait);
 

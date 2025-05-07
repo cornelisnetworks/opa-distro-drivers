@@ -95,22 +95,12 @@ static void free_system_node(struct sdma_mmu_node *e)
 }
 
 /*
- * It is not enough for @n to overlap [start,end), it must be the least node
- * that overlaps [start,end). I.e. if rb_prev(@n) also overlaps [start,end)
- * then @n is not the least node.
+ * A valid @n covers the @start and at least some of [@start, @end)
  */
 static bool covered_by(struct mmu_rb_node *n, unsigned long start,
 		       unsigned long end)
 {
-	if (n->addr < end && start < (n->addr + n->len)) {
-		struct mmu_rb_node *p = NULL;
-
-		if (rb_prev(&n->node))
-			p = container_of(rb_prev(&n->node), struct mmu_rb_node, node);
-		if (!p || (p->addr + p->len) <= start)
-			return true;
-	}
-	return false;
+	return n->addr <= start && start < (n->addr + n->len);
 }
 
 /*

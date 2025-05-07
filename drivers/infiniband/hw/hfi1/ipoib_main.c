@@ -245,19 +245,21 @@ int hfi1_ipoib_rn_get_params(struct ib_device *device,
 			     struct rdma_netdev_alloc_params *params)
 {
 	struct hfi1_devdata *dd = dd_from_ibdev(device);
+	struct hfi1_pportdata *ppd;
 
 	if (type != RDMA_NETDEV_IPOIB)
 		return -EOPNOTSUPP;
 
-	if (!HFI1_CAP_IS_KSET(AIP) || !dd->num_netdev_contexts)
-		return -EOPNOTSUPP;
-
 	if (!port_num || port_num > dd->num_pports)
 		return -EINVAL;
+	ppd = &dd->pport[port_num - 1];
+
+	if (!HFI1_CAP_IS_KSET(AIP) || !ppd->num_netdev_contexts)
+		return -EOPNOTSUPP;
 
 	params->sizeof_priv = sizeof(struct hfi1_ipoib_rdma_netdev);
 	params->txqs = dd->num_sdma;
-	params->rxqs = dd->num_netdev_contexts;
+	params->rxqs = ppd->num_netdev_contexts;
 	params->param = NULL;
 	params->initialize_rdma_netdev = hfi1_ipoib_setup_rn;
 
