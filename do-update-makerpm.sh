@@ -111,7 +111,7 @@ if [[ $build_nvidia = y ]]; then
 fi
 
 if [[ $build_amd = y ]]; then
-	rpmrelease+="amd"
+	rpmrelease+="rocm"
 fi
 
 # after cd, where are we *really*
