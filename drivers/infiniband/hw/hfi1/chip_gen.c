@@ -687,9 +687,7 @@ int gen_init_rctxt_egr(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt,
 		JKR_RCV_KCTXT_CTRL_RECEIVE_CUT_THROUGH_DISABLE_SMASK;
 	write_kctxt_csr(dd, ctxt, dd->params->rcv_kctxt_ctrl_reg, kreg);
 
-	reg = ((u64)(ra_cnt >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_CNT_SHIFT) |
-	      ((u64)(ra_base >> RCV_SHIFT) << RCV_EGR_CTRL_EGR_BASE_INDEX_SHIFT);
-	write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, reg);
+	dd->params->set_port_tid_config(dd, pidx, ctxt, ra_base, ra_cnt, 0, 0);
 	jkr_upd_rcv_hdr_size(dd, pidx, ctxt, hdr_size);
 
 	reg = RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
@@ -760,9 +758,16 @@ int gen_start_rctxt_egr(struct hfi1_devdata *dd, u8 pidx, u16 ctxt,
 	u16 order;
 	u32 off;
 	u64 reg;
-	u32 r_each, r_size;
+	u32 r_each, r_size, etail;
 	dma_addr_t r_dma;
 	int idx;
+
+	/* cleanup from anything sent while no driver */
+	etail = read_uctxt_csr(dd, ctxt, JKR_RCV_EGR_INDEX_TAIL) & 0xffff;
+	if (etail)
+		update_usrhead_ctxt(dd, ctxt, 0, 1, 1, etail);
+	/* just clear overflow coount - can't do anything else */
+	write_kctxt_csr(dd, ctxt, dd->params->rcv_hdr_ovfl_cnt_reg, 0);
 
 	/* assumes RCV_CTXT_CTRL_ONE_PACKET_PER_EGR_BUFFER_SMASK is set */
 	r_each = bufs->egr_buf_size;
