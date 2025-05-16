@@ -18,9 +18,9 @@
 #endif
 
 /* TODO: this may not be for production */
-bool vf2pf_lb;
+bool vf2pf_lb = true;
 module_param_named(vf2pf_lb, vf2pf_lb, bool, 0644);
-MODULE_PARM_DESC(vf2pf_lb, "Enable use of loopback port for VF-PF, default N (off)");
+MODULE_PARM_DESC(vf2pf_lb, "Enable use of loopback port for VF-PF, default Y (on)");
 
 uint vf2pf_to = 1;
 module_param_named(vf2pf_to, vf2pf_to, uint, 0644);

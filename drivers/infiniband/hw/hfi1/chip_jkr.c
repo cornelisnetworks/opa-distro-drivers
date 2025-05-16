@@ -682,7 +682,7 @@ void jkr_set_port_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
 	 */
 	reg = (u64)(expected_count >> RCV_SHIFT);
 	write_iprc_csr(dd, pidx, ctxt, JKR_RCV_TID_PAIR_COUNT, reg);
-	if (dd->is_sriov)
+	if (dd->is_sriov && pidx < dd->num_pports)
 		write_iprc_csr(dd, loopback_pidx_dd(dd, pidx),
 			       ctxt, JKR_RCV_TID_PAIR_COUNT, reg);
 }
