@@ -74,7 +74,7 @@ if [[ $distro == "RHEL" ]]; then
 	
 	kdir=$bdir/$new_name
 
-elif [[ $distro == "SLES" ]]; then
+elif [[ $distro == "SLES" || $distro == "Ubuntu" ]]; then
 	gitr=$2
 	cd $gitr
 	echo "going to copy:"
