@@ -572,11 +572,6 @@ void is_cport_int(struct hfi1_devdata *dd, unsigned int source)
 		up(&dd->cport->outbox);
 }
 
-void is_cport_name(char *buf, size_t bsize, unsigned int source)
-{
-	snprintf(buf, bsize, "cport");
-}
-
 /***************************************************
  * API for handling notifications from CPORT
  */

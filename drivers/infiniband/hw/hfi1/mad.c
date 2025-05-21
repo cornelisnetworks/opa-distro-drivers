@@ -4953,7 +4953,7 @@ static int hfi1_process_ib_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 	return ret;
 }
 
-const char *smp_attr_id_str(u16 attr_id)
+static const char *smp_attr_id_str(u16 attr_id)
 {
 	const char *s = "Unknown";
 
@@ -5023,7 +5023,7 @@ const char *smp_attr_id_str(u16 attr_id)
 	return s;
 }
 
-const char *sa_attr_id_str(u16 attr_id)
+static const char *sa_attr_id_str(u16 attr_id)
 {
 	const char *s = "Unknown";
 
@@ -5045,7 +5045,7 @@ const char *sa_attr_id_str(u16 attr_id)
 	return s;
 }
 
-const char *pma_attr_id_str(u16 attr_id)
+static const char *pma_attr_id_str(u16 attr_id)
 {
 	const char *s = "Unknown";
 
@@ -5076,7 +5076,7 @@ const char *pma_attr_id_str(u16 attr_id)
 	return s;
 }
 
-void print_mad(struct hfi1_devdata *dd, u32 port, const struct ib_mad *in_mad,
+static void print_mad(struct hfi1_devdata *dd, u32 port, const struct ib_mad *in_mad,
 	       const char *caller, bool rcv)
 {
 	const char *bv;
@@ -5174,7 +5174,8 @@ void print_mad(struct hfi1_devdata *dd, u32 port, const struct ib_mad *in_mad,
 		  method_str, extra, be64_to_cpu(in_mad->mad_hdr.tid));
 }
 
-void print_mad_ret(struct hfi1_devdata *dd, u32 port, struct ib_mad *out_mad,
+#ifdef CPORT_MAD_TRACE
+static void print_mad_ret(struct hfi1_devdata *dd, u32 port, struct ib_mad *out_mad,
 		   int ret, const char *caller)
 {
 	pr_notice("hfi1_%u.%u: %s: ret %d [ %s%s%s%s] (%x)\n",
@@ -5185,6 +5186,7 @@ void print_mad_ret(struct hfi1_devdata *dd, u32 port, struct ib_mad *out_mad,
 		  ret & IB_MAD_RESULT_CONSUMED ? "CONSUMED " : "",
 		  be16_to_cpu(out_mad->mad_hdr.status));
 }
+#endif
 
 #define OPA_ATTRIB_ID_MCTP_OVER_MAD	cpu_to_be16(0xff30)
 #define OPA_ATTRIB_MOD_MCTP_INCOMING	cpu_to_be32(0x0001)
@@ -5193,7 +5195,7 @@ void print_mad_ret(struct hfi1_devdata *dd, u32 port, struct ib_mad *out_mad,
  * Send a MAD to CPORT over MCTXT as a pass-through.
  * We always use 9B for now.
  */
-int cport_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len)
+static int cport_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len)
 {
 	u8 *buf;
 	int size = len + MAD_9B_OFFSET;

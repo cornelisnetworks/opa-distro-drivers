@@ -7,6 +7,7 @@
 
 #include "hfi.h"
 #include "cport_traps.h"
+#include "chip_gen.h"
 
 #undef DEBUG_CPORT_TRAP
 
@@ -48,15 +49,6 @@ void gen_shutdown_led_override(struct hfi1_pportdata *ppd)
 	atomic_set(&ppd->led_override_timer_active, 0);
 	/* ensure the atomic_set is visible to all CPUs */
 	smp_wmb();
-}
-
-void gen_read_guid(struct hfi1_devdata *dd)
-{
-	/* XXX Replace with a CPORT message for NodeGUID */
-	dd_dev_warn(dd, "%s: JKR TODO\n", __func__);
-
-	/* XXX set dd->base_guid with real value */
-	dd->base_guid = 0xabcd;
 }
 
 int gen_late_per_chip_init(struct hfi1_devdata *dd)

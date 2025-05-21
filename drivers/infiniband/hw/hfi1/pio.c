@@ -1941,7 +1941,7 @@ static void pio_map_rcu_callback(struct rcu_head *list)
 	pio_map_free(m);
 }
 
-void print_pio_map(struct hfi1_pportdata *ppd, struct pio_vl_map *map)
+static void print_pio_map(struct hfi1_pportdata *ppd, struct pio_vl_map *map)
 {
 #define PM_SIZE 256 /* print map size */
 	char buf[PM_SIZE];

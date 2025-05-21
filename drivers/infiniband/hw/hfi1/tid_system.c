@@ -430,7 +430,7 @@ static int sys_find_phys_blocks(struct tid_user_buf *tidbuf, unsigned int npages
 	return 0;
 }
 
-bool sys_invalidated(struct tid_user_buf *tbuf)
+static bool sys_invalidated(struct tid_user_buf *tbuf)
 {
 	struct system_tid_user_buf *sbuf =
 		container_of(tbuf, struct system_tid_user_buf, common);
@@ -445,7 +445,7 @@ bool sys_invalidated(struct tid_user_buf *tbuf)
 	return ret;
 }
 
-void sys_unnotify(struct tid_user_buf *tbuf)
+static void sys_unnotify(struct tid_user_buf *tbuf)
 {
 	struct system_tid_user_buf *sbuf =
 		container_of(tbuf, struct system_tid_user_buf, common);

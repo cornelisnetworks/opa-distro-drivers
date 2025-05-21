@@ -218,7 +218,7 @@ static struct hfi1_page_iter_ops page_array_iter_ops = {
 	.free = page_array_iter_free
 };
 
-struct hfi1_page_iter *tid_user_buf_iter_begin(struct tid_user_buf *tbuf)
+static struct hfi1_page_iter *tid_user_buf_iter_begin(struct tid_user_buf *tbuf)
 {
 	struct page_array_iter *iter;
 
@@ -235,7 +235,7 @@ struct hfi1_page_iter *tid_user_buf_iter_begin(struct tid_user_buf *tbuf)
 	return &iter->common;
 }
 
-struct hfi1_page_iter *create_dma_iter(struct tid_user_buf *tbuf)
+static struct hfi1_page_iter *create_dma_iter(struct tid_user_buf *tbuf)
 {
 	if (tbuf->ops->iter_begin)
 		return tbuf->ops->iter_begin(tbuf);

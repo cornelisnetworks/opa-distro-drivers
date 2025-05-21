@@ -12,7 +12,6 @@ void gen_setextled(struct hfi1_pportdata *ppd, u32 on);
 void gen_start_led_override(struct hfi1_pportdata *ppd, unsigned int timeon,
 			    unsigned int timeoff);
 void gen_shutdown_led_override(struct hfi1_pportdata *ppd);
-void gen_read_guid(struct hfi1_devdata *dd);
 int gen_late_per_chip_init(struct hfi1_devdata *dd);
 void gen_start_port(struct hfi1_pportdata *ppd);
 void gen_stop_port(struct hfi1_pportdata *ppd);

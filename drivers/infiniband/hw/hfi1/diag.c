@@ -1794,7 +1794,7 @@ void snoop_recv_handler(struct hfi1_packet *packet)
 	packet->rcd->save_rhf_rcv_function_map[rhf_rcv_type(packet->rhf)](packet);
 }
 
-void snoop_process_receive_invalid(struct hfi1_packet *packet)
+static void snoop_process_receive_invalid(struct hfi1_packet *packet)
 {
 	pr_alert("Recv Invalid Snoop Packet!\n");
 }
