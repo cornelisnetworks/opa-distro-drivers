@@ -203,14 +203,18 @@ int jkr_mid_per_chip_init(struct hfi1_devdata *dd)
 	if (ret) {
 		dd_dev_err(dd, "CPORT who failed %d\n", ret);
 	} else if (resp_len == sizeof(*who)) {
+		struct ib_device *ibdev = &dd->verbs_dev.rdi.ibdev;
+		char v_str[IB_FW_VERSION_NAME_MAX] = {};
+
 		dd->base_guid = who->node_guid;
 		/* XXX this should be replaced by a TRAP to set guid */
 		if (!ib_hfi1_sys_image_guid)
 			ib_hfi1_sys_image_guid = cpu_to_be64(dd->base_guid);
 		/* XXX need guids for all ports */
-		dd_dev_info(dd, "CPORT firmware version %d.%d.%d.%d %u\n",
-			who->vers_maj, who->vers_min, who->vers_mnt, who->vers_pat,
-			who->vers_bld);
+		dd->cport_ver = who->vers.vers;
+		cport_get_dev_fw_str(ibdev, v_str);
+		dd_dev_info(dd, "CPORT firmware version %s\n",
+			    v_str);
 	} else
 		dd_dev_err(dd, "CPORT who invalid resp %d\n", resp_len);
 
