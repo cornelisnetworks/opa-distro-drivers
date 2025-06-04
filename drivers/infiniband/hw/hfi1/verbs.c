@@ -1366,10 +1366,13 @@ static void hfi1_fill_device_attr(struct hfi1_devdata *dd)
 
 	memset(&rdi->dparms.props, 0, sizeof(rdi->dparms.props));
 
-	rdi->dparms.props.fw_ver = ((u64)(dc8051_ver_maj(ver)) << 32) |
-		((u64)(dc8051_ver_min(ver)) << 16) |
-		(u64)dc8051_ver_patch(ver);
-
+	if (!dd->cport) {
+		rdi->dparms.props.fw_ver = ((u64)(dc8051_ver_maj(ver)) << 32) |
+			((u64)(dc8051_ver_min(ver)) << 16) |
+			(u64)dc8051_ver_patch(ver);
+	} else {
+		rdi->dparms.props.fw_ver = dd->cport_ver;
+	}
 	rdi->dparms.props.device_cap_flags = IB_DEVICE_BAD_PKEY_CNTR |
 			IB_DEVICE_BAD_QKEY_CNTR | IB_DEVICE_SHUTDOWN_PORT |
 			IB_DEVICE_SYS_IMAGE_GUID | IB_DEVICE_RC_RNR_NAK_GEN |
@@ -1680,7 +1683,8 @@ static void init_ibport(struct hfi1_pportdata *ppd)
 	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
 }
 
-static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
+/* ib_device_ops->get_dev_fw_str for wfr */
+static void dc8051_get_dev_fw_str(struct ib_device *ibdev, char *str)
 {
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
 	struct hfi1_ibdev *dev = dev_from_rdi(rdi);
@@ -1688,6 +1692,38 @@ static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
 
 	snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u.%u", dc8051_ver_maj(ver),
 		 dc8051_ver_min(ver), dc8051_ver_patch(ver));
+}
+
+/*
+ * CPORT FW has defined the following mapping for WHO->VERSION_PATCH[4:7]
+ * aka quality field
+ */
+static const char * const cport_ver_qlt_to_str_map[] = {
+	"P0", "P1", "P2",			/* 0-2: PowerOn[0-2] */
+	"A0", "A1", "A2",			/* 3-5: Alpha[0-2]   */
+	"B0", "B1", "B2",			/* 6-8: Beta[0-2]    */
+	"RC0", "RC1", "RC2", "RC3", "RC4"	/* 9-13: RC[0-4]     */
+	/* 14: use patch field */
+	/* 15: Reserved */
+};
+
+/* ib_device_ops->get_dev_fw_str for jkr and beyond */
+void cport_get_dev_fw_str(struct ib_device *ibdev, char *str)
+{
+	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
+	struct hfi1_ibdev *dev = dev_from_rdi(rdi);
+	union cport_fw_ver ver;
+
+	ver.vers = dd_from_dev(dev)->cport_ver;
+	/* Does quality map to a special substring or do we just use patch */
+	if (ver.qlt < ARRAY_SIZE(cport_ver_qlt_to_str_map) && ver.vers != 0)
+		snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u.%u.%s.%u",
+			 ver.maj, ver.min, ver.mnt,
+			 cport_ver_qlt_to_str_map[ver.qlt],
+			 ver.bld);
+	else
+		snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u.%u.%u.%u",
+			 ver.maj, ver.min, ver.mnt, ver.pat, ver.bld);
 }
 
 static const char * const driver_cntr_names[] = {
@@ -1837,7 +1873,7 @@ static const struct ib_device_ops hfi1_dev_ops = {
 	.alloc_hw_port_stats = hfi_alloc_hw_port_stats,
 	.alloc_rdma_netdev = hfi1_vnic_alloc_rn,
 	.device_group = &ib_hfi1_attr_group,
-	.get_dev_fw_str = hfi1_get_dev_fw_str,
+	.get_dev_fw_str = dc8051_get_dev_fw_str,
 	.get_hw_stats = get_hw_stats,
 	.modify_device = modify_device,
 	.port_groups = wfr_attr_port_groups,
@@ -1855,7 +1891,7 @@ static const struct ib_device_ops cport_dev_ops = {
 	.alloc_hw_port_stats = hfi_alloc_hw_port_stats,
 	.alloc_rdma_netdev = hfi1_vnic_alloc_rn,
 	.device_group = &ib_hfi1_attr_group,
-	.get_dev_fw_str = hfi1_get_dev_fw_str,
+	.get_dev_fw_str = cport_get_dev_fw_str,
 	.get_hw_stats = get_hw_stats,
 	.modify_device = modify_device,
 	.port_groups = cport_attr_port_groups,
