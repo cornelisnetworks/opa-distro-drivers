@@ -60,6 +60,18 @@ struct cport_trap_status {
 	u32 _resv:22;
 };
 
+union cport_fw_ver {
+	struct {
+		u64 bld:32;
+		u64 pat:4;
+		u64 qlt:4;
+		u64 mnt:8;
+		u64 min:8;
+		u64 maj:8;
+	};
+	u64 vers;
+};
+
 /* Fields in 4-qword payload of WHO response */
 struct cport_who_payload {
 	/* qword 1 */
@@ -69,11 +81,7 @@ struct cport_who_payload {
 	struct cport_options suppt;
 	u16 max_msg;	/* max cport msg length */
 	/* qword 2 */
-	u64 vers_bld:32;
-	u64 vers_pat:8;
-	u64 vers_mnt:8;
-	u64 vers_min:8;
-	u64 vers_maj:8;
+	union cport_fw_ver vers;
 	/* qword 3 */
 	u64 node_guid;
 	/* qword 4 */
@@ -255,5 +263,14 @@ int cport_init(struct hfi1_devdata *dd);
  * If the device has no CPORT, this does nothing.
  */
 int cport_exit(struct hfi1_devdata *dd);
+
+/*
+ * Helper to convert cport_fw_ver.qlt to
+ * mapped string representation.
+ *
+ * If value is outside of substring range
+ * returns NULL
+ */
+const char *cport_ver_qlt_to_str(u8 quality);
 
 #endif /* _CPORT_H */

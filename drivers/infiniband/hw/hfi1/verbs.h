@@ -458,6 +458,8 @@ static inline void hfi1_trdma_send_complete(struct rvt_qp *qp,
 	rvt_send_complete(qp, wqe, status, lock_state);
 }
 
+void cport_get_dev_fw_str(struct ib_device *ibdev, char *str);
+
 extern const enum ib_wc_opcode ib_hfi1_wc_opcode[];
 
 extern const u8 hdr_len_by_opcode[];
