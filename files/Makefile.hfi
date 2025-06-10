@@ -13,7 +13,7 @@ NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi
 ifdef CONFIG_HFI1_NVIDIA
 ifndef NVIDIA_DRIVER_SOURCE
 ifneq ($(findstring U2404, $(DISTROFLAG)),)
-NVIDIA_VERSION=$(shell dpkg -l | grep nvidia-open | awk '{ print $$3 }' | cut -d - -f 1)
+NVIDIA_VERSION=$(shell dpkg -l | grep nvidia-kernel-common-[0-9]..- | awk '{ print $$3 }' | cut -d - -f 1)
 else
 NVIDIA_VERSION=$(shell rpm -q nvidia-driver | cut -d '-' -f 3)
 endif
