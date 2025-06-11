@@ -219,7 +219,7 @@ Maintainer: Dennis Dalessandro <dennis.dalessandro@cornelisnetworkscom>
 Description: Kernel modules for Cornelis Omni-Path Architecture HFI drivers
 CEOF
 if [[ $build_nvidia = y ]]; then
-nvdrvname=$(dpkg -l | grep nvidia-kernel-common-[0-9]..- | awk '{print $2}')
+nvdrvname=$(dpkg -l | grep nvidia-kernel-source | awk '{print $2}')
 echo "Depends: linux-image-${DEFAULT_KERNEL_VERSION}, ${nvdrvname}" >> $workdir/$pkgfull/DEBIAN/control
 else
 echo "Depends: linux-image-${DEFAULT_KERNEL_VERSION}" >> $workdir/$pkgfull/DEBIAN/control
