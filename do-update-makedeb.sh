@@ -130,7 +130,7 @@ if [[ $build_amd = y ]]; then
 		exit 1
 	fi
 	echo "AMD module symbols found at $amdmodsyms"
-	pkgrelease+="amd"
+	pkgrelease+="rocm"
 fi
 
 echo "pkgrelease is $pkgrelease"
