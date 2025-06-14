@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# DKMS pre-build script, updates headers so modules build correctly.
+echo "Saving kernel headers"
+pushd /usr/src/linux-headers-$1/include/rdma
+mv rdma_vt.h rdma_vt.h.sav
+mv opa_port_info.h opa_port_info.h.sav
+popd
+cp include/rdma/* /usr/src/linux-headers-$1/include/rdma
+
+pushd /usr/src/linux-headers-$1/include/uapi/rdma
+mv rdma_user_ioctl.h rdma_user_ioctl.h.sav
+mv rdma_user_ioctl_cmds.h rdma_user_ioctl_cmds.h.sav
+mv hfi hfi.sav
+popd
+cp -r include/uapi/rdma/* /usr/src/linux-headers-$1/include/uapi/rdma
+

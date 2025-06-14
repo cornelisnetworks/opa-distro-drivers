@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# Debian prerm file for dkms modules
+echo "Removing kernel modules"
+dkms remove -m opxs-modules-dkms -v @@VERSION@@ --all

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Debian postinst file for dkms, will run when .deb is installed.
+echo "Building with dkms"
+dkms add -m opxs-modules-dkms -v @@VERSION@@
+pushd /lib/modules > /dev/null
+for k in `ls -d 6.8.0-*-generic` ; do
+	dkms install -m opxs-modules-dkms -v @@VERSION@@ -k $k
+done
+popd > /dev/null
+

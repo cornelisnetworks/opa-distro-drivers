@@ -51,13 +51,13 @@ if [[ $build_arg != "nobuild" ]]; then
 
 	echo "GPU build arguments are \"$gpuarg\""
 
-	./do-update-makedeb.sh -S ${PWD} -w $tmpdir $gpuarg
+	./do-makebindeb.sh -S ${PWD} -w $tmpdir $gpuarg
 	if [[ $? -ne 0 ]]; then
-		echo "do-update-makedeb failed!"
+		echo "do-makebindeb failed!"
 		exit 1
 	fi
 
-	echo "Just did do-update-makedev"
+	echo "Just did do-makebindeb"
 
 	cd $sdir
 elif [[ $build_arg == "nobuild" ]]; then
