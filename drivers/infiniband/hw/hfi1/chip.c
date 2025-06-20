@@ -13924,7 +13924,7 @@ do_recalc:
 		struct hfi1_pportdata *ppd = &dd->pport[pidx];
 
 		ppd->rcv_array_base = base;
-		base += ppd->num_rcv_contexts * dd->rcv_entries.ngroups;
+		base += ppd->num_rcv_contexts * (dd->rcv_entries.ngroups * dd->rcv_entries.group_size);
 	}
 
 	/*
