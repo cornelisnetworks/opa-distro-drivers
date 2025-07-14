@@ -83,6 +83,8 @@ if [[ $ID == "rhel" ]]; then
 		VERSION_ID="7.8"
 		VERSION_ID_MINOR="8"
 	fi
+elif [[ $ID == "rocky" ]]; then
+	distro_dir=ROCKY$VERSION_ID_MAJOR$VERSION_ID_MINOR
 elif [[ $ID == "sles" ]]; then
 	if [[ -z $VERSION_ID_MINOR ]]; then
 		distro_dir=SLES$VERSION_ID_MAJOR

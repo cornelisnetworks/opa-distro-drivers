@@ -78,9 +78,9 @@ if [[ $test_arg == "test" ]]; then
 	#/tmp/tmpbuild/rpmbuild/RPMS/x86_64/kmod-ifs-kernel-updates-5.14.0_162.6.1.el9_1.x86_64-47.x86_64.rpm
 
 	source /etc/os-release
-	if [[ $ID == "rhel" ]]; then
+	if [ $ID == "rhel" ] || [ $ID == "rocky" ]; then
 		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/kmod-opxs-kernel-updates*.rpm`
-		echo "Using RHEL RPM: $rpmname"
+		echo "Using RHEL/Rocky RPM: $rpmname"
 	else #assume sles
 		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/ifs-kernel-updates-kmp-default*.rpm`
 		echo "Using SLES RPM: $rpmname"
