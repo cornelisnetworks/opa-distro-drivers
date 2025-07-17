@@ -16,6 +16,9 @@
 #include "qp.h"
 #include "trace.h"
 #include "verbs_txreq.h"
+#include "bulksvc.h"
+#include "bulksvc_rvt.h"
+#include "bulksvc_verbs.h"
 
 unsigned int hfi1_qp_table_size = 256;
 module_param_named(qp_table_size, hfi1_qp_table_size, uint, S_IRUGO);
@@ -102,6 +105,23 @@ const struct rvt_operation_params hfi1_post_parms[RVT_OPERATION_MAX] = {
 	.flags = RVT_OPERATION_IGN_RNR_CNT,
 },
 
+[IB_WR_BULKSVC_READ] = {
+	.length = sizeof(struct ib_rdma_wr),
+	.qpt_support = BIT(IB_QPT_RC),
+	.flags = RVT_OPERATION_IGN_RNR_CNT,
+},
+
+[IB_WR_BULKSVC_WRITE] = {
+	.length = sizeof(struct ib_rdma_wr),
+	.qpt_support = BIT(IB_QPT_RC),
+	.flags = RVT_OPERATION_IGN_RNR_CNT,
+},
+
+[IB_WR_BULKSVC_WRITE_WITH_IMM] = {
+	.length = sizeof(struct ib_rdma_wr),
+	.qpt_support = BIT(IB_QPT_RC),
+	.flags = RVT_OPERATION_IGN_RNR_CNT,
+}
 };
 
 static void flush_list_head(struct list_head *l)
@@ -277,7 +297,9 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_RC:
-		hfi1_setup_tid_rdma_wqe(qp, wqe);
+		/* using bulksvc is preferred over tid RDMA */
+		if (!hfi1_setup_bulksvc_wqe(qp, wqe))
+			hfi1_setup_tid_rdma_wqe(qp, wqe);
 		fallthrough;
 	case IB_QPT_UC:
 		if (wqe->length > 0x80000000U)
@@ -406,6 +428,11 @@ static void hfi1_qp_schedule(struct rvt_qp *qp)
 		ret = hfi1_schedule_tid_send(qp);
 		if (ret)
 			iowait_clear_flag(&priv->s_iowait, IOWAIT_PENDING_TID);
+	}
+	if (iowait_flag_set(&priv->s_iowait, IOWAIT_PENDING_BTS)) {
+		ret = hfi1_schedule_bts_send(qp);
+		if (ret)
+			iowait_clear_flag(&priv->s_iowait, IOWAIT_PENDING_BTS);
 	}
 }
 
@@ -710,18 +737,46 @@ void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 		1,
 		_hfi1_do_send,
 		_hfi1_do_tid_send,
+		_hfi1_do_bts_send,
 		iowait_sleep,
 		iowait_wakeup,
 		iowait_sdma_drained,
 		hfi1_init_priority);
 	/* Init to a value to start the running average correctly */
 	priv->s_running_pkt_size = piothreshold / 2;
+
+	struct hfi1_devdata *dd = container_of(rdi,
+					       struct hfi1_devdata,
+					       verbs_dev.rdi);
+	if (dd->bulksvc) {
+		if (WARN_ON(qp->ibqp.qp_num >= (1 << 24))) {
+			pr_err("Bulksvc only supports 24 bits for qp number\n");
+			kfree(priv->s_ahg);
+			kfree(priv);
+			return ERR_PTR(-EINVAL);
+		}
+		priv->bulksvc_qp_info = hfi1_bulksvc_qp_info_create(&dd->bulksvc->verbs_state, priv);
+		mutex_lock(&dd->bulksvc->verbs_state.qp_infos_lock);
+		list_add_tail(&priv->bulksvc_qp_info->node, &dd->bulksvc->verbs_state.qp_infos);
+		mutex_unlock(&dd->bulksvc->verbs_state.qp_infos_lock);
+	} else {
+		priv->bulksvc_qp_info = NULL;
+	}
+
 	return priv;
 }
 
 void qp_priv_free(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
+
+	if (priv->bulksvc_qp_info) {
+		mutex_lock(&priv->bulksvc_qp_info->verbs_state->qp_infos_lock);
+		list_del_init(&priv->bulksvc_qp_info->node);
+		mutex_unlock(&priv->bulksvc_qp_info->verbs_state->qp_infos_lock);
+		hfi1_bulksvc_qp_info_put(priv->bulksvc_qp_info);
+		priv->bulksvc_qp_info = NULL;
+	}
 
 	hfi1_qp_priv_tid_free(rdi, qp);
 	kfree(priv->s_ahg);
@@ -875,6 +930,7 @@ void notify_error_qp(struct rvt_qp *qp)
 			qp->s_flags &= ~HFI1_S_ANY_WAIT_IO;
 			iowait_clear_flag(&priv->s_iowait, IOWAIT_PENDING_IB);
 			iowait_clear_flag(&priv->s_iowait, IOWAIT_PENDING_TID);
+			iowait_clear_flag(&priv->s_iowait, IOWAIT_PENDING_BTS);
 			list_del_init(&priv->s_iowait.list);
 			priv->s_iowait.lock = NULL;
 			rvt_put_qp(qp);

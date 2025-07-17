@@ -370,8 +370,11 @@ struct rvt_driver_provided {
 	/* driver mmap */
 	int (*mmap)(struct ib_ucontext *context, struct vm_area_struct *vma);
 
-	/* bulk service functions */
-	/* TODO */
+	/* user memory region reg/remove */
+	int (*notify_register_u_mr)(struct rvt_dev_info *rdi,
+				    struct rvt_mregion *mr);
+	void (*notify_unregister_u_mr)(struct rvt_dev_info *rdi,
+				      struct rvt_mregion *mr);
 };
 
 struct rvt_dev_info {

@@ -11,6 +11,7 @@
 #include "tid_rdma.h"
 #include "exp_rcv.h"
 #include "trace.h"
+#include "bulksvc_rvt.h"
 
 /**
  * DOC: TID RDMA READ protocol
@@ -348,6 +349,7 @@ int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 	spin_lock_init(&qpriv->opfn.lock);
 	INIT_WORK(&qpriv->opfn.opfn_work, opfn_send_conn_request);
 	INIT_WORK(&qpriv->tid_rdma.trigger_work, tid_rdma_trigger_resume);
+	INIT_LIST_HEAD(&qpriv->bts_compl_list);
 	qpriv->flow_state.psn = 0;
 	qpriv->flow_state.index = RXE_NUM_TID_FLOWS;
 	qpriv->flow_state.last_index = RXE_NUM_TID_FLOWS;
@@ -3259,6 +3261,20 @@ bool hfi1_tid_rdma_wqe_interlock(struct rvt_qp *qp, struct rvt_swqe *wqe)
 			break;
 		}
 		break;
+	/* Don't send a BTS workload if other operations are still
+	 * in flight. The opposite of this is protected by the ACK
+	 * flag, preventing hfi1_send_ok from returning true
+	 */
+	case IB_WR_BULKSVC_READ:
+	case IB_WR_BULKSVC_WRITE:
+	case IB_WR_BULKSVC_WRITE_WITH_IMM:
+		if (prev->wr.opcode != IB_WR_BULKSVC_READ &&
+		    prev->wr.opcode != IB_WR_BULKSVC_WRITE &&
+		    prev->wr.opcode != IB_WR_BULKSVC_WRITE_WITH_IMM)
+			if (qp->s_acked != qp->s_cur)
+				goto interlock;
+		break;
+
 	default:
 		break;
 	}

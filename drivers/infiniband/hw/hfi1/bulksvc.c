@@ -13,6 +13,8 @@
 #include "exp_rcv.h"
 #include "trace_dbg.h"
 #include "mem_region.h"
+#include "verbs_txreq.h"
+#include "bulksvc_verbs.h"
 
 #include <linux/string.h>
 #include <uapi/rdma/hfi/hfi1_user.h>
@@ -76,9 +78,6 @@ static int bulksvc_loan_sdma(struct hfi1_devdata *dd, u32 start, u32 end)
 	u32 count = end - start; /* should equal prereqs.num_sdma */
 	int ret = 0;
 
-	pr_debug("%s:%d:%s() ENTER: start=%u, end=%u\n",
-		   __FILENAME__, __LINE__, __func__, start, end);
-
 	svc->rsrc.sde_arr = kmalloc(sizeof(*svc->rsrc.sde_arr) * count,
 				    GFP_KERNEL);
 	if (!svc->rsrc.sde_arr) {
@@ -91,12 +90,8 @@ static int bulksvc_loan_sdma(struct hfi1_devdata *dd, u32 start, u32 end)
 		svc->rsrc.sde_arr[i] = &dd->per_sdma[start + i];
 
 	dd->rsrcs.last_sdma_engine = start;
-	pr_debug("%s:%d:%s() bulksvc: Borrowing SDEs #%u-%u\n",
-		   __FILENAME__, __LINE__, __func__, start, end);
 
 exit:
-	pr_debug("%s:%d:%s() EXIT: ret=%d\n",
-		   __FILENAME__, __LINE__, __func__, ret);
 	return ret;
 }
 
@@ -104,19 +99,14 @@ static void hfi1_bulksvc_return_sdma(struct hfi1_devdata *dd)
 {
 	u32 ret_count;
 
-	pr_debug("%s:%d:%s() ENTER: dd=%p\n", __FILENAME__, __LINE__, __func__, dd);
 
 	if (!dd->bulksvc || !dd->bulksvc->rsrc.sde_arr)
-		goto exit;
+		return;
 
 	ret_count = dd->bulksvc->prereqs.num_sdma;
 	dd->rsrcs.last_sdma_engine += ret_count;
 	kfree(dd->bulksvc->rsrc.sde_arr);
 	dd->bulksvc->rsrc.sde_arr = NULL;
-	pr_debug("%s:%d:%s() bulksvc: Returned %u SDE's\n",
-		   __FILENAME__, __LINE__, __func__, ret_count);
-exit:
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 /* does not clean up after itself, call hfi1_bulksvc_teardown on non-zero rc */
@@ -130,9 +120,6 @@ static int bulksvc_loan_rctxts(struct hfi1_devdata *dd,
 	struct napi_struct *napis;
 	u32 cnt;
 	int i, ret = 0;
-
-	pr_debug("%s:%d:%s() ENTER: dd=%p, pp_loan=%p\n",
-		   __FILENAME__, __LINE__, __func__, dd, pp_loan);
 
 	init_dummy_netdev(&dd->bulksvc->dummy_napi);
 	/* store ctxdata pointer for dd->rcd[bulkvc_ctxts] */
@@ -211,10 +198,6 @@ static int bulksvc_loan_rctxts(struct hfi1_devdata *dd,
 			hfi1_rcd_put(rcd);
 			napi_enable(rcd->napi);
 		}
-		pr_debug("%s:%d:%s() bulksvc: Borrowing p%u rctxts #%u-%u\n",
-			   __FILENAME__, __LINE__, __func__, i,
-			   pr->first_bulksvc_alloc_ctxt,
-			   pr->first_dyn_alloc_ctxt - 1);
 	}
 
 	goto exit;
@@ -248,8 +231,6 @@ bail:
 	}
 
 exit:
-	pr_debug("%s:%d:%s() EXIT: ret=%d\n",
-		   __FILENAME__, __LINE__, __func__, ret);
 	return ret;
 }
 
@@ -260,8 +241,6 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 	u32 sdma_avail = last - dd->rsrcs.first_sdma_engine;
 	u32 sdma_rm;
 	int ret = 0;
-
-	pr_debug("%s:%d:%s() ENTER: dd=%p\n", __FILENAME__, __LINE__, __func__, dd);
 
 	if (!svc) {
 		ret = -1;
@@ -312,6 +291,7 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 		hfi1_dms_init(&svc->dms, dd, svc->rsrc.pp[1].rcd, svc->prereqs.num_rcv_ctxs, svc->rsrc.sde_arr,
 				sdma_rm);
 		bulksvc_rsm_init(svc);
+		hfi1_bulksvc_verbs_dms_reg_client_id(&svc->dms);
 	}
 
 	/* setup polling event queue */
@@ -348,6 +328,7 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 	} else if (svc->timer_interval > 0) {
 		hrtimer_start(&svc->progress_timer, svc->timer_interval, HRTIMER_MODE_REL);
 	}
+	pr_debug("%s:%d:%s() LOANED RESOURCES\n", __FILENAME__, __LINE__, __func__);
 
 	goto exit;
 
@@ -356,8 +337,6 @@ fail:
 	if (ret == 0)
 		ret = -1;
 exit:
-	pr_debug("%s:%d:%s() EXIT: ret=%d\n",
-		   __FILENAME__, __LINE__, __func__, ret);
 	return ret;
 }
 
@@ -366,7 +345,6 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 	struct hfi1_bulksvc_requirements *reqs;
 	int ret = 0;
 
-	pr_debug("%s:%d:%s() ENTER: dd=%p\n", __FILENAME__, __LINE__, __func__, dd);
 
 	dd->bulksvc = kcalloc(sizeof(*dd->bulksvc), 1, GFP_KERNEL);
 	if (!dd->bulksvc) {
@@ -388,8 +366,6 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 		reqs->num_rcv_ctxs = bulksvc_num_rctx;
 		reqs->num_send_ctxs = bulksvc_num_sctx;
 	} else {
-		pr_debug("%s:%d:%s() bulksvc: Sanity check on module params failed, disabling\n",
-			   __FILENAME__, __LINE__, __func__);
 		kfree(dd->bulksvc);
 		dd->bulksvc = NULL;
 		ret = 1;
@@ -419,23 +395,20 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 	mutex_init(&dd->bulksvc->user_info_lock);
 	INIT_LIST_HEAD(&dd->bulksvc->user_infos);
 
+	hfi1_bulksvc_verbs_state_init(&dd->bulksvc->verbs_state, &dd->bulksvc->dms);
+
 	dd->verbs_dev.rdi.use_bulksvc = true;
 	dd->bulksvc->stop_scheduling = false;
 
 	atomic_set(&dd->bulksvc->last_client_key, 0);
 
 exit:
-	pr_debug("%s:%d:%s() EXIT: ret=%d\n",
-		   __FILENAME__, __LINE__, __func__, ret);
 	return ret;
 }
 
 static void flush_event_queue(struct hfi1_bulksvc *svc)
 {
 	struct list_head *entry, *tmp_entry;
-
-	pr_debug("%s:%d:%s() ENTER: svc=%p\n",
-		   __FILENAME__, __LINE__, __func__, svc);
 
 	if (list_empty(&svc->event_queue))
 		goto exit;
@@ -447,7 +420,6 @@ static void flush_event_queue(struct hfi1_bulksvc *svc)
 	}
 
 exit:
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 /* can be called multiple times */
@@ -457,13 +429,10 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct hfi1_bulksvc *svc;
 
-	pr_debug("%s:%d:%s() ENTER: dd=%p\n", __FILENAME__, __LINE__, __func__, dd);
-
 	/* TODO add logic to wait until it safe to free bulksvc */
 	dd->verbs_dev.rdi.use_bulksvc = false;
 
 	if (!dd->bulksvc) {
-		pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 		return;
 	}
 
@@ -506,8 +475,6 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 					     dd->rcd[ctxt]);
 				if (dd->rcd[ctxt]->msix_intr != CCE_NUM_MSIX_VECTORS)
 					msix_free_irq(dd, dd->rcd[ctxt]->msix_intr);
-				pr_debug("%s:%d:%s() Stopping napi on bulksvc rctxt %d\n",
-					   __FILENAME__, __LINE__, __func__, ctxt);
 				if (dd->rcd[ctxt]->napi) {
 					napi_synchronize(dd->rcd[ctxt]->napi);
 					napi_disable(dd->rcd[ctxt]->napi);
@@ -532,7 +499,6 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 
 	kfree(svc);
 	dd->bulksvc = NULL;
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 /* interrupt handler for bulksvc sdma irqs, caller clears irqs */
@@ -541,17 +507,12 @@ void bulksvc_sdma_irq(struct hfi1_devdata *dd, struct sdma_engine *sde)
 	struct hfi1_bulksvc *svc = dd->bulksvc;
 	struct hfi1_bulksvc_event_entry *event_entry;
 
-	pr_debug("%s:%d:%s() ENTER: dd=%p, sde=%p\n",
-		   __FILENAME__, __LINE__, __func__, dd, sde);
-
 	if (!svc) {
-		pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 		return;
 	}
 
 	event_entry = kzalloc(sizeof(*event_entry), GFP_ATOMIC);
 	if (!event_entry) {
-		pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 		return;
 	}
 
@@ -563,9 +524,9 @@ void bulksvc_sdma_irq(struct hfi1_devdata *dd, struct sdma_engine *sde)
 	spin_unlock(&svc->event_lock);
 
 	hfi1_bulksvc_schedule(svc);
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
+/* work queue function */
 static void bulksvc_poll_event_queue(struct hfi1_bulksvc *svc)
 {
 	struct hfi1_bulksvc_event_entry *event_entry, *tmp;
@@ -610,8 +571,6 @@ static void bulksvc_poll_event_queue(struct hfi1_bulksvc *svc)
 				if (WARN_ON(user_info == NULL)) {
 					continue;
 				}
-				pr_debug("Got event BULKSVC_EVENT_TYPE_USER_INFO_RELEASE for client %u\n", user_info->client_key);
-
 				mutex_lock(&svc->user_info_lock);
 				list_del(&user_info->list_entry);
 				mutex_unlock(&svc->user_info_lock);
@@ -632,6 +591,8 @@ static void bulksvc_event_work(struct work_struct *work)
 	bulksvc_poll_event_queue(svc);
 	hfi1_dms_poll(&svc->dms);
 	hfi1_bulksvc_poll_user_cmds(svc);
+	hfi1_bulksvc_poll_verbs_cmds(svc);
+
 }
 
 /* Polling work queue function that reschedules itself */
@@ -667,9 +628,6 @@ void bulksvc_rsm_reserve(struct hfi1_devdata *dd, struct rsm_map_table *rmt)
 {
 	struct hfi1_bulksvc *svc = dd->bulksvc;
 
-	pr_debug("%s:%d:%s() ENTER: dd=%p, rmt=%p\n",
-		   __FILENAME__, __LINE__, __func__, dd, rmt);
-
 	BUG_ON(svc == NULL);
 
 	for (int i = 0; i < dd->num_pports; ++i) {
@@ -681,8 +639,6 @@ void bulksvc_rsm_reserve(struct hfi1_devdata *dd, struct rsm_map_table *rmt)
 		if (rule_index < 0) {
 			dd_dev_err(dd, "%s:%d:%s() bulksvc: Failed to allocate RSM rule for port %u\n",
 				   __FILENAME__, __LINE__, __func__, i);
-			pr_debug("%s:%d:%s() EXIT\n",
-				   __FILENAME__, __LINE__, __func__);
 			return;
 		}
 		dd_dev_warn(dd, "%s:%d:%s() bulksvc: Allocated RSM rule %d for port %u\n",
@@ -695,7 +651,6 @@ void bulksvc_rsm_reserve(struct hfi1_devdata *dd, struct rsm_map_table *rmt)
 		}
 		rmt->used += 1;
 	}
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_rsm_write_map_table(struct hfi1_devdata *dd, u8 idx, u8 value)
@@ -704,14 +659,10 @@ static void bulksvc_rsm_write_map_table(struct hfi1_devdata *dd, u8 idx, u8 valu
 	int regidx = ((int)idx) / 8;
 	u64 reg;
 
-	pr_debug("%s:%d:%s() ENTER: idx=%u, value=%u\n",
-		   __FILENAME__, __LINE__, __func__, idx, value);
-
 	reg = read_csr(dd, dd->params->rcv_rsm_map_table_reg + (8 * regidx));
 	reg &= ~(dd->params->rsm_map_table_entry_mask << regoff);
 	reg |= ((u64)value) << regoff;
 	write_csr(dd, dd->params->rcv_rsm_map_table_reg + (8 * regidx), reg);
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
@@ -722,9 +673,6 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
 	// LRH16B (4 DW) + BTH (3 DW) + KDETH_1 (1 DW)
 	u32 const HFI1_DMS_JKEY_OFFSET_LOWER = 256;
 	u32 const HFI1_DMS_JKEY_OFFSET_UPPER = 264;
-
-	pr_debug("%s:%d:%s() ENTER: svc=%p\n",
-		   __FILENAME__, __LINE__, __func__, svc);
 
 	BUG_ON(svc == NULL);
 	BUG_ON(svc->dd == NULL);
@@ -788,7 +736,6 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
 	dd_dev_warn(dd, "%s:%d:%s() bulksvc: Finished registering RSM rules for bulksvc\n",
 		    __FILENAME__, __LINE__, __func__);
 exit:
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 /**

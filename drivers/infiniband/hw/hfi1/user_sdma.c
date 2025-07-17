@@ -133,7 +133,7 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 	init_waitqueue_head(&pq->wait);
 	atomic_set(&pq->n_locked, 0);
 
-	iowait_init(&pq->busy, 0, NULL, NULL, defer_packet_queue,
+	iowait_init(&pq->busy, 0, NULL, NULL, NULL, defer_packet_queue,
 		    activate_packet_queue, NULL, NULL);
 
 	pq->reqs = kcalloc(hfi1_sdma_comp_ring_size,
