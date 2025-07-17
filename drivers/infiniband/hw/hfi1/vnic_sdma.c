@@ -240,7 +240,7 @@ void hfi1_vnic_sdma_init(struct hfi1_vnic_vport_info *vinfo)
 	for (i = 0; i < vinfo->num_tx_q; i++) {
 		struct hfi1_vnic_sdma *vnic_sdma = &vinfo->sdma[i];
 
-		iowait_init(&vnic_sdma->wait, 0, NULL, NULL,
+		iowait_init(&vnic_sdma->wait, 0, NULL, NULL, NULL,
 			    hfi1_vnic_sdma_sleep,
 			    hfi1_vnic_sdma_wakeup, NULL, NULL);
 		vnic_sdma->sde = &vinfo->dd->per_sdma[dr->first_sdma_engine + i];

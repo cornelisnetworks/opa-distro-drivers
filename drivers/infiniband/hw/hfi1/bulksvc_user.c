@@ -71,7 +71,6 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 
 void bulksvc_user_info_event_release(struct kref *ref)
 {
-	pr_debug("eventing user info release\n");
 	struct hfi1_bulksvc_user_info* info = container_of(ref, struct hfi1_bulksvc_user_info, refcount);
 	struct hfi1_bulksvc_event_entry *event_entry = kzalloc(sizeof(*event_entry), GFP_KERNEL);
 	if (!event_entry) {
@@ -240,11 +239,17 @@ static void give_completion(struct hfi1_bulksvc_user_info *user_info, struct hfi
 	}
 }
 
+static int user_mr_record_pinned_check(struct hfi1_dms_mr *mr,
+					 unsigned int start_page_index,
+					 unsigned int npages_to_request)
+{
+	struct hfi1_bulksvc_user_mr_record* user_mr = container_of(mr, struct hfi1_bulksvc_user_mr_record, dms_mr);
+	return hfi1_mem_region_pinned_check(user_mr->hfi1_mr, start_page_index, npages_to_request);
+}
+
 static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_insert(struct hfi1_bulksvc_user_info* user_info, uintptr_t vaddr, u64 len, u64 flags)
 {
 	struct hfi1_bulksvc_user_mr_record *mr_record;
-
-	pr_debug("%s:%d:%s() ENTER: user_info=%p, vaddr=0x%016llx, len=%llu\n", __FILENAME__, __LINE__, __func__, user_info, (u64)vaddr, len);
 
 	mr_record = kzalloc(sizeof(*mr_record), GFP_KERNEL);
 	if (!mr_record) {
@@ -253,8 +258,8 @@ static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_ins
 	}
 
 	// TODO, async pin
-	mr_record->dms_mr.hfi1_mr = hfi1_mem_region_pin(user_info->mmu, vaddr, len);
-	if (!mr_record->dms_mr.hfi1_mr) {
+	mr_record->hfi1_mr = hfi1_mem_region_pin(user_info->mmu, vaddr, len);
+	if (!mr_record->hfi1_mr) {
 		pr_err("%s:%d:%s() ERROR: Failed to pin memory region\n", __FILENAME__, __LINE__, __func__);
 		kfree(mr_record);
 		return NULL;
@@ -269,21 +274,31 @@ static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_ins
 		mr_record->dms_mr.mode = HFI1_DMS_MR_MODE_OFFSET;
 	}
 
+	// Weak refs, lifetimes tied
+	mr_record->dms_mr.dma_list = mr_record->hfi1_mr->dma_list;
+	mr_record->dms_mr.pages = mr_record->hfi1_mr->pages;
+	mr_record->dms_mr.extended_vaddr.addr = mr_record->hfi1_mr->rb.addr;
+	mr_record->dms_mr.extended_vaddr.len = mr_record->hfi1_mr->rb.len;
+	mr_record->dms_mr.npages_total = mr_record->hfi1_mr->npages_total;
+	mr_record->dms_mr.npages_pinned = mr_record->hfi1_mr->npages_pinned;
+	mr_record->dms_mr.pinned_check_fn = user_mr_record_pinned_check;
+
+	mr_record->dms_mr.region_offset = mr_record->dms_mr.user.addr & (PAGE_SIZE - 1);
+	mr_record->dms_mr.mode = HFI1_DMS_MR_MODE_OFFSET;
+
 	mr_record->user_handle = user_info->next_user_mr_handle++;
 	kref_init(&mr_record->refcount);
 
 	list_add_tail(&mr_record->list_entry, &user_info->user_mr_list);
 
-	// pr_debug("%s:%d:%s() EXIT: ret=%p\n", __FILENAME__, __LINE__, __func__, mr_record);
 	return mr_record;
 }
 
 static void user_mr_record_destroy_and_remove(struct kref* ref)
 {
 	struct hfi1_bulksvc_user_mr_record *mr_record = container_of(ref, struct hfi1_bulksvc_user_mr_record, refcount);
-	// pr_debug("%s:%d:%s() ENTER: mr=%p\n", __FILENAME__, __LINE__, __func__, mr_record);
 	
-	hfi1_mem_region_put(mr_record->dms_mr.hfi1_mr);
+	hfi1_mem_region_put(mr_record->hfi1_mr);
 	list_del(&mr_record->list_entry);
 	kfree(mr_record);
 }
@@ -336,8 +351,6 @@ user_mr_access_record_create_and_insert(struct hfi1_bulksvc_user_info *user_info
 
 void user_mr_access_record_destroy_and_remove(struct hfi1_bulksvc_user_mr_access_record *access_record)
 {
-	// pr_debug("%s:%d:%s() ENTER: access_record=%p\n", __FILENAME__, __LINE__, __func__, access_record);
-
 	list_del(&access_record->list_entry);
 	user_mr_record_put(access_record->mr_record);
 	kfree(access_record);
@@ -357,10 +370,20 @@ lookup_user_mr_access_record(struct hfi1_bulksvc_user_info *user_info,
 	return NULL;
 }
 
-int validate_mr_access(struct hfi1_dms_mr *mr, u64 offset, u32 len)
+static int validate_mr_access(struct hfi1_bulksvc_user_mr_record *mr, u64 offset, u32 len)
 {
 	// FIXME this is the wrong validation
-	if (offset + len > mr->hfi1_mr->rb.len) {
+	if (mr->dms_mr.mode == HFI1_DMS_MR_MODE_VADDR) {
+		if (offset - len > mr->dms_mr.user.len) {
+			return -1;
+		}
+	} else if (mr->dms_mr.mode == HFI1_DMS_MR_MODE_OFFSET) {
+		if (offset + len > mr->hfi1_mr->rb.len) {
+			return -1;
+		}
+	} else {
+		pr_err("%s:%d:%s() invalid mr mode %d\n",
+		       __FILENAME__, __LINE__, __func__, mr->dms_mr.mode);
 		return -1;
 	}
 	return 0;
@@ -378,16 +401,13 @@ struct reg_dma_buffer_cmpl_cookie {
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 };
 
-static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completion_cookie *cookie)
+static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data)
 {
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
 	BUILD_BUG_ON(sizeof(struct reg_dma_buffer_cmpl_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	struct reg_dma_buffer_cmpl_cookie *reg_cookie =
 		(struct reg_dma_buffer_cmpl_cookie *)cookie;
-
-	// pr_debug("%s:%d:%s() ENTER: cookie=%p, access_key=0x%x, status=%u\n",
-	// 	 __FILENAME__, __LINE__, __func__, reg_cookie, reg_cookie->access_key, 0);
 
 	cmpl.app_context = reg_cookie->app_context;
 	cmpl.status = 0; /* success */
@@ -399,7 +419,6 @@ static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completio
 	user_mr_record_put(reg_cookie->mr_record); // one-time
 	hfi1_bulksvc_user_info_put(reg_cookie->user_info);
 
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
@@ -409,9 +428,6 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_queue_record *cmplq_record;
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 	u64 offset;
-
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
@@ -443,7 +459,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 	int rc = hfi1_dms_register_access(&svc->dms, &mr_record->dms_mr, offset,
 		cmd->size_bytes,
 		((u64)user_info->client_key << 32) | cmd->access_key,
-		(struct hfi1_dms_tracker_completion) {
+		(struct hfi1_dms_access_completion) {
 		.fn = on_registered_dma_buffer_completed_transact,
 		.cookie = *(union hfi1_dms_completion_cookie*)&(struct reg_dma_buffer_cmpl_cookie) {
 			.user_info = user_info,
@@ -452,7 +468,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 			.access_key = cmd->access_key,
 			.mr_record = mr_record,
 		},
-	}, HFI1_DMS_ACCESS_TYPE_EPHEMERAL);
+	}, HFI1_DMS_ACCESS_TYPE_EPHEMERAL, NULL);
 	if (rc < 0) {
 		struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
@@ -466,7 +482,6 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 	}
 exit:
 	return;
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 ///
@@ -480,9 +495,6 @@ static void bulksvc_on_cmd_mr_open(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_queue_record *cmplq_record;
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
-
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
@@ -505,7 +517,6 @@ static void bulksvc_on_cmd_mr_open(struct hfi1_bulksvc * const svc,
 
 exit:
 	return;
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_cmd_mr_close(struct hfi1_bulksvc * const svc,
@@ -514,9 +525,6 @@ static void bulksvc_on_cmd_mr_close(struct hfi1_bulksvc * const svc,
 {
 	struct hfi1_bulksvc_queue_record *cmplq_record;
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
-
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
@@ -537,7 +545,6 @@ static void bulksvc_on_cmd_mr_close(struct hfi1_bulksvc * const svc,
 	give_completion(user_info, cmplq_record, &cmpl);
 exit:
 	return;
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 ///
@@ -552,16 +559,13 @@ struct dma_access_once_cmpl_cookie {
 	u32 access_key;
 };
 
-static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie)
+static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data)
 {
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
 	BUILD_BUG_ON(sizeof(struct dma_access_once_cmpl_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	struct dma_access_once_cmpl_cookie *dma_cookie =
 		(struct dma_access_once_cmpl_cookie *)cookie;
-
-	// pr_debug("%s:%d:%s() ENTER: cookie=%p, access_key=0x%x, status=%u\n",
-	// 	 __FILENAME__, __LINE__, __func__, dma_cookie, dma_cookie->access_key, 0);
 
 	cmpl.app_context = dma_cookie->app_context;
 	cmpl.status = 0; /* success */
@@ -572,8 +576,6 @@ static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie
 
 	user_mr_record_put(dma_cookie->mr_record); // one-time
 	hfi1_bulksvc_user_info_put(dma_cookie->user_info);
-
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
@@ -583,9 +585,6 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_queue_record *cmplq_record;
 	u64 offset;
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
-
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
@@ -603,7 +602,7 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 		       __FILENAME__, __LINE__, __func__, cmd->mr_key);
 		goto compl_error;
 	}
-	if (0 != validate_mr_access(&mr_record->dms_mr, cmd->offset, cmd->len)) {
+	if (0 != validate_mr_access(mr_record, cmd->offset, cmd->len)) {
 		pr_err("%s:%d:%s() invalid MR access for key %u, offset %llu, len %u\n",
 		       __FILENAME__, __LINE__, __func__, cmd->mr_key, cmd->offset, cmd->len);
 		goto compl_error;
@@ -614,16 +613,11 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 	hfi1_bulksvc_user_info_get(user_info);
 	user_mr_record_get(mr_record);
 
-//int hfi1_dms_dma_access_once(&svc->dms, (u64)user_info->client_key, &mr_record->dms_mr, cmd->access_key,
-	//		       offset, cmd->len,
-		//	       struct hfi1_dms_tracker_completion const notification)
-
-
 	BUILD_BUG_ON(sizeof(struct dma_access_once_cmpl_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	int rc = hfi1_dms_dma_access_once(
 		&svc->dms, (u64)user_info->client_key, &mr_record->dms_mr,
 		cmd->access_key, offset, cmd->len,
-		(struct hfi1_dms_tracker_completion) {
+		(struct hfi1_dms_access_completion) {
 		.fn = on_dma_access_once_complete,
 		.cookie = *(union hfi1_dms_completion_cookie*)&(struct dma_access_once_cmpl_cookie) {
 			.user_info = user_info,
@@ -651,13 +645,37 @@ compl_error:
 /// GRANT ACCESS TO MEMORY REGION ONGOING
 ///
 
-// struct on_dma_accessed_notification_cookie {
-// 	struct hfi1_bulksvc_user_info* user_info;
-// 	struct hfi1_bulksvc_queue_record* cmplq_record;
-// 	struct hfi1_bulksvc_user_mr_record *mr_record;
-// 	u64 app_context;
-// 	u32 access_key;
-// };
+struct dma_access_notify_cookie {
+	struct hfi1_bulksvc * const svc;
+	struct hfi1_bulksvc_user_info* user_info;
+	u32 cmplq_id;
+	u64 app_context;
+	u32 access_key;
+};
+
+static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data)
+{
+	struct hfi1_bulksvc_queue_record *cmplq_record;
+	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
+
+	BUILD_BUG_ON(sizeof(struct dma_access_notify_cookie) > sizeof(union hfi1_dms_completion_cookie));
+	struct dma_access_notify_cookie *access_cookie = (struct dma_access_notify_cookie *)cookie;
+
+	cmplq_record = get_cmplq_record(access_cookie->svc, access_cookie->user_info, access_cookie->cmplq_id);
+	if (!cmplq_record) {
+		pr_err("%s:%d:%s() ERROR: Unable to get cmplq record for notify\n", __FILENAME__, __LINE__, __func__);
+		return;
+	}
+
+	cmpl.app_context = access_cookie->app_context;
+	cmpl.status = 0; /* success */
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_NOTIFY;
+	cmpl.type_notify.access_key = access_cookie->access_key;
+	cmpl.type_notify.flags = flags;
+	cmpl.type_notify.imm_data = imm_data;
+
+		give_completion(access_cookie->user_info, cmplq_record, &cmpl);
+}
 
 static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_user_info * const user_info,
@@ -666,17 +684,21 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_queue_record *cmplq_record;
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 	int rc;
-	/* TODO: Notifications are not yet implemented */
-	struct hfi1_dms_tracker_completion notification = {
-		.fn = hfi1_dms_tracker_completion_fn_noop
-	};
-
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
 		goto exit;
+
+	struct hfi1_dms_access_completion notification = {
+		.fn = on_dma_access_notify,
+		.cookie = *(union hfi1_dms_completion_cookie*)&(struct dma_access_notify_cookie) {
+			.svc = svc,
+			.user_info = user_info,
+			.cmplq_id = cmd->notification_cmplq_id,
+			.app_context = cmd->notification_app_context,
+			.access_key = cmd->access_key,
+		}
+	};
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
@@ -724,7 +746,6 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 exit:
 	give_completion(user_info, cmplq_record, &cmpl);
 	return;
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
@@ -735,12 +756,11 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 	int rc;
 
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
-
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
-	if (!cmplq_record)
+	if (!cmplq_record) {
+		pr_err("Invalid cmplq id\n");
 		goto exit;
+	}
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
@@ -773,7 +793,6 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 exit:
 	give_completion(user_info, cmplq_record, &cmpl);
 	return;
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 ///
@@ -803,8 +822,6 @@ static void on_mr_rdma_transact_complete(union hfi1_dms_completion_cookie *cooki
 
 	user_mr_record_put(mr_transact_cookie->mr_record); // one-time
 	hfi1_bulksvc_user_info_put(mr_transact_cookie->user_info);
-
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
@@ -815,9 +832,6 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 	int rc;
-
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
@@ -833,7 +847,7 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 		       __FILENAME__, __LINE__, __func__, cmd->mr_key);
 		goto compl_error;
 	}
-	if (0 != validate_mr_access(&mr_record->dms_mr, cmd->mr_offset, cmd->len_bytes)) {
+	if (0 != validate_mr_access(mr_record, cmd->mr_offset, cmd->len_bytes)) {
 		pr_err("%s:%d:%s() invalid MR access for key %u, offset %llu, len %u\n",
 		       __FILENAME__, __LINE__, __func__, cmd->mr_key, cmd->mr_offset, cmd->len_bytes);
 		goto compl_error;
@@ -847,6 +861,7 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 		&svc->dms, cmd->lid,
 		((u64)cmd->client_key << 32) | cmd->access_key,
 		cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr, cmd->mr_offset,
+		cmd->flags, cmd->imm_data,
 		(struct hfi1_dms_tracker_completion) {
 		.fn = on_mr_rdma_transact_complete,
 		.cookie = *(union hfi1_dms_completion_cookie*)&(struct initiated_mr_rdma_transact_completion_cookie) {
@@ -869,7 +884,6 @@ exit:
 
 compl_error:
 	give_completion(user_info, cmplq_record, &cmpl);
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
@@ -881,9 +895,6 @@ static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 	int rc;
 
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd);
-
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
 		goto exit;
@@ -893,7 +904,7 @@ static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
 	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
-	if (!mr_record || validate_mr_access(&mr_record->dms_mr, cmd->mr_offset, cmd->len_bytes) < 0) {
+	if (!mr_record || validate_mr_access(mr_record, cmd->mr_offset, cmd->len_bytes) < 0) {
 		pr_err("%s:%d:%s() invalid MR key %u or access for key %u, offset %llu, len %u\n",
 		       __FILENAME__, __LINE__, __func__, cmd->mr_key, cmd->mr_key, cmd->mr_offset, cmd->len_bytes);
 		goto compl_error;
@@ -902,14 +913,13 @@ static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
 	hfi1_bulksvc_user_info_get(user_info);
 	user_mr_record_get(mr_record);
 
-	/* TODO: RDMA write is not yet implemented. This will be a no-op that
-	 * returns a success completion for now. Need a completion handler.
-	 */
 	rc = hfi1_dms_write_data(&svc->dms, cmd->lid,
 				    ((u64)cmd->client_key << 32) |
 					    cmd->access_key,
 				    cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr,
 				    cmd->mr_offset,
+						(u16) cmd->flags,
+						cmd->imm_data,
 				    (struct hfi1_dms_tracker_completion){
 					.fn = on_mr_rdma_transact_complete,
 					.cookie = *(union hfi1_dms_completion_cookie*)&(struct initiated_mr_rdma_transact_completion_cookie) {
@@ -931,7 +941,6 @@ exit:
 	return;
 compl_error:
 	give_completion(user_info, cmplq_record, &cmpl);
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 
@@ -955,9 +964,6 @@ static void on_rdma_va_complete(
 	struct rdma_va_completion_cookie * const read_cookie =
 		(struct rdma_va_completion_cookie *)cookie;
 
-	// pr_debug("%s:%d:%s() ENTER: cookie=%p, status=%u\n",
-	// 	 __FILENAME__, __LINE__, __func__, cookie, 0);
-
 	cmpl.app_context = read_cookie->app_context;
 	cmpl.status = 0; /* errors not implemented */
 	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
@@ -967,8 +973,6 @@ static void on_rdma_va_complete(
 	user_mr_record_put(read_cookie->mr_record); // Implicitly one-time
 
 	hfi1_bulksvc_user_info_put(read_cookie->user_info);
-
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
@@ -979,12 +983,9 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 	u64 mr_offset;
 
-	pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd=%p\n",
-		   __FILENAME__, __LINE__, __func__, user_info, cmd);
-
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
-		goto exit;
+		return;
 
 	hfi1_bulksvc_user_info_get(user_info);
 
@@ -1000,7 +1001,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 		give_completion(user_info, cmplq_record, &cmpl);
 		hfi1_bulksvc_user_info_put(user_info);
-		goto exit;
+		return;
 	}
 	mr_offset = cmd->vaddr - mr_record->dms_mr.user.addr;
 
@@ -1008,6 +1009,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 	int rc = hfi1_dms_read_data(&svc->dms, cmd->lid,
 		((u64)cmd->client_key << 32) | cmd->access_key,
 		cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr, mr_offset,
+		cmd->flags, cmd->imm_data,
 		(struct hfi1_dms_tracker_completion) {
 		.fn = on_rdma_va_complete,
 		.cookie = *(union hfi1_dms_completion_cookie*)&(struct rdma_va_completion_cookie) {
@@ -1027,16 +1029,12 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 		user_mr_record_put(mr_record);
 		hfi1_bulksvc_user_info_put(user_info);
 	}
-exit:
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 static void bulksvc_on_user_cmd(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_user_info * const user_info,
 	union hfi1_bulksvc_cmd const * const cmd)
 {
-	// pr_debug("%s:%d:%s() ENTER: user_info=%p, cmd op=%u\n",
-	// 	   __FILENAME__, __LINE__, __func__, user_info, cmd->op);
 	switch (cmd->op) {
 	case HFI1_BULKSVC_CMD_REG_DMA_BUFFER:
 		bulksvc_on_cmd_reg_dma_buffer(svc, user_info,
@@ -1075,7 +1073,6 @@ static void bulksvc_on_user_cmd(struct hfi1_bulksvc * const svc,
 		/* TODO enqueue failure somehow */
 		break;
 	}
-	// pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 }
 
 void hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
