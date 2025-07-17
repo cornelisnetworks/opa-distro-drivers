@@ -2057,6 +2057,11 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 	/* If we are going to be loaning resources, find out which ones */
 	dd->verbs_dev.rdi.use_bulksvc = false;
 	if (use_bulksvc) {
+		if (hfi1_max_sges > 255) {
+			pr_err("When using bulksvc, only 255 sges may be used\n");
+			goto bail;
+		}
+
 		if (dd->params->chip_type == CHIP_WFR)
 			dd_dev_dbg(dd, "bulksvc not supported on WFR\n");
 		else {

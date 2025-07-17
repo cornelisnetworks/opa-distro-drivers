@@ -12,6 +12,7 @@
 #include "rc.h"
 #include "verbs_txreq.h"
 #include "trace.h"
+#include "bulksvc_rvt.h"
 
 struct rvt_ack_entry *find_prev_entry(struct rvt_qp *qp, u32 psn, u8 *prev,
 				      u8 *prev_ack, bool *scheduled)
@@ -825,7 +826,23 @@ no_flow_control:
 			    ++qp->s_cur == qp->s_size)
 				qp->s_cur = 0;
 			break;
+		case IB_WR_BULKSVC_READ:
+		case IB_WR_BULKSVC_WRITE:
+		case IB_WR_BULKSVC_WRITE_WITH_IMM:
+			/* we are a special case, we wont actually be sending
+			 * this packet, just handing the info to bulksvc and
+			 * waiting for completion notification.
+			 * So just schedule the handler and move on to next
+			 * wqe. Whether we need to do any qp->state stuff
+			 * remains to be seen.
+			 */
+			verbs_bulksvc_enqueue(priv, ps->s_txreq, wqe);
+			if (++qp->s_cur >= qp->s_size)
+				qp->s_cur = 0;
+			if (++qp->s_tail >= qp->s_size)
+				qp->s_tail = 0;
 
+			goto done_free_tx;
 		case IB_WR_ATOMIC_CMP_AND_SWP:
 		case IB_WR_ATOMIC_FETCH_AND_ADD:
 			/*
@@ -870,7 +887,7 @@ no_flow_control:
 		default:
 			goto bail;
 		}
-		if (wqe->wr.opcode != IB_WR_TID_RDMA_READ) {
+		if (wqe->wr.opcode != IB_WR_TID_RDMA_READ && !ib_wr_opcode_is_hfi1_bulksvc(wqe->wr.opcode)) {
 			qp->s_sge.sge = wqe->sg_list[0];
 			qp->s_sge.sg_list = wqe->sg_list + 1;
 			qp->s_sge.num_sge = wqe->wr.num_sge;

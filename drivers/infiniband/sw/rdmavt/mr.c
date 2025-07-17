@@ -337,6 +337,7 @@ struct ib_mr *rvt_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 			      u64 virt_addr, int mr_access_flags,
 			      struct ib_udata *udata)
 {
+	struct rvt_dev_info *rdi = ib_to_rvt(pd->device);
 	struct rvt_mr *mr;
 	struct ib_umem *umem;
 	struct sg_page_iter sg_iter;
@@ -384,6 +385,15 @@ struct ib_mr *rvt_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 			n = 0;
 		}
 	}
+
+	/* tell driver about new mr and key */
+	if (rdi->driver_f.notify_register_u_mr) {
+		if(rdi->driver_f.notify_register_u_mr(rdi, &mr->mr)) {
+			ret = ERR_PTR(-EINVAL);
+			goto bail_inval;
+		}
+	}
+
 	return &mr->ibmr;
 
 bail_inval:
@@ -509,7 +519,12 @@ bool rvt_ss_has_lkey(struct rvt_sge_state *ss, u32 lkey)
 int rvt_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
 {
 	struct rvt_mr *mr = to_imr(ibmr);
+	struct rvt_dev_info *rdi;
 	int ret;
+
+	rdi = ib_to_rvt(mr->mr.pd->device);
+	if (mr->umem && rdi->driver_f.notify_unregister_u_mr)
+		rdi->driver_f.notify_unregister_u_mr(rdi, &mr->mr);
 
 	rvt_free_lkey(&mr->mr);
 

@@ -8,6 +8,7 @@
 #include "hfi.h"
 #include "dms.h"
 #include "bulksvc_user.h"
+#include "bulksvc_verbs.h"
 
 struct rsm_map_table;
 
@@ -69,6 +70,8 @@ struct hfi1_bulksvc {
 
 	struct mutex user_info_lock;
 	struct list_head user_infos;
+
+	struct hfi1_bulksvc_verbs_state verbs_state;
 
 	/* dummy netdev for napi, should probably be last in struct */
 	struct net_device dummy_napi;

@@ -57,7 +57,6 @@ static struct mmu_rb_ops bulksvc_rb_ops = {
 	.evict = bulksvc_rb_evict,
 };
 
-/* initialize the user_info->mmu stucture */
 int init_bulksvc_mmu(struct hfi1_bulksvc_user_info *uinfo)
 {
 	struct hfi1_bulksvc *svc;
@@ -193,14 +192,11 @@ struct hfi1_mem_region *hfi1_mem_region_pin(struct mmu_rb_handler *handler,
 	// but for now just create a new one
 	e = find_system_node(handler, start, end);
 	if (e != NULL && e->rb.len == len) {
-		pr_debug("hfi1_mem_region_pin: found existing %p for vaddr %lx len %llu - (start, end) This: (%lx, %lx) MR: (%lx %lx)\n",
-			 e, vaddr, len, start, end, e->rb.addr, e->rb.addr + e->rb.len);
 		return e;
 	} else if (e != NULL) {
-		pr_debug("hfi1_mem_region_pin: found existing %p for vaddr %lx len %llu but wrong length! - (start, end) This: (%lx, %lx) MR: (%lx %lx)\n",
+		pr_warn("hfi1_mem_region_pin: found existing %p for vaddr %lx len %llu but wrong length! - (start, end) This: (%lx, %lx) MR: (%lx %lx)\n",
 			 e, vaddr, len, start, end, e->rb.addr, e->rb.addr + e->rb.len);
 		
-		// kref_put(&e->rb.refcount, hfi1_mmu_rb_release);
 		e = NULL;
 	}
 
@@ -212,18 +208,14 @@ struct hfi1_mem_region *hfi1_mem_region_pin(struct mmu_rb_handler *handler,
 
 	/* This kref will become the hfi1_mem_region's kref */
 	kref_get(&e->rb.refcount);
-	pr_debug("hfi1_mem_region_pin: vaddr %lx len %llu start %lx end %lx\n",
-		 vaddr, len, start, end);
 
 	e->rb.handler = handler;
 
 	ret = pin_bulksvc_pages(dd, e, start, PFN_DOWN(len));
 	if (!ret) {
-		pr_debug("hfi1_mem_region_pin: pinned successfully vaddr %lx len %llu start %lx end %lx\n",
-			 vaddr, len, start, end);
 		ret = hfi1_mmu_rb_insert(handler, &e->rb);
 		if (ret) {
-			pr_debug("hfi1_mem_region_pin: failed to insert vaddr %lx len %llu start %lx end %lx ret %d\n",
+			pr_warn("hfi1_mem_region_pin: failed to insert vaddr %lx len %llu start %lx end %lx ret %d\n",
 				 vaddr, len, start, end, ret);
 			bulksvc_rb_remove(handler->ops_arg, &e->rb);
 			return NULL;
@@ -231,7 +223,7 @@ struct hfi1_mem_region *hfi1_mem_region_pin(struct mmu_rb_handler *handler,
 
 		return e;
 	}
-	pr_debug("hfi1_mem_region_pin: could not pin vaddr %lx len %llu start %lx end %lx ret %d\n",
+	pr_warn("hfi1_mem_region_pin: could not pin vaddr %lx len %llu start %lx end %lx ret %d\n",
 		 vaddr, len, start, end, ret);
 	kfree(e);
 	e = NULL;
