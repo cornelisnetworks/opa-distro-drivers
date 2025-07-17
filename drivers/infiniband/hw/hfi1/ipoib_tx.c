@@ -713,6 +713,7 @@ int hfi1_ipoib_txreq_init(struct hfi1_ipoib_dev_priv *priv)
 			    0,
 			    hfi1_ipoib_flush_txq,
 			    NULL,
+			    NULL,
 			    hfi1_ipoib_sdma_sleep,
 			    hfi1_ipoib_sdma_wakeup,
 			    NULL,

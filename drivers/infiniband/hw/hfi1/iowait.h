@@ -21,6 +21,7 @@ typedef void (*restart_t)(struct work_struct *work);
 
 #define IOWAIT_PENDING_IB  0x0
 #define IOWAIT_PENDING_TID 0x1
+#define IOWAIT_PENDING_BTS 0x2
 
 /*
  * A QP can have multiple Send Engines (SEs).
@@ -28,9 +29,10 @@ typedef void (*restart_t)(struct work_struct *work);
  * The current use case is for supporting a TID RDMA
  * packet build/xmit mechanism independent from verbs.
  */
-#define IOWAIT_SES 2
+#define IOWAIT_SES 3
 #define IOWAIT_IB_SE 0
 #define IOWAIT_TID_SE 1
+#define IOWAIT_BTS_SE 2
 
 struct sdma_txreq;
 struct sdma_engine;
@@ -130,6 +132,7 @@ void iowait_clear_flag(struct iowait *wait, u32 flag);
 void iowait_init(struct iowait *wait, u32 tx_limit,
 		 void (*func)(struct work_struct *work),
 		 void (*tidfunc)(struct work_struct *work),
+		 void (*btsfunc)(struct work_struct *work),
 		 int (*sleep)(struct sdma_engine *sde,
 			      struct iowait_work *wait,
 			      struct sdma_txreq *tx,
@@ -161,6 +164,12 @@ static inline bool iowait_tid_schedule(struct iowait *wait,
 				       struct workqueue_struct *wq, int cpu)
 {
 	return !!queue_work_on(cpu, wq, &wait->wait[IOWAIT_TID_SE].iowork);
+}
+
+static inline bool iowait_bts_schedule(struct iowait *wait,
+				       struct workqueue_struct *wq, int cpu)
+{
+	return !!queue_work_on(cpu, wq, &wait->wait[IOWAIT_BTS_SE].iowork);
 }
 
 /**

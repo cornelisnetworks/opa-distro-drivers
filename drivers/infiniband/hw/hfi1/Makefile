@@ -18,7 +18,9 @@ hfi1-y := \
 	affinity.o \
 	aspm.o \
 	bulksvc.o \
+	bulksvc_rvt.o \
 	bulksvc_user.o \
+	bulksvc_verbs.o \
 	chip.o \
 	chip_gen.o \
 	chip_jkr.o \
