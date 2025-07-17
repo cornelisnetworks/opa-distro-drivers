@@ -66,21 +66,23 @@ enum hfi1_dms_mr_mode {
 };
 
 struct hfi1_dms_mr {
-	struct hfi1_mem_region * hfi1_mr;
-//	struct {
-//		unsigned long addr;
-//		unsigned long len;
-//	} extended;
+	struct {
+		unsigned long addr;
+		unsigned long len;
+	} extended_vaddr;
+	
+	struct page** pages;
+	dma_addr_t *dma_list;
+	unsigned int npages_total;
+	unsigned int npages_pinned;
+
 	struct {
 		unsigned long addr;	// user unaligned vaddr of start of buffer
 		unsigned long len;  // number of bytes in the user buffer
 	} user;
 	u64 region_offset; // offset into the mr (from the first page address) where the user buffer starts
-	//struct page** pages;
-	//dma_addr_t *dma_list;
-	//unsigned int npages_total;
-	//unsigned int npages_pinned;
 	enum hfi1_dms_mr_mode mode;
+	u32 active_count;
 
 	int (*pinned_check_fn)(struct hfi1_dms_mr *mr, unsigned int start_page_index, unsigned int npages_to_request);
 };
@@ -90,31 +92,59 @@ enum hfi1_dms_access_type {
 	HFI1_DMS_ACCESS_TYPE_EPHEMERAL = 1,
 };
 
+typedef void (*hfi1_dms_access_completion_fn)(union hfi1_dms_completion_cookie *, u16, u64);
+
+struct hfi1_dms_access_completion {
+	hfi1_dms_access_completion_fn fn;
+	union hfi1_dms_completion_cookie cookie;
+};
+
 struct hfi1_dms_access {
 	struct rb_node node;
 	struct hfi1_dms_dlist_element element;
 	u64 dms_key;
 	u32 access_key;
 	enum hfi1_dms_access_type type;
-	struct hfi1_dms_tracker_completion completion;
+	struct hfi1_dms_access_completion completion;
 	struct hfi1_dms_mr *mr; // memory region this access is for
 	u64 offset; // offset into the memory region
 	u64 size; // size of the access in bytes
 	u32 active_count; // number of transfers currently using this access
 };
 
+ enum hfi1_dms_tx_tracker_op {
+	HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE = 0,
+	HFI1_DMS_TX_TRACKER_OP_RDMA_READ = 1,
+ };
 
 struct hfi1_dms_tx_tracker {
 	struct hfi1_dms_dlist_element dlist;
-	int rift_index;
-	struct hfi1_dms_access * access;
+	u16 rift_index;
+	u32 total_payload;
+	u32 payload_remaining;
 
-	u64 total_payload;
+	u32 xfer_start_byte_offset; // byte offset from start of first mr page to the start of the xfer buffer
+
+	enum hfi1_dms_tx_tracker_op op;
+	union {
+		struct {
+			struct hfi1_dms_mr *mr;
+			struct hfi1_dms_tracker_completion completion;
+		} write;
+		struct {
+			struct hfi1_dms_access * access;
+		} read;
+	};
+
 	//u64 start_offset; // offset from start of mr (page-aligned) to start of xfer buffer
-	u64 payload_remaining;
-	
-	struct hfi1_dms_tracker_completion completion;
 };
+
+
+ enum hfi1_dms_rx_tracker_op {
+	HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE = 0,
+	HFI1_DMS_RX_TRACKER_OP_RDMA_READ = 1,
+ };
+
 
 #define HFI1_DMS_TX_RIFT_INDEX_NOT_SET (-1)
 // TODO: a better way to handle this pending state?
@@ -122,23 +152,41 @@ struct hfi1_dms_tx_tracker {
 struct hfi1_dms_rx_tracker {
 	struct hfi1_dms_dlist_element dlist;
 
-	u64 payload_requested;
-	u64 payload_remaining;
-	u64 total_payload;
+	u32 payload_requested;
+	u32 payload_remaining;
+	u32 total_payload;
 
-	u64 sbuf_offset; // Current offset into the _user region_ of the sbuf on the other side
+	u32 sbuf_offset; // Current offset into the _user region_ of the sbuf on the other side
 	u64 rbuf_offset; // Current absolute offset into rbuf
 	u64 rbuf_start_offset; // Offset into the rbuf where the data starts
-	u64 sbuf_start_offset; // Offset into the sbuf where the data starts
+	u64 sbuf_start_offset; // Offset into the sbuf where the data starts; interpreted on the remote as either a byte offset or a virtual address
 
-	u64 dms_key;
-	u32 src_lid; /* lid where dms_key lives */
+	u32 src_lid;
 	int tx_rift_index;
 
 	// receiving buffer
-	struct hfi1_mem_region *rbuf;
+	struct hfi1_dms_mr *rbuf;
 
-	struct hfi1_dms_tracker_completion completion;
+
+	enum hfi1_dms_rx_tracker_op op;
+	union {
+		struct {
+			struct hfi1_dms_access * access;
+			u16 flags;
+			u16 unused[3];
+			u64 imm_data;
+		} write;
+
+		struct {
+			u64 dms_key;
+			struct hfi1_dms_tracker_completion completion;
+			u16 flags;
+			u16 unused[3];
+			u64 imm_data;
+		} read;
+
+	};
+
 };
 
 struct hfi1_dms_read_request_state {
@@ -300,6 +348,7 @@ struct hfi1_dms {
 	struct hfi1_dms_rift tx_rift;
 
 	struct hfi1_dms_work_item_mgr work_items;
+
 	struct dms_counters counters;
 };
 
@@ -309,28 +358,31 @@ void hfi1_dms_uninit(struct hfi1_dms *dms);
 // struct hfi1_dms_mr * hfi1_dms_mr_new(struct mmu_rb_handler *handler, uintptr_t vaddr, u64 len);
 // int hfi1_dms_mr_free(struct hfi1_dms_mr *mr);
 
-int hfi1_dms_register_access(struct hfi1_dms *dms, struct hfi1_dms_mr *mr, u64 offset, u32 size, u64 dms_key, struct hfi1_dms_tracker_completion const completion, enum hfi1_dms_access_type access_type);
+int hfi1_dms_register_access(struct hfi1_dms *dms, struct hfi1_dms_mr *mr, u64 offset, u32 size, u64 dms_key, struct hfi1_dms_access_completion const completion,
+		enum hfi1_dms_access_type access_type, struct hfi1_dms_access **out);
+	
 // This probably isn't a real function or won't be like this
 // but it's useful for now on the testing side
 int hfi1_dms_unregister_access(struct hfi1_dms *dms, u64 dms_key);
-int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, u64 dms_key, u64 offset, u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, struct hfi1_dms_tracker_completion const completion);
+int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, u64 dms_key, u64 offset, u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data, struct hfi1_dms_tracker_completion const completion);
 
 int hfi1_dms_dma_access_once(struct hfi1_dms *dms, u32 client_key, struct hfi1_dms_mr *mr, u32 access_key,
 			       u64 offset, u32 len,
-			       struct hfi1_dms_tracker_completion const notification);
+			       struct hfi1_dms_access_completion const notification);
 int hfi1_dms_dma_access_enable(struct hfi1_dms *dms, u32 client_key, struct hfi1_dms_mr *mr, u32 access_key,
-			       u64 offset, u32 len,
-			       struct hfi1_dms_tracker_completion const notification);
+			       u64 offset_into_buffer, u32 len,
+			       struct hfi1_dms_access_completion const notification);
 int hfi1_dms_dma_access_disable(struct hfi1_dms *dms, u32 client_key, u32 access_key);
 
 int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, u64 dms_key, u64 remote_offset,
-			u32 size, struct hfi1_dms_mr *mr, u64 mr_offset,
+			u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data,
 			struct hfi1_dms_tracker_completion const completion);
 
 // This is only here for now to debug, this will be removed
 /* in the future when we have interrupts linked up */
 int hfi1_dms_poll(struct hfi1_dms *dms);
 
+void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, u16 flags, u64 imm_data);
 void hfi1_dms_tracker_completion_fn_noop(union hfi1_dms_completion_cookie * cookie);
 
 /* called when user info is being freed */

@@ -124,6 +124,8 @@ struct hfi1_qp_priv {
 	struct timer_list s_tid_timer;            /* for timing tid wait */
 	struct timer_list s_tid_retry_timer;      /* for timing tid ack */
 	struct list_head tid_wait;                /* for queueing tid space */
+	// struct work_struct bts_compl_work;	  /* for queueing bts completions */
+	struct list_head   bts_compl_list;	  /* list of queued bts completions */
 	struct hfi1_opfn_data opfn;
 	struct tid_flow_state flow_state;
 	struct tid_rdma_qp_params tid_rdma;
@@ -168,6 +170,8 @@ struct hfi1_qp_priv {
 	u32 s_resync_psn;
 	u8 sync_pt;           /* Set when QP reaches sync point */
 	u8 resync;
+
+	struct hfi1_bulksvc_qp_info *bulksvc_qp_info;
 };
 
 #define HFI1_QP_WQE_INVALID   ((u32)-1)

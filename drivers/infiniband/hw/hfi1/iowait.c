@@ -41,6 +41,7 @@ inline void iowait_clear_flag(struct iowait *wait, u32 flag)
 void iowait_init(struct iowait *wait, u32 tx_limit,
 		 void (*func)(struct work_struct *work),
 		 void (*tidfunc)(struct work_struct *work),
+		 void (*btsfunc)(struct work_struct *work),
 		 int (*sleep)(struct sdma_engine *sde,
 			      struct iowait_work *wait,
 			      struct sdma_txreq *tx,
@@ -69,8 +70,10 @@ void iowait_init(struct iowait *wait, u32 tx_limit,
 		INIT_LIST_HEAD(&wait->wait[i].tx_head);
 		if (i == IOWAIT_IB_SE)
 			INIT_WORK(&wait->wait[i].iowork, func);
-		else
+		else if (i == IOWAIT_TID_SE)
 			INIT_WORK(&wait->wait[i].iowork, tidfunc);
+		else
+			INIT_WORK(&wait->wait[i].iowork, btsfunc);
 	}
 }
 

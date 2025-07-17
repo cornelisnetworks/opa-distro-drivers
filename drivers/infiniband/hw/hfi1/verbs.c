@@ -26,6 +26,7 @@
 #include "affinity.h"
 #include "ipoib.h"
 #include "uverbs.h"
+#include "bulksvc_rvt.h"
 
 static unsigned int hfi1_lkey_table_size = 16;
 module_param_named(lkey_table_size, hfi1_lkey_table_size, uint,
@@ -1617,6 +1618,32 @@ unsigned int hfi1_get_npkeys(struct hfi1_devdata *dd)
 	return dd->params->pkey_table_size;
 }
 
+static int hfi1_register_user_mr(struct rvt_dev_info *rdi,
+				 struct rvt_mregion *mr)
+{
+	struct hfi1_ibdev *verbs_dev = dev_from_rdi(rdi);
+	struct hfi1_devdata *dd = dd_from_dev(verbs_dev);
+
+	/* only bulksvc things care about this at the moment */
+	if (!dd->bulksvc)
+		return 0;
+	return verbs_bulksvc_reg_mr(dd->bulksvc, mr);
+
+}
+
+static void hfi1_unreg_user_mr(struct rvt_dev_info *rdi,
+			       struct rvt_mregion *mr)
+{
+	struct hfi1_ibdev *verbs_dev = dev_from_rdi(rdi);
+	struct hfi1_devdata *dd = dd_from_dev(verbs_dev);
+
+	/* only bulksvc things care about this at the moment */
+	if (!dd->bulksvc)
+		return;
+	verbs_bulksvc_dereg_mr(dd->bulksvc, mr);
+
+}
+
 static void init_ibport(struct hfi1_pportdata *ppd)
 {
 	struct hfi1_ibport *ibp = &ppd->ibport_data;
@@ -1951,6 +1978,8 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	dd->verbs_dev.rdi.driver_f.alloc_ucontext = hfi1_alloc_ucontext;
 	dd->verbs_dev.rdi.driver_f.dealloc_ucontext = hfi1_dealloc_ucontext;
 	dd->verbs_dev.rdi.driver_f.mmap = hfi1_rdma_mmap;
+	dd->verbs_dev.rdi.driver_f.notify_register_u_mr = hfi1_register_user_mr;
+	dd->verbs_dev.rdi.driver_f.notify_unregister_u_mr = hfi1_unreg_user_mr;
 
 	/* completeion queue */
 	dd->verbs_dev.rdi.ibdev.num_comp_vectors = dd->comp_vect_possible_cpus;

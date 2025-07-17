@@ -25,6 +25,7 @@ struct verbs_txreq {
 	struct kref		ref;
 	u16                     hdr_dwords;
 	u16			s_cur_size;
+	int			bts_rc;
 };
 
 struct hfi1_ibdev;
