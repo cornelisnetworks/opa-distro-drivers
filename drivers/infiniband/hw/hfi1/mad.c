@@ -3724,14 +3724,19 @@ static int pma_set_opa_errorinfo(struct opa_pma_mad *pmp,
 		/* turn off status bit */
 		dd->err_info_rcvport.status_and_code &= ~OPA_EI_STATUS_SMASK;
 
-	/* ExcessiverBufferOverrunInfo */
-	if (error_info_select & ES_EXCESSIVE_BUFFER_OVERRUN_INFO)
+	/* ExcessiveBufferOverrunInfo */
+	if (error_info_select & ES_EXCESSIVE_BUFFER_OVERRUN_INFO) {
 		/*
 		 * status bit is essentially kept in the h/w - bit 5 of
 		 * RCV_ERR_INFO
 		 */
 		write_iport_csr(dd, ppd->hw_pidx, dd->params->rcv_err_info_reg,
 				RCV_ERR_INFO_RCV_EXCESS_BUFFER_OVERRUN_SMASK);
+		if (dd->is_sriov)
+			write_iport_csr(dd, loopback_pidx(ppd),
+					dd->params->rcv_err_info_reg,
+					RCV_ERR_INFO_RCV_EXCESS_BUFFER_OVERRUN_SMASK);
+	}
 
 	if (error_info_select & ES_PORT_XMIT_CONSTRAINT_ERROR_INFO)
 		dd->err_info_xmit_constraint.status &= ~OPA_EI_STATUS_SMASK;

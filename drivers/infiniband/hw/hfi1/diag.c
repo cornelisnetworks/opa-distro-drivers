@@ -479,7 +479,7 @@ static ssize_t diagpkt_send(struct diag_pkt *dp)
 		 *
 		 * FIXME: DLID
 		 */
-		dp->pbc = dd->params->create_pbc(ppd, 0, 0, 0, total_len,
+		dp->pbc = dd->params->create_pbc(ppd, false, 0, 0, 0, total_len,
 						 PBC_L2_9B, 0,
 						 sc->hw_context);
 	} else {
@@ -966,7 +966,7 @@ static ssize_t hfi1_snoop_write(struct file *fp, const char __user *data,
 		 *
 		 * FIXME: DLID
 		 */
-		pbc = dd->params->create_pbc(ppd, 0, 0, vl, len,
+		pbc = dd->params->create_pbc(ppd, false, 0, 0, vl, len,
 					     PBC_L2_9B, 0, sc->hw_context);
 	} else {
 		if (copy_from_user(&pbc, data, sizeof(pbc)))
@@ -1894,7 +1894,7 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 				dlid = ib_get_dlid(&ps->s_txreq->phdr.hdr.ibh);
 			}
 
-			pbc = dd->params->create_pbc(ppd, pbc, qp->srate_mbps,
+			pbc = dd->params->create_pbc(ppd, false, pbc, qp->srate_mbps,
 						     vl, plen,
 						     l2, dlid,
 						     priv->s_sendcontext->hw_context);
