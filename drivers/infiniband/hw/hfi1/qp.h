@@ -86,6 +86,7 @@ bool _hfi1_schedule_send(struct rvt_qp *qp);
 bool hfi1_schedule_send(struct rvt_qp *qp);
 
 void hfi1_migrate_qp(struct rvt_qp *qp);
+int hfi1_valid_qp(struct hfi1_pportdata *ppd, u32 qpn);
 
 /*
  * Functions provided by hfi1 driver for rdmavt to use
