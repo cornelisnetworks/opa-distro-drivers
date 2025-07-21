@@ -809,6 +809,145 @@ unsigned free_all_qps(struct rvt_dev_info *rdi)
 	return qp_inuse;
 }
 
+/* this is a duplicate of sw/rdmavt/qp.c */
+static void get_map_page(struct rvt_qpn_table *qpt,
+			 struct rvt_qpn_map *map)
+{
+	unsigned long page = get_zeroed_page(GFP_KERNEL);
+
+	/* Free the page if someone raced with us installing it. */
+
+	spin_lock(&qpt->lock);
+	if (map->page)
+		free_page(page);
+	else
+		map->page = (void *)page;
+	spin_unlock(&qpt->lock);
+}
+
+/*
+ * Ensure the context number part of QPN remains within bounds of
+ * recv contexts assigned to this unit. This context number has no
+ * relationship to how the QPN is used, it is only to differentiate
+ * "ours" vs. "theirs" for QPNs associated with the same physical
+ * adapter port (SLID == DLID).
+ */
+static u32 fixup_qpn(u32 qpn, struct rvt_qpn_table *qpt, struct hfi1_devdata *dd)
+{
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	u32 qpm = dd->rctxt_mask << 1;
+	u32 qpi = dd->rctxt_mask + 1; /* incrementer for context part */
+
+	if (((qpn & qpm) >> 1) >= dr->c.last_rcv_context) {
+		qpn = (qpn & ~qpm) + ((qpi | dr->c.first_rcv_context) << 1);
+		/* wrap at end of current maps or end of number space */
+		if (qpn / RVT_BITS_PER_PAGE >= qpt->nmaps || qpn >= RVT_QPN_MAX)
+			qpn = (dr->c.first_rcv_context << 1) | ((qpn & 1) ^ 1);
+	}
+	if (qpn == qpt->last) {
+		/* one full pass completed */
+		qpn = RVT_QPN_MAX;
+	}
+	return qpn;
+}
+
+static u32 next_qpn(u32 qpn, struct rvt_qpn_table *qpt, struct hfi1_devdata *dd)
+{
+	return fixup_qpn(qpn + qpt->incr, qpt, dd);
+}
+
+static u32 first_qpn(struct rvt_qpn_table *qpt, struct hfi1_devdata *dd)
+{
+	return next_qpn(qpt->last, qpt, dd);
+}
+
+static u32 new_map_qpn(struct rvt_qpn_table *qpt, struct hfi1_devdata *dd)
+{
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	u32 qpn;
+
+	if (qpt->nmaps == RVT_QPNMAP_ENTRIES)
+		return RVT_QPN_MAX;
+	qpn = qpt->nmaps++ * RVT_BITS_PER_PAGE +
+		(dr->c.first_rcv_context << 1) +
+		(qpt->last & 1);
+	return qpn;
+}
+
+/*
+ * use only qpn[8:1] that fall inside our context number range,
+ * to avoid conflicts with other VFs or PF0.
+ *
+ * cloned from sw/rdmavt/qp.c
+ */
+int sriov_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
+		    enum ib_qp_type type, u32 port_num)
+{
+	struct hfi1_ibdev *ibdev = dev_from_rdi(rdi);
+	struct hfi1_devdata *dd = dd_from_dev(ibdev);
+	u32 offset, qpn;
+	struct rvt_qpn_map *map;
+	u32 ret;
+
+	/* Must not be using QoS... ? also qpt->incr == 2? */
+	if (rdi->dparms.qos_shift != 1) {
+		ret = -EINVAL;
+		goto bail;
+	}
+
+	/* These are the same no matter what */
+	if (type == IB_QPT_SMI || type == IB_QPT_GSI) {
+		unsigned int n;
+
+		ret = type == IB_QPT_GSI;
+		n = 1 << (ret + 2 * (port_num - 1));
+		spin_lock(&qpt->lock);
+		if (qpt->flags & n)
+			ret = -EINVAL;
+		else
+			qpt->flags |= n;
+		spin_unlock(&qpt->lock);
+		goto bail;
+	}
+
+	/*
+	 * qpn[8:1] will always match a valid ctxt number for the SI.
+	 * This does not mean bits [8:1] indicate the receiving ctxt,
+	 * it only avoids conflicts with other SIs and allows
+	 * easier setup of RcvQPMapTable CSRs.
+	 */
+	qpn = first_qpn(qpt, dd);
+	/*
+	 * First, scan existing maps once (qpt->last..(qpt->nmaps)..qpt->last).
+	 * If none found, allocate a new map - which is guaranteed
+	 * to have freespace. If RVT_QPNMAP_ENTRIES is reached then fail.
+	 */
+	for (;;) {
+		if (unlikely(qpn >= RVT_QPN_MAX)) {
+			qpn = new_map_qpn(qpt, dd);
+			if (unlikely(qpn >= RVT_QPN_MAX))
+				goto nomem;
+		}
+		offset = qpn & RVT_BITS_PER_PAGE_MASK;
+		map = &qpt->map[qpn / RVT_BITS_PER_PAGE];
+		if (unlikely(!map->page)) {
+			get_map_page(qpt, map);
+			if (unlikely(!map->page))
+				goto nomem;
+		}
+		if (!test_and_set_bit(offset, map->page)) {
+			qpt->last = qpn;
+			ret = qpn;
+			goto bail;
+		}
+		qpn = next_qpn(qpn, qpt, dd);
+	}
+nomem:
+	ret = -ENOMEM;
+bail:
+	return ret;
+}
+
 void flush_qp_waiters(struct rvt_qp *qp)
 {
 	lockdep_assert_held(&qp->s_lock);

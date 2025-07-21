@@ -27,6 +27,10 @@
 #include "ipoib.h"
 #include "uverbs.h"
 #include "bulksvc_rvt.h"
+#include "sriov.h"
+
+extern int sriov_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
+			   enum ib_qp_type type, u32 port_num);
 
 static unsigned int hfi1_lkey_table_size = 16;
 module_param_named(lkey_table_size, hfi1_lkey_table_size, uint,
@@ -2001,6 +2005,11 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 						RDMA_CORE_CAP_OPA_AH;
 	dd->verbs_dev.rdi.dparms.max_mad_size = OPA_MGMT_MAD_SIZE;
 
+	if (dd->is_sriov) {
+		dd->verbs_dev.rdi.driver_f.alloc_qpn = sriov_alloc_qpn;
+		dd->verbs_dev.rdi.dparms.qpn_start = (dd->rsrcs.c.first_rcv_context << 1) -
+			(1 << max_qos_shift);
+	}
 	dd->verbs_dev.rdi.driver_f.qp_priv_alloc = qp_priv_alloc;
 	dd->verbs_dev.rdi.driver_f.qp_priv_init = hfi1_qp_priv_init;
 	dd->verbs_dev.rdi.driver_f.qp_priv_free = qp_priv_free;
