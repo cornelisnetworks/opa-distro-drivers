@@ -5788,8 +5788,6 @@ int update_from_opa_portinfo(struct hfi1_pportdata *ppd,
 	if (dd->is_sriov && !dd->is_vf) {
 		/*
 		 * TODO: does this need to be spawned off to a WQ?
-		 * That requires making a copy of 'smp' since caller
-		 * may destroy that on return from here.
 		 */
 		i = pf2vf_push_portinfo(ppd, smp, pi, VF2PF_SI_ALL);
 		if (i)
