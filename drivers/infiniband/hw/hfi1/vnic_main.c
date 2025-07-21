@@ -255,7 +255,11 @@ static netdev_tx_t hfi1_netdev_start_xmit(struct sk_buff *skb,
 
 	/* the start of skb is now the VNIC 16B header - extract the dlid */
 	dlid = hfi1_16B_get_dlid(hdr);
-	pbc = dd->params->create_pbc(&dd->pport[rn->port_num - 1], flags, 0,
+	/*
+	 * TODO: determine if sending between VMs on same host,
+	 * error if JKR else use loopback port (false => true).
+	 */
+	pbc = dd->params->create_pbc(&dd->pport[rn->port_num - 1], false, flags, 0,
 				     mdata->vl, total_len, PBC_L2_16B, dlid,
 				     sctxt);
 

@@ -338,7 +338,11 @@ static void hfi1_ipoib_build_ib_tx_headers(struct ipoib_txreq *tx,
 					  HFI1_IPOIB_ENTROPY_SHIFT) | sqpn);
 
 	/* Construct the pbc. */
-	pbc = dd->params->create_pbc(ppd, pbc_sc4_flag(txp->flow.sc5), 0,
+	/*
+	 * TODO: determine if sending between VMs on same host,
+	 * error if JKR else use loopback port (false => true).
+	 */
+	pbc = dd->params->create_pbc(ppd, false, pbc_sc4_flag(txp->flow.sc5), 0,
 				     sc_to_vlt(ppd, txp->flow.sc5),
 				     dwords - SIZE_OF_CRC +
 					(sizeof(sdma_hdr->pbc) >> 2),

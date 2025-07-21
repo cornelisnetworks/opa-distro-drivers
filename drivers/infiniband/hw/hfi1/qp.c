@@ -948,6 +948,22 @@ bail:
 	return ret;
 }
 
+/*
+ * This determines QPN validity for use with 'ppd' based on sriov_alloc_qpn(),
+ * specifically the algorithm of fixup_qpn().
+ */
+int hfi1_valid_qp(struct hfi1_pportdata *ppd, u32 qpn)
+{
+	struct hfi1_devrsrcs *dr = &ppd->dd->rsrcs;
+	u32 qpm = ppd->dd->rctxt_mask << 1;
+	u16 ctxt;
+
+	if (!ppd->dd->is_sriov)
+		return 1;
+	ctxt = (qpn & qpm) >> 1;
+	return (ctxt >= dr->c.first_rcv_context && ctxt < dr->c.last_rcv_context);
+}
+
 void flush_qp_waiters(struct rvt_qp *qp)
 {
 	lockdep_assert_held(&qp->s_lock);

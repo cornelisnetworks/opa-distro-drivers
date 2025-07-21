@@ -682,6 +682,9 @@ void jkr_set_port_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
 	 */
 	reg = (u64)(expected_count >> RCV_SHIFT);
 	write_iprc_csr(dd, pidx, ctxt, JKR_RCV_TID_PAIR_COUNT, reg);
+	if (dd->is_sriov)
+		write_iprc_csr(dd, loopback_pidx_dd(dd, pidx),
+			       ctxt, JKR_RCV_TID_PAIR_COUNT, reg);
 }
 
 static inline u32 rcvarray_offset(u32 ctxt, u32 index, u32 type)
@@ -784,6 +787,35 @@ void jkr_init_tids(struct hfi1_devdata *dd)
 		}
 	}
 	write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, save);
+}
+
+void jkr_ena_rcv_ctxt(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, bool enable)
+{
+	u64 bits = JKR_RCV_PKT_CTRL_RCV_PORT_ENABLE_SMASK |
+		   JKR_RCV_PKT_CTRL_CONTEXT_ENABLED_SMASK;
+	u64 reg;
+
+	reg = read_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL);
+	/* always clear the L2TypeEnable field */
+	reg &= ~JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SMASK;
+	if (enable) {
+		/* allow 16B and 9B L2 */
+		reg |= bits |
+		       (0xcull << JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SHIFT);
+	} else {
+		reg &= ~bits;
+	}
+	write_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
+}
+
+void jkr_upd_rcv_hdr_size(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, u32 size)
+{
+	u64 reg;
+
+	reg = read_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL);
+	reg &= ~JKR_RCV_PKT_CTRL_HDR_SIZE_SMASK;
+	reg |= (u64)size << JKR_RCV_PKT_CTRL_HDR_SIZE_SHIFT;
+	write_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
 }
 
 /* chip specific rcv context enable, disable */
@@ -939,8 +971,8 @@ const struct flag_data jkr_egress_err_info_data = {
 	| JKR_SEND_CTXT_CHECK_ENABLE_DISALLOW16BKDETH_PACKETS_SMASK \
 	)
 
-void jkr_set_pio_integrity(struct hfi1_devdata *dd, u32 pidx, u32 hw_context, int type,
-			   enum spi_cmds cmd)
+static void jkr_set_pio_integ(struct hfi1_devdata *dd, u32 pidx, u32 hw_context, int type,
+			      enum spi_cmds cmd)
 {
 	u64 val;
 
@@ -992,6 +1024,14 @@ void jkr_set_pio_integrity(struct hfi1_devdata *dd, u32 pidx, u32 hw_context, in
 	write_epsc_csr(dd, pidx, hw_context,
 		       dd->params->send_ctxt_check_enable_reg, val);
 
+}
+
+void jkr_set_pio_integrity(struct hfi1_devdata *dd, u32 pidx, u32 hw_context, int type,
+			   enum spi_cmds cmd)
+{
+	jkr_set_pio_integ(dd, pidx, hw_context, type, cmd);
+	if (dd->is_sriov)
+		jkr_set_pio_integ(dd, loopback_pidx_dd(dd, pidx), hw_context, type, cmd);
 }
 
 void jkr_read_link_quality(struct hfi1_pportdata *ppd, u8 *link_quality)
