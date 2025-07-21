@@ -255,6 +255,17 @@ void vf2pf_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
 	dd_dev_err(dd, "%s not implemented\n", __func__);
 }
 
+int vf2pf_init_rxe_rsm(struct hfi1_devdata *dd)
+{
+	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
+		struct hfi1_devdata *pdd = pci_get_drvdata(dd->pcidev->physfn);
+
+		return init_rxe_rsm(pdd, &dd->rsrcs);
+	}
+	/* TODO: send message to PF0 */
+	return -EINVAL;
+}
+
 u16 vf2pf_get_qp_map(struct hfi1_devdata *dd, int pidx, u16 idx)
 {
 	if (IS_LOCAL_VF(dd)) { /* VF and PF0 are using the same driver/OS instance */
