@@ -616,6 +616,9 @@ void return_cnp_16B(struct hfi1_ibport *ibp, struct rvt_qp *qp,
 	struct hfi1_devdata *dd = ppd->dd;
 	u32 nwords;
 
+	/* should only be called for WFR, creat_pbc ignores loopback param */
+	WARN_ON(dd->params->chip_type != CHIP_WFR);
+
 	hdr.hdr_type = HFI1_PKT_TYPE_16B;
 	/* Populate length */
 	if (dd->params->chip_type == CHIP_WFR) {
@@ -658,7 +661,7 @@ void return_cnp_16B(struct hfi1_ibport *ibp, struct rvt_qp *qp,
 	plen = 2 /* PBC */ + hwords + nwords;
 	vl = sc_to_vlt(ppd, sc5);
 	if (ctxt) {
-		pbc = dd->params->create_pbc(ppd, 0, qp->srate_mbps, vl, plen,
+		pbc = dd->params->create_pbc(ppd, false, 0, qp->srate_mbps, vl, plen,
 					     PBC_L2_16B, dlid,
 					     ctxt->hw_context);
 		pbuf = sc_buffer_alloc(ctxt, plen, NULL, NULL);
@@ -683,6 +686,9 @@ void return_cnp(struct hfi1_ibport *ibp, struct rvt_qp *qp, u32 remote_qpn,
 	struct send_context *ctxt = qp_to_send_context(qp, sc5);
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 	struct hfi1_devdata *dd = ppd->dd;
+
+	/* should only be called for WFR, creat_pbc ignores loopback param */
+	WARN_ON(dd->params->chip_type != CHIP_WFR);
 
 	hdr.hdr_type = HFI1_PKT_TYPE_9B;
 	if (old_grh) {
@@ -715,7 +721,7 @@ void return_cnp(struct hfi1_ibport *ibp, struct rvt_qp *qp, u32 remote_qpn,
 	pbc_flags |= pbc_sc4_flag(sc5);
 	vl = sc_to_vlt(ppd, sc5);
 	if (ctxt) {
-		pbc = dd->params->create_pbc(ppd, pbc_flags, qp->srate_mbps, vl,
+		pbc = dd->params->create_pbc(ppd, false, pbc_flags, qp->srate_mbps, vl,
 					     plen, PBC_L2_9B, dlid,
 					     ctxt->hw_context);
 		pbuf = sc_buffer_alloc(ctxt, plen, NULL, NULL);

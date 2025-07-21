@@ -9,6 +9,7 @@
 #include "mad.h"
 #include "qp.h"
 #include "verbs_txreq.h"
+#include "chip_gen.h"
 #include "trace.h"
 
 static int gid_ok(union ib_gid *gid, __be64 gid_prefix, __be64 id)
@@ -522,6 +523,7 @@ void hfi1_do_send(struct rvt_qp *qp, bool in_thread)
 	}
 	ps.in_thread = in_thread;
 	ps.wait = iowait_get_ib_work(&priv->s_iowait);
+	ps.loopback = false;
 
 	trace_hfi1_rc_do_send(qp, in_thread);
 
@@ -530,8 +532,23 @@ void hfi1_do_send(struct rvt_qp *qp, bool in_thread)
 		if (!loopback && ((rdma_ah_get_dlid(&qp->remote_ah_attr) &
 				   ~((1 << ps.ppd->lmc) - 1)) ==
 				  ps.ppd->lid)) {
-			rvt_ruc_loopback(qp);
-			return;
+			if (hfi1_valid_qp(ps.ppd, qp->remote_qpn)) {
+				rvt_ruc_loopback(qp);
+				return;
+			}
+			if (ps.ppd->dd->params->chip_type == CHIP_JKR) {
+				/*
+				 * TODO: find alternate comms path without allowing
+				 * recv context to receive from more than one port.
+				 */
+				ppd_dev_warn_ratelimited(ps.ppd, "VF-VF RC send "
+							 "not supported on same port\n");
+				rvt_send_complete(qp, rvt_get_swqe_ptr(qp, qp->s_last),
+						  IB_WC_RETRY_EXC_ERR,
+						  RVT_QP_LOCK_STATE_NONE);
+				return;
+			}
+			ps.loopback = true;
 		}
 		make_req = hfi1_make_rc_req;
 		ps.timeout_int = qp->timeout_jiffies;
@@ -540,8 +557,23 @@ void hfi1_do_send(struct rvt_qp *qp, bool in_thread)
 		if (!loopback && ((rdma_ah_get_dlid(&qp->remote_ah_attr) &
 				   ~((1 << ps.ppd->lmc) - 1)) ==
 				  ps.ppd->lid)) {
-			rvt_ruc_loopback(qp);
-			return;
+			if (hfi1_valid_qp(ps.ppd, qp->remote_qpn)) {
+				rvt_ruc_loopback(qp);
+				return;
+			}
+			if (ps.ppd->dd->params->chip_type == CHIP_JKR) {
+				/*
+				 * TODO: find alternate comms path without allowing
+				 * recv context to receive from more than one port.
+				 */
+				ppd_dev_warn_ratelimited(ps.ppd, "VF-VF UC send "
+							 "not supported on same port\n");
+				rvt_send_complete(qp, rvt_get_swqe_ptr(qp, qp->s_last),
+						  IB_WC_RETRY_EXC_ERR,
+						  RVT_QP_LOCK_STATE_NONE);
+				return;
+			}
+			ps.loopback = true;
 		}
 		make_req = hfi1_make_uc_req;
 		ps.timeout_int = SEND_RESCHED_TIMEOUT;

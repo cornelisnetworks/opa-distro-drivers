@@ -28,6 +28,7 @@
 #include "uverbs.h"
 #include "bulksvc_rvt.h"
 #include "sriov.h"
+#include "chip_gen.h"
 
 extern int sriov_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
 			   enum ib_qp_type type, u32 port_num);
@@ -863,7 +864,7 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 				dlid = ib_get_dlid(&tx->phdr.hdr.ibh);
 			}
 
-			pbc = dd->params->create_pbc(ppd, pbc, qp->srate_mbps,
+			pbc = dd->params->create_pbc(ppd, ps->loopback, pbc, qp->srate_mbps,
 						     vl, plen, l2, dlid,
 						     priv->s_sendcontext->hw_context);
 
@@ -1065,8 +1066,8 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			dlid = ib_get_dlid(&ps->s_txreq->phdr.hdr.ibh);
 		}
 
-		pbc = dd->params->create_pbc(ppd, pbc, qp->srate_mbps, vl, plen,
-					     l2, dlid,
+		pbc = dd->params->create_pbc(ppd, ps->loopback, pbc, qp->srate_mbps,
+					     vl, plen, l2, dlid,
 					     priv->s_sendcontext->hw_context);
 		if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
 			pbc = hfi1_fault_tx(qp, ps->opcode, pbc);

@@ -204,6 +204,7 @@ struct hfi1_pkt_state {
 	u8 opcode;
 	bool in_thread;
 	bool pkts_sent;
+	bool loopback;	/* use loopback port for ppd */
 };
 
 #define HFI1_PSN_CREDIT  16
