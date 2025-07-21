@@ -5389,6 +5389,7 @@ static void hfi1_do_tid_send(struct rvt_qp *qp)
 	ps.wait = iowait_get_tid_work(&priv->s_iowait);
 	ps.in_thread = false;
 	ps.timeout_int = qp->timeout_jiffies / 8;
+	ps.loopback = false; /* TODO: when is this 'true' */
 
 	trace_hfi1_rc_do_tid_send(qp, false);
 	spin_lock_irqsave(&qp->s_lock, ps.flags);

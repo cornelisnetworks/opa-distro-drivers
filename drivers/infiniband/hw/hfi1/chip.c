@@ -5688,6 +5688,26 @@ static void count_port_inactive(struct hfi1_pportdata *ppd)
 	__count_port_discards(ppd);
 }
 
+static u64 egress_err_info(struct hfi1_pportdata *ppd, bool loopback)
+{
+	struct hfi1_devdata *dd = ppd->dd;
+	u8 pidx = loopback ? loopback_pidx(ppd) : ppd->hw_pidx;
+
+	/* read err source first */
+	u64 src = read_eport_csr(dd, pidx, dd->params->send_egress_err_source_reg);
+	u64 info = read_eport_csr(dd, pidx, dd->params->send_egress_err_info_reg);
+	char buf[96];
+
+	/* clear down all observed info as quickly as possible after read */
+	write_eport_csr(dd, pidx, dd->params->send_egress_err_info_reg, info);
+
+	ppd_dev_info(ppd,
+		     "%s Egress Error Info: 0x%llx, %s Egress Error Src 0x%llx\n",
+		     loopback ? "LB" : "FC",
+		     info, egress_err_info_string(dd, buf, sizeof(buf), info), src);
+	return info;
+}
+
 /*
  * We have had a "disallowed packet" error during egress. Determine the
  * integrity check which failed, and update relevant error counter, etc.
@@ -5701,19 +5721,10 @@ static void handle_send_egress_err_info(struct hfi1_pportdata *ppd,
 					int vl)
 {
 	struct hfi1_devdata *dd = ppd->dd;
-	/* read err source first */
-	u64 src = read_eport_csr(dd, ppd->hw_pidx,
-				 dd->params->send_egress_err_source_reg);
-	u64 info = read_eport_csr(dd, ppd->hw_pidx,
-				  dd->params->send_egress_err_info_reg);
-	char buf[96];
+	u64 info = egress_err_info(ppd, false);
 
-	/* clear down all observed info as quickly as possible after read */
-	write_eport_csr(dd, ppd->hw_pidx, dd->params->send_egress_err_info_reg, info);
-
-	ppd_dev_info(ppd,
-		     "Egress Error Info: 0x%llx, %s Egress Error Src 0x%llx\n",
-		     info, egress_err_info_string(dd, buf, sizeof(buf), info), src);
+	if (dd->is_sriov)
+		info |= egress_err_info(ppd, true);
 
 	/* Eventually add other counters for each bit */
 	if (info & dd->params->port_discard_egress_errs) {
@@ -6715,6 +6726,9 @@ void handle_sma_message(struct work_struct *work)
 	}
 }
 
+/*
+ * Performs same action on loopback RcvIportCtrl register if SRIOV.
+ */
 static void adjust_rcvctrl(struct hfi1_pportdata *ppd, u64 add, u64 clear)
 {
 	struct hfi1_devdata *dd = ppd->dd;
@@ -6726,6 +6740,14 @@ static void adjust_rcvctrl(struct hfi1_pportdata *ppd, u64 add, u64 clear)
 	rcvctrl |= add;
 	rcvctrl &= ~clear;
 	write_iport_csr(dd, ppd->hw_pidx, dd->params->rcv_iport_ctrl_reg, rcvctrl);
+	if (dd->is_sriov) {
+		rcvctrl = read_iport_csr(dd, loopback_pidx(ppd),
+					 dd->params->rcv_iport_ctrl_reg);
+		rcvctrl |= add;
+		rcvctrl &= ~clear;
+		write_iport_csr(dd, loopback_pidx(ppd),
+				dd->params->rcv_iport_ctrl_reg, rcvctrl);
+	}
 	spin_unlock_irqrestore(&dd->rcvctrl_lock, flags);
 }
 
@@ -14917,10 +14939,16 @@ void init_kdeth_qp(struct hfi1_devdata *dd)
 		val = (RVT_KDETH_QP_PREFIX & SEND_BTH_QP_KDETH_QP_MASK) <<
 		      SEND_BTH_QP_KDETH_QP_SHIFT;
 		write_eport_csr(dd, i, dd->params->send_bth_qp_reg, val);
+		if (dd->is_sriov)
+			write_eport_csr(dd, loopback_pidx_dd(dd, i),
+					dd->params->send_bth_qp_reg, val);
 
 		val = (RVT_KDETH_QP_PREFIX & RCV_BTH_QP_KDETH_QP_MASK) <<
 		      RCV_BTH_QP_KDETH_QP_SHIFT;
 		write_iport_csr(dd, i, dd->params->rcv_bth_qp_reg, val);
+		if (dd->is_sriov)
+			write_iport_csr(dd, loopback_pidx_dd(dd, i),
+					dd->params->rcv_bth_qp_reg, val);
 	}
 }
 
@@ -14968,6 +14996,8 @@ u16 hfi1_get_qp_map(struct hfi1_pportdata *ppd, u16 idx)
  * receive contexts for mgmt and bypass.  Normal
  * verbs traffic will assumed to be on a range
  * of receive contexts.
+ *
+ * Assumes loopback QP map is identical to fabric port QP map.
  */
 static void init_qpmap_table(struct hfi1_pportdata *ppd,
 			     u32 first_ctxt,
@@ -14991,6 +15021,8 @@ static void init_qpmap_table(struct hfi1_pportdata *ppd,
 			ctxt = first_ctxt;
 		if (entry_idx == entry_top) {
 			write_iport_csr(dd, ppd->hw_pidx, regno, reg);
+			if (dd->is_sriov)
+				write_iport_csr(dd, loopback_pidx(ppd), regno, reg);
 			reg = 0;
 			regno += 8;
 		}
@@ -15000,6 +15032,9 @@ static void init_qpmap_table(struct hfi1_pportdata *ppd,
 		    | RCV_CTRL_RCV_BYPASS_ENABLE_SMASK);
 }
 
+/*
+ * Assumes loopback QP map is identical to fabric port QP map.
+ */
 static void init_qpmap_table_range(struct hfi1_pportdata *ppd,
 				   u32 start_idx, u32 end_idx,
 				   u32 first_ctxt, u32 last_ctxt)
@@ -15024,13 +15059,18 @@ static void init_qpmap_table_range(struct hfi1_pportdata *ppd,
 			ctxt = first_ctxt;
 		if (i % 8 == 7) {
 			write_iport_csr(dd, ppd->hw_pidx, regno, reg);
+			if (dd->is_sriov)
+				write_iport_csr(dd, loopback_pidx(ppd), regno, reg);
 			reg = 0;
 			regno += 8;
 			valid = false;
 		}
 	}
-	if (valid)
+	if (valid) {
 		write_iport_csr(dd, ppd->hw_pidx, regno, reg);
+		if (dd->is_sriov)
+			write_iport_csr(dd, loopback_pidx(ppd), regno, reg);
+	}
 }
 
 static void set_rmt_entry(struct hfi1_devdata *dd, struct rsm_map_table *rmt,
@@ -15878,8 +15918,12 @@ static int init_rxe(struct hfi1_devdata *dd)
 	}
 
 	/* enable all receive errors */
-	for (i = 0; i < dd->num_pports; i++)
+	for (i = 0; i < dd->num_pports; i++) {
 		write_iport_csr(dd, i, dd->params->rcv_err_mask_reg, ~0ull);
+		if (dd->is_sriov)
+			write_iport_csr(dd, loopback_pidx_dd(dd, i),
+					dd->params->rcv_err_mask_reg, ~0ull);
+	}
 
 	ret = init_rxe_rsm(dd, NULL);
 	if (ret)
@@ -15908,6 +15952,12 @@ static int init_rxe(struct hfi1_devdata *dd)
 		write_iport_csr(dd, i, dd->params->rcv_bypass_reg, val);
 
 		write_iport_csr(dd, i, dd->params->rcv_multicast_reg, control);
+		if (dd->is_sriov) {
+			write_iport_csr(dd, loopback_pidx_dd(dd, i),
+					dd->params->rcv_bypass_reg, val);
+			write_iport_csr(dd, loopback_pidx_dd(dd, i),
+					dd->params->rcv_multicast_reg, control);
+		}
 	}
 	ret = 0;
 
@@ -15980,6 +16030,10 @@ static void init_txe(struct hfi1_devdata *dd)
 		for (i = 0; i < dd->num_pports; i++) {
 			write_eport_csr(dd, i, dd->params->send_egress_err_mask_reg,
 					~0ull);
+			if (dd->is_sriov)
+				write_eport_csr(dd, loopback_pidx_dd(dd, i),
+						dd->params->send_egress_err_mask_reg,
+						~0ull);
 		}
 
 	/* enable all per-context and per-SDMA engine errors */
@@ -16676,6 +16730,7 @@ static u16 delay_cycles(struct hfi1_pportdata *ppd, u32 desired_egress_rate,
 /**
  * wfr_create_pbc - build a pbc for transmission
  * @ppd: info of physical Hfi port
+ * @loopback: ignored for WFR
  * @flags: special case flags or-ed in built pbc
  * @srate_mbs: static rate
  * @vl: vl
@@ -16691,8 +16746,8 @@ static u16 delay_cycles(struct hfi1_pportdata *ppd, u32 desired_egress_rate,
  * is for the diagnostic interface which calls this if the user does not
  * supply their own PBC.
  */
-u64 wfr_create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
-		   u32 dw_len, u32 l2, u32 dlid, u32 sctxt)
+u64 wfr_create_pbc(struct hfi1_pportdata *ppd, bool loopback, u64 flags, int srate_mbs,
+		   u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt)
 {
 	u64 pbc, delay = 0;
 

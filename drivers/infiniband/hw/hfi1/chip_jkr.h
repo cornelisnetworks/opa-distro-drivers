@@ -118,5 +118,9 @@ void jkr_set_rheq_addr(struct hfi1_devdata *dd, u16 ctxt, u64 dma_addr);
 void jkr_handle_link_bounce(struct work_struct *work);
 void jkr_enable_rcv_context(struct hfi1_pportdata *ppd, u16 ctxt,
 			    u64 *kctxt_ctrl, bool enable);
+void jkr_enable_rcv_ctxt_pidx(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, bool enable);
+void jkr_update_rcv_hdr_size_pidx(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, u32 size);
+void jkr_ena_rcv_ctxt(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, bool enable);
+void jkr_upd_rcv_hdr_size(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, u32 size);
 
 #endif /* _CHIP_JKR_H */

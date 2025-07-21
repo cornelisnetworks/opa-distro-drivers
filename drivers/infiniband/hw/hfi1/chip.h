@@ -623,8 +623,8 @@ void set_hdrq_regs(struct hfi1_pportdata *ppd, u16 ctxt, u8 entsize, u16 hdrcnt,
 		   u8 kdeth_rcv_hdr);
 void wfr_update_rcv_hdr_size(struct hfi1_pportdata *ppd, u16 ctxt, u32 size);
 
-u64 wfr_create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
-		   u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
+u64 wfr_create_pbc(struct hfi1_pportdata *ppd, bool loopback, u64 flags, int srate_mbs,
+		   u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
 
 /* firmware.c */
 #define SBUS_MASTER_BROADCAST 0xfd
