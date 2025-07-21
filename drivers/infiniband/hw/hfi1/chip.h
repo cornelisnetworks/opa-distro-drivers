@@ -1290,6 +1290,7 @@ void reset_interrupts(struct hfi1_devdata *dd);
 u16 hfi1_get_qp_map(struct hfi1_pportdata *ppd, u16 idx);
 void hfi1_init_aip_rsm(struct hfi1_pportdata *ppd);
 void hfi1_deinit_aip_rsm(struct hfi1_pportdata *ppd);
+int init_rxe_rsm(struct hfi1_devdata *dd, struct hfi1_devrsrcs *dr);
 void init_other(struct hfi1_devdata *dd);
 void init_early_variables(struct hfi1_devdata *dd);
 void wfr_set_port_max_mtu(struct hfi1_pportdata *ppd, u32 maxvlmtu);
@@ -1409,6 +1410,7 @@ void update_xmit_counters(struct hfi1_pportdata *ppd, u16 link_width);
 int alloc_rsm_rule(struct hfi1_devdata *dd, int type);
 void add_rsm_rule(struct hfi1_devdata *dd, u8 rule_index,
 			 struct rsm_rule_data *rrd);
+void restore_qpmap_table(struct hfi1_devdata *dd);
 
 struct cntr_entry {
 	/* counter name */

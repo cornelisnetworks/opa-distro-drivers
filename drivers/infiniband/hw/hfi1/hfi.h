@@ -31,6 +31,8 @@
 #include <linux/rhashtable.h>
 #include <rdma/rdma_vt.h>
 
+struct hfi1_devdata;
+struct hfi1_devrsrcs;
 #include "chip_registers.h"
 #include "chip_registers_jkr.h"
 #include "common.h"
@@ -1772,12 +1774,11 @@ struct hfi1_devdata {
 	u64 __percpu *int_counter;
 	/* verbs tx opcode stats */
 	struct hfi1_opcode_stats_perctx __percpu *tx_opstats;
-	/* device (not port) flags, basically device capabilities */
-	u16 flags;
-	/* number of elements allocated in the rcd array */
-	u16 num_rcd;
-	/* Number of physical ports available */
-	u8 num_pports;
+	u16 flags;	/* device (not port) flags, basically device capabilities */
+	u16 rctxt_mask;	/* bits reqd for rcv ctxt numbers */
+	u16 sctxt_mask;	/* bits reqd for send ctxt numbers */
+	u16 num_rcd;	/* number of elements allocated in the rcd array */
+	u8 num_pports;	/* Number of physical ports available */
 	/* adding a new field here would make it part of this cacheline */
 
 	u64 __percpu *rcv_limit;

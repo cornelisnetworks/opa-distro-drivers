@@ -15000,6 +15000,39 @@ static void init_qpmap_table(struct hfi1_pportdata *ppd,
 		    | RCV_CTRL_RCV_BYPASS_ENABLE_SMASK);
 }
 
+static void init_qpmap_table_range(struct hfi1_pportdata *ppd,
+				   u32 start_idx, u32 end_idx,
+				   u32 first_ctxt, u32 last_ctxt)
+{
+	struct hfi1_devdata *dd = ppd->dd;
+	u64 reg = 0;
+	u32 regno;
+	int i;
+	u64 ctxt = first_ctxt;
+	bool valid = false;
+
+	regno = dd->params->rcv_qp_map_table_reg + (start_idx & ~7);
+	for (i = start_idx; i < end_idx; i++) {
+		if (!valid) {
+			reg = read_iport_csr(dd, ppd->hw_pidx, regno);
+			valid = true;
+		}
+		reg &= ~(0xffull << (8 * (i % 8)));
+		reg |= ctxt << (8 * (i % 8));
+		ctxt++;
+		if (ctxt > last_ctxt)
+			ctxt = first_ctxt;
+		if (i % 8 == 7) {
+			write_iport_csr(dd, ppd->hw_pidx, regno, reg);
+			reg = 0;
+			regno += 8;
+			valid = false;
+		}
+	}
+	if (valid)
+		write_iport_csr(dd, ppd->hw_pidx, regno, reg);
+}
+
 static void set_rmt_entry(struct hfi1_devdata *dd, struct rsm_map_table *rmt,
 			  u16 idx, u16 value);
 /*
@@ -15276,9 +15309,34 @@ bail:
 	ppd->qos_shift = 1;
 
 	if (pr->n_krcv_queues) {
-		/* map everything to this port's kernel contexts */
-		init_qpmap_table(ppd, rcb + FIRST_KERNEL_KCTXT,
-				 rcb + pr->n_krcv_queues - 1);
+		/* map everything to this port's kernel contexts (excl. HFI1_CTRL_CTXT) */
+		ctxt = rcb + FIRST_KERNEL_KCTXT;
+		init_qpmap_table(ppd, ctxt,
+				 ctxt + pr->n_krcv_queues - FIRST_KERNEL_KCTXT - 1);
+	}
+}
+
+/* TODO: also call this (common code) at end of init_qos_port()? */
+void restore_qpmap_table(struct hfi1_devdata *dd)
+{
+	struct hfi1_pportdata *ppd;
+	struct hfi1_portrsrcs *pr;
+	int i;
+	unsigned int rcb, ctxt;
+
+	for (i = 0; i < dd->num_pports; i++) {
+		pr = &dd->rsrcs.ppr[i];
+		if (!pr->n_krcv_queues)
+			continue;
+		ppd = &dd->pport[i];
+		rcb = pr->rcv_context_base;
+		if (ppd->qos_shift == 1) {
+			ctxt = rcb + FIRST_KERNEL_KCTXT;
+			init_qpmap_table(ppd, ctxt,
+					 ctxt + pr->n_krcv_queues - FIRST_KERNEL_KCTXT - 1);
+		} else {
+			init_qpmap_table(ppd, rcb + HFI1_CTRL_CTXT, rcb + HFI1_CTRL_CTXT);
+		}
 	}
 }
 
@@ -15732,16 +15790,41 @@ static int init_port_mapping(struct hfi1_pportdata *ppd,
 }
 
 /*
- * In the future, this will be called on behalf of a VF to setup
- * RSM rules and any associated RMT entries. This means it is no
- * longer called only once at driver load.
+ * This might be called on behalf of a VF to setup RSM rules and any
+ * associated RMT entries. This means it is no longer called only once
+ * at driver load.
+ *
+ * 'dr' is NULL when called for PF0 init.
  */
-static int init_rxe_rsm(struct hfi1_devdata *dd)
+int init_rxe_rsm(struct hfi1_devdata *dd, struct hfi1_devrsrcs *dr)
 {
 	struct rsm_map_table *rmt;
 	int i;
 	int ret;
 
+	if (dr) {
+		/* working on behalf of VF */
+		struct hfi1_pportdata *ppd;
+		u16 rc0, rcn;
+
+		for (i = 0; i < dd->num_pports; ++i) {
+			ppd = &dd->pport[i];
+			if (ppd->qos_shift != 1) {
+				ppd_dev_err(ppd, "QOS not supported for SRIOV\n");
+				return -EINVAL;
+			}
+			/* map our QPNs to port's kernel contexts (excl. HFI1_CTRL_CTXT) */
+			rc0 = dr->ppr[i].rcv_context_base + FIRST_KERNEL_KCTXT;
+			rcn = rc0 + dr->ppr[i].n_krcv_queues - FIRST_KERNEL_KCTXT - 1;
+			init_qpmap_table_range(ppd,
+					       dr->c.first_rcv_context, /* our QPN range */
+					       dr->c.last_rcv_context,
+					       rc0, rcn);
+		}
+		dd_dev_warn(dd, "SRIOV TODO: additional RSM/RMT setup for SI %d\n",
+			    dr->si_idx);
+		return 0;
+	}
 	/*
 	 * TODO: either keep this cached on 'dd' or else load existing
 	 * CSRs and determine rmt->used. After chip reset, CSRs are all
@@ -15789,15 +15872,16 @@ static int init_rxe(struct hfi1_devdata *dd)
 	int ret;
 
 	if (dd->is_vf) {
-		dd_dev_warn(dd, "SRIOV TODO: RSM rules and RMT entries for VFs\n");
-		/* return vf2pf_init_rxe_rsm(...); */
-		return 0;
+		for (i = 0; i < dd->num_pports; i++)
+			dd->pport[i].qos_shift = 1; /* otherwise won't happen */
+		return vf2pf_init_rxe_rsm(dd);
 	}
+
 	/* enable all receive errors */
 	for (i = 0; i < dd->num_pports; i++)
 		write_iport_csr(dd, i, dd->params->rcv_err_mask_reg, ~0ull);
 
-	ret = init_rxe_rsm(dd);
+	ret = init_rxe_rsm(dd, NULL);
 	if (ret)
 		goto done;
 
@@ -16248,6 +16332,10 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	ret = hfi1_pcie_ddinit(dd, pdev);
 	if (ret < 0)
 		goto bail;
+
+	/* do this at earliest opportunity - CSRs accessible */
+	dd->rctxt_mask = (1 << fls(chip_rcv_contexts(dd))) - 1;
+	dd->sctxt_mask = (1 << fls(chip_send_contexts(dd))) - 1;
 
 	ret = vf2pf_init(dd);
 	if (ret)
