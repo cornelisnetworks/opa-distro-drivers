@@ -1869,6 +1869,7 @@ static void shutdown_device(struct hfi1_devdata *dd)
  */
 void hfi1_pf0_cleanup(struct hfi1_devdata *dd)
 {
+	restore_qpmap_table(dd);
 	/* TODO: other cleanup */
 }
 

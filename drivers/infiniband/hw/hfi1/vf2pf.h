@@ -40,6 +40,7 @@ u64 pf0_rctxt_ctrl_op(struct hfi1_devdata *dd, u16 ctxt, unsigned int op);
 void vf2pf_tid_config(struct hfi1_devdata *dd, int pidx, u16 ctxt,
 		      u32 eager_base, u16 alloced,
 		      u32 expected_base, u32 expected_count);
+int vf2pf_init_rxe_rsm(struct hfi1_devdata *dd);
 u16 vf2pf_get_qp_map(struct hfi1_devdata *dd, int pidx, u16 idx);
 int pf2vf_push_portinfo(struct hfi1_pportdata *ppd, struct opa_smp *smp,
 			struct opa_port_info *pi, int si_mask);
