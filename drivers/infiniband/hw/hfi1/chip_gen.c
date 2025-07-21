@@ -7,6 +7,7 @@
 
 #include "hfi.h"
 #include "chip_gen.h"
+#include "chip_jkr.h"
 #include "cport_traps.h"
 #include "chip_gen.h"
 #include "vf2pf.h"
@@ -92,9 +93,28 @@ void gen_set_port_max_mtu(struct hfi1_pportdata *ppd, u32 maxvlmtu)
 	ppd_dev_warn(ppd, "%s: pidx %d, JKR TODO\n", __func__, ppd->hw_pidx);
 }
 
+u64 gen_create_pbc_pidx(u8 pidx, u64 flags, int srate_mbs,
+			u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt)
+{
+	/* always add ICRC for non 9B packets */
+	if (l2 != PBC_L2_9B)
+		flags |= PBC_INSERT_BYPASS_ICRC; /* AKA PbcInsertNon9bIcrc */
+
+	return (u64)sctxt << PBC_SEND_CTXT_SHIFT |
+	       (u64)dlid << PBC_DLID_SHIFT |
+	       /* lower 32 bits */
+	       flags |
+	       PBC_IHCRC_NONE << PBC_INSERT_HCRC_SHIFT |
+	       l2 << PBC_L2_TYPE_SHIFT |
+	       pidx << PBC_PORT_IDX_SHIFT |
+	       (vl & PBC_VL_MASK) << PBC_VL_SHIFT |
+	       (dw_len & PBC_LENGTH_DWS_MASK) << PBC_LENGTH_DWS_SHIFT;
+}
+
 /**
  * gen_create_pbc - build a pbc for transmission
  * @ppd: info of physical Hfi port
+ * @loopback: whether to use loopback port
  * @flags: special case flags or-ed in built pbc
  * @srate_mbs: static rate - unused
  * @vl: vl
@@ -107,22 +127,12 @@ void gen_set_port_max_mtu(struct hfi1_pportdata *ppd, u32 maxvlmtu)
  *
  * NOTE: The PBC created will not insert any HCRC.
  */
-u64 gen_create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
-		   u32 dw_len, u32 l2, u32 dlid, u32 sctxt)
+u64 gen_create_pbc(struct hfi1_pportdata *ppd, bool loopback, u64 flags, int srate_mbs,
+		   u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt)
 {
-	/* always add ICRC for non 9B packets */
-	if (l2 != PBC_L2_9B)
-		flags |= PBC_INSERT_BYPASS_ICRC; /* AKA PbcInsertNon9bIcrc */
+	u8 pidx = loopback ? loopback_pidx(ppd) : ppd->hw_pidx;
 
-	return (u64)sctxt << PBC_SEND_CTXT_SHIFT |
-	       (u64)dlid << PBC_DLID_SHIFT |
-	       /* lower 32 bits */
-	       flags |
-	       PBC_IHCRC_NONE << PBC_INSERT_HCRC_SHIFT |
-	       l2 << PBC_L2_TYPE_SHIFT |
-	       ppd->hw_pidx << PBC_PORT_IDX_SHIFT |
-	       (vl & PBC_VL_MASK) << PBC_VL_SHIFT |
-	       (dw_len & PBC_LENGTH_DWS_MASK) << PBC_LENGTH_DWS_SHIFT;
+	return gen_create_pbc_pidx(pidx, flags, srate_mbs, vl, dw_len, l2, dlid, sctxt);
 }
 
 /*
@@ -625,6 +635,35 @@ done:
 	return ret;
 }
 
+static void set_sc_check(struct hfi1_devdata *dd, u8 pidx, u32 ctxt, int type)
+{
+	u8 opval, opmask;
+
+	/* set the default partition key */
+	write_epsc_csr(dd, pidx, ctxt,
+		       dd->params->send_ctxt_check_partition_key_reg,
+		       (SC(CHECK_PARTITION_KEY_VALUE_MASK) &
+		       DEFAULT_PKEY) <<
+		       SC(CHECK_PARTITION_KEY_VALUE_SHIFT));
+	/* per context type checks */
+	if (type == SC_USER) {
+		opval = USER_OPCODE_CHECK_VAL;
+		opmask = USER_OPCODE_CHECK_MASK;
+	} else {
+		opval = OPCODE_CHECK_VAL_DISABLED;
+		opmask = OPCODE_CHECK_MASK_DISABLED;
+	}
+	/* set the send context check opcode mask and value */
+	write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_opcode_reg,
+		       ((u64)opmask << SC(CHECK_OPCODE_MASK_SHIFT)) |
+		       ((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
+	/* User send contexts should not allow sending on VL15 */
+	if (type == SC_USER) {
+		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_vl_reg,
+			       1ULL << 15);
+	}
+}
+
 /*
  * Read a CSR based on type
  *
@@ -684,9 +723,7 @@ u64 read_csr_type(struct hfi1_devdata *dd, enum csr_type type, u32 off,
 int priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
 		enum preg_op op, u64 arg)
 {
-	u8 opval, opmask;
 	u16 rctxt;
-	u64 reg;
 	int ret = 0;
 
 	rctxt = ctxt >> 16;
@@ -704,44 +741,45 @@ int priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
 	case SC_CHK_ALLOC_OP: /* 'arg' is send_ctxt_ctrl_reg value */
 		write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, arg);
 		dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_DEFAULT);
-		/* set the default partition key */
-		write_epsc_csr(dd, pidx, ctxt,
-			       dd->params->send_ctxt_check_partition_key_reg,
-			       (SC(CHECK_PARTITION_KEY_VALUE_MASK) &
-			       DEFAULT_PKEY) <<
-			       SC(CHECK_PARTITION_KEY_VALUE_SHIFT));
-		/* per context type checks */
-		if (type == SC_USER) {
-			opval = USER_OPCODE_CHECK_VAL;
-			opmask = USER_OPCODE_CHECK_MASK;
-		} else {
-			opval = OPCODE_CHECK_VAL_DISABLED;
-			opmask = OPCODE_CHECK_MASK_DISABLED;
-		}
-		/* set the send context check opcode mask and value */
-		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_opcode_reg,
-			       ((u64)opmask << SC(CHECK_OPCODE_MASK_SHIFT)) |
-			       ((u64)opval << SC(CHECK_OPCODE_VALUE_SHIFT)));
-		/* User send contexts should not allow sending on VL15 */
-		if (type == SC_USER) {
-			write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_vl_reg,
-				       1ULL << 15);
-		}
+		set_sc_check(dd, pidx, ctxt, type);
+		if (dd->is_sriov)
+			set_sc_check(dd, loopback_pidx_dd(dd, pidx), ctxt, type);
 		break;
 	case SC_CHK_FREE_OP: /* 'arg' not used */
 		write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, 0);
-		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_enable_reg, 0);
-		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_partition_key_reg, 0);
-		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_opcode_reg, 0);
+		write_epsc_csr(dd, pidx, ctxt,
+			       dd->params->send_ctxt_check_enable_reg, 0);
+		write_epsc_csr(dd, pidx, ctxt,
+			       dd->params->send_ctxt_check_partition_key_reg, 0);
+		write_epsc_csr(dd, pidx, ctxt,
+			       dd->params->send_ctxt_check_opcode_reg, 0);
+		if (dd->is_sriov) {
+			pidx = loopback_pidx_dd(dd, pidx);
+			write_epsc_csr(dd, pidx, ctxt,
+				       dd->params->send_ctxt_check_enable_reg, 0);
+			write_epsc_csr(dd, pidx, ctxt,
+				       dd->params->send_ctxt_check_partition_key_reg, 0);
+			write_epsc_csr(dd, pidx, ctxt,
+				       dd->params->send_ctxt_check_opcode_reg, 0);
+		}
 		break;
 	case SC_CHK_VL_MASK_OP: /* 'arg' is send_ctxt_check_vl_reg value */
 		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_vl_reg, arg);
+		if (dd->is_sriov)
+			write_epsc_csr(dd, loopback_pidx_dd(dd, pidx), ctxt,
+				       dd->params->send_ctxt_check_vl_reg, arg);
 		break;
 	case SC_CHK_SLID_OP: /* 'arg' is send_ctxt_check_slid_reg value */
 		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_slid_reg, arg);
+		if (dd->is_sriov)
+			write_epsc_csr(dd, loopback_pidx_dd(dd, pidx), ctxt,
+				       dd->params->send_ctxt_check_slid_reg, arg);
 		break;
 	case SC_CHK_JKEY_OP: /* 'arg' is send_ctxt_check_job_key_reg val, 'ctxt' incl rcv */
 		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_job_key_reg, arg);
+		if (dd->is_sriov)
+			write_epsc_csr(dd, loopback_pidx_dd(dd, pidx), ctxt,
+				       dd->params->send_ctxt_check_job_key_reg, arg);
 		if (!is_ax(dd)) {
 			dd->params->set_pio_integrity(dd, pidx, ctxt, type,
 				arg ? SPI_SET_JKEY : SPI_CLEAR_JKEY);
@@ -756,11 +794,17 @@ int priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
 				 RCV_KEY_CTRL_JOB_KEY_VALUE_SHIFT);
 		}
 		write_iprc_csr(dd, pidx, rctxt, dd->params->rcv_jkey_ctrl_reg, arg);
+		if (dd->is_sriov)
+			write_iprc_csr(dd, loopback_pidx_dd(dd, pidx), rctxt,
+				       dd->params->rcv_jkey_ctrl_reg, arg);
 		break;
 	case SC_CHK_PKEY_OP: /* 'arg' is send_ctxt_check_partition_key_reg value */
 		if (!arg)
 			dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_CLEAR_PKEY);
 		write_epsc_csr(dd, pidx, ctxt, dd->params->send_ctxt_check_partition_key_reg, arg);
+		if (dd->is_sriov)
+			write_epsc_csr(dd, loopback_pidx_dd(dd, pidx), ctxt,
+				       dd->params->send_ctxt_check_partition_key_reg, arg);
 		if (arg)
 			dd->params->set_pio_integrity(dd, pidx, ctxt, type, SPI_SET_PKEY);
 		break;
@@ -795,26 +839,14 @@ int priv_reg_op(struct hfi1_devdata *dd, int pidx, u32 ctxt, int type,
 		write_tctxt_csr(dd, ctxt, dd->params->send_ctxt_ctrl_reg, arg);
 		break;
 	case RC_ENABLE_OP: /* 'arg' is enable flag */
-		opval = arg; /* 'enable' */
-		arg = JKR_RCV_PKT_CTRL_RCV_PORT_ENABLE_SMASK |
-		      JKR_RCV_PKT_CTRL_CONTEXT_ENABLED_SMASK;
-		reg = read_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL);
-		/* always clear the L2TypeEnable field */
-		reg &= ~JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SMASK;
-		if (opval) {
-			/* allow 16B and 9B L2 */
-			reg |= arg |
-			       (0xcull << JKR_RCV_PKT_CTRL_L2_TYPE_ENABLE_MASK_SHIFT);
-		} else {
-			reg &= ~arg;
-		}
-		write_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
+		jkr_ena_rcv_ctxt(dd, pidx, ctxt, arg);
+		if (dd->is_sriov)
+			jkr_ena_rcv_ctxt(dd, loopback_pidx_dd(dd, pidx), ctxt, arg);
 		break;
 	case RC_HEADER_OP: /* 'arg' is size */
-		reg = read_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL);
-		reg &= ~JKR_RCV_PKT_CTRL_HDR_SIZE_SMASK;
-		reg |= arg << JKR_RCV_PKT_CTRL_HDR_SIZE_SHIFT;
-		write_iprc_csr(dd, pidx, ctxt, JKR_RCV_PKT_CTRL, reg);
+		jkr_upd_rcv_hdr_size(dd, pidx, ctxt, arg);
+		if (dd->is_sriov)
+			jkr_upd_rcv_hdr_size(dd, loopback_pidx_dd(dd, pidx), ctxt, arg);
 		break;
 	case LINK_BOUNCE_OP: /* 'arg' is not used */
 		queue_work(dd->pport[pidx].link_wq, &dd->pport[pidx].link_bounce_work);

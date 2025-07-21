@@ -28,6 +28,7 @@
 #include "uverbs.h"
 #include "bulksvc_rvt.h"
 #include "sriov.h"
+#include "chip_gen.h"
 
 static unsigned int hfi1_lkey_table_size = 16;
 module_param_named(lkey_table_size, hfi1_lkey_table_size, uint,
@@ -860,7 +861,7 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 				dlid = ib_get_dlid(&tx->phdr.hdr.ibh);
 			}
 
-			pbc = dd->params->create_pbc(ppd, pbc, qp->srate_mbps,
+			pbc = dd->params->create_pbc(ppd, ps->loopback, pbc, qp->srate_mbps,
 						     vl, plen, l2, dlid,
 						     priv->s_sendcontext->hw_context);
 
@@ -1062,8 +1063,8 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			dlid = ib_get_dlid(&ps->s_txreq->phdr.hdr.ibh);
 		}
 
-		pbc = dd->params->create_pbc(ppd, pbc, qp->srate_mbps, vl, plen,
-					     l2, dlid,
+		pbc = dd->params->create_pbc(ppd, ps->loopback, pbc, qp->srate_mbps,
+					     vl, plen, l2, dlid,
 					     priv->s_sendcontext->hw_context);
 		if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
 			pbc = hfi1_fault_tx(qp, ps->opcode, pbc);

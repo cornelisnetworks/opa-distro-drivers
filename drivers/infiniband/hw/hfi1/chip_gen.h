@@ -16,8 +16,10 @@ int gen_late_per_chip_init(struct hfi1_devdata *dd);
 void gen_start_port(struct hfi1_pportdata *ppd);
 void gen_stop_port(struct hfi1_pportdata *ppd);
 void gen_set_port_max_mtu(struct hfi1_pportdata *ppd, u32 maxvlmtu);
-u64 gen_create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
-		   u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
+u64 gen_create_pbc(struct hfi1_pportdata *ppd, bool loopback, u64 flags, int srate_mbs,
+		   u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
+u64 gen_create_pbc_pidx(u8 pidx, u64 flags, int srate_mbs,
+			u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
 
 int cport_set_link_state(struct hfi1_pportdata *ppd, struct opa_port_info *pi, u32 state);
 int cport_start_link(struct hfi1_pportdata *ppd, struct opa_port_info *pi);

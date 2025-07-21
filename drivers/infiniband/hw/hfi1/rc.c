@@ -13,6 +13,7 @@
 #include "verbs_txreq.h"
 #include "trace.h"
 #include "bulksvc_rvt.h"
+#include "chip_gen.h"
 
 struct rvt_ack_entry *find_prev_entry(struct rvt_qp *qp, u32 psn, u8 *prev,
 				      u8 *prev_ack, bool *scheduled)
@@ -1381,9 +1382,25 @@ void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn)
 	u32 plen;
 	struct pio_buf *pbuf;
 	struct hfi1_opa_header opa_hdr;
+	bool loopback;
+
+	/*
+	 * If we arrive here with the DLID == LID, it must be a loopback
+	 * scenario (WFR does not have loopback and should never match).
+	 */
+	loopback = (dd->params->chip_type != CHIP_WFR &&
+		   (rdma_ah_get_dlid(&qp->remote_ah_attr) &
+		    ~((1 << ppd->lmc) - 1)) == ppd->lid);
 
 	/* clear the defer count */
 	qp->r_adefered = 0;
+
+	/*
+	 * JKR does not support this loopback scenario and should not
+	 * land here (message being acked could not have been sent).
+	 */
+	if (loopback && dd->params->chip_type == CHIP_JKR)
+		return;
 
 	/* Don't send ACK or NAK if a RDMA read or atomic is pending. */
 	if (qp->s_flags & RVT_S_RESP_PENDING) {
@@ -1407,7 +1424,7 @@ void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn)
 					     &l2);
 
 	plen = 2 /* PBC */ + hwords + nwords;
-	pbc = dd->params->create_pbc(ppd, pbc_flags, qp->srate_mbps,
+	pbc = dd->params->create_pbc(ppd, loopback, pbc_flags, qp->srate_mbps,
 				     sc_to_vlt(ppd, sc5), plen, l2,
 				     packet->dlid, rcd->sc->hw_context);
 	pbuf = sc_buffer_alloc(rcd->sc, plen, NULL, NULL);

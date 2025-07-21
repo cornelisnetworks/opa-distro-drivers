@@ -1363,8 +1363,8 @@ struct chip_params {
 				    u32 size);
 	bool (*check_synth_status)(struct hfi1_devdata *dd);
 	void (*update_synth_status)(struct hfi1_devdata *dd);
-	u64 (*create_pbc)(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs,
-			  u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
+	u64 (*create_pbc)(struct hfi1_pportdata *ppd, bool loopback, u64 flags,
+			  int srate_mbs, u32 vl, u32 dw_len, u32 l2, u32 dlid, u32 sctxt);
 	void (*set_pio_integrity)(struct hfi1_devdata *dd, u32 pidx, u32 ctxt, int type,
 				  enum spi_cmds cmd);
 	int (*find_used_resources)(struct hfi1_devdata *dd);
@@ -1828,6 +1828,18 @@ struct hfi1_devdata {
 	int pad_sdma_desc;
 	int sdma_align;
 };
+
+/* convert fabric port index to corresponding loopback port index */
+static inline u8 loopback_pidx_dd(struct hfi1_devdata *dd, u8 pidx)
+{
+	return pidx + dd->num_pports;
+}
+
+/* return loopback port index corresponding to the fabric port */
+static inline u8 loopback_pidx(struct hfi1_pportdata *ppd)
+{
+	return loopback_pidx_dd(ppd->dd, ppd->hw_pidx);
+}
 
 /* 8051 firmware version helper */
 #define dc8051_ver(a, b, c) ((a) << 16 | (b) << 8 | (c))
