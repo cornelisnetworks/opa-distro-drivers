@@ -16397,6 +16397,7 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	dd->rctxt_mask = (1 << fls(chip_rcv_contexts(dd))) - 1;
 	dd->sctxt_mask = (1 << fls(chip_send_contexts(dd))) - 1;
 
+	/* This must also set the SI */
 	ret = vf2pf_init(dd);
 	if (ret)
 		goto bail_cleanup;

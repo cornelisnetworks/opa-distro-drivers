@@ -1002,6 +1002,8 @@ int vf2pf_prep(struct hfi1_devdata *dd)
  */
 int vf2pf_init(struct hfi1_devdata *dd)
 {
+	int ret;
+
 	if (dd->params->chip_type == CHIP_WFR || !dd->is_sriov)
 		return 0;
 
@@ -1017,6 +1019,11 @@ int vf2pf_init(struct hfi1_devdata *dd)
 #endif
 		vf2pf_dev = get_lb_devops();
 #endif
+	/* this may require BARs, must have been mapped by now */
+	ret = hfi1_sriov_set_si(dd);
+	if (ret)
+		return ret;
+
 	if (!vf2pf_dev->init)
 		return 0;
 	return vf2pf_dev->init(dd, dd->rsrcs.si_idx);
