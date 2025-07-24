@@ -2317,6 +2317,10 @@ static int __init hfi1_mod_init(void)
 	 * the PCI subsystem.
 	 */
 	hfi1_dbg_init();
+	/*
+	 * This causes devices to be probed, so any initialization
+	 * that must happen before that must be above this point.
+	 */
 	ret = pci_register_driver(&hfi1_pci_driver);
 	if (ret < 0) {
 		pr_err("Unable to register driver: error %d\n", -ret);
