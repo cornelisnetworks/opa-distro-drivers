@@ -216,10 +216,6 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 	ret = do_bar_map(dd, pdev, 2);
 	if (ret)
 		goto fail;
-	/* this may require BARs, mapped above */
-	ret = hfi1_sriov_set_si(dd);
-	if (ret)
-		goto fail;
 
 	dd->flags |= HFI1_PRESENT;	/* CSR access routines now work */
 	return 0;

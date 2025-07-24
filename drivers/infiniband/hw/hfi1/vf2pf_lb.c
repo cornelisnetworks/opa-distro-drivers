@@ -784,12 +784,23 @@ static int lb_probe_si(struct hfi1_devdata *dd)
 		return 0;
 
 	pf0_ctxt = chip_rcv_contexts(dd) - nctxt;
+	/*
+	 * Except for SI 1, this will cause CSR Access Violations
+	 * so we need to clear that after - regardless of the result.
+	 */
 	for (si = 1; si <= JKR_C_CCE_NUM_VFS; ++si) {
 		reg = read_kctxt_csr(dd, pf0_ctxt + si, dd->params->rcv_hdr_ent_size_reg);
-		if (reg)
-			return si;
+		if (reg) {
+			dd_dev_info(dd, "Probed SI index %d\n", si);
+			goto found;
+		}
 	}
-	return 0;
+	si = 0; /* not found */
+found:
+	/* clear any access violations */
+	write_csr(dd, JKR_CCE_ERR_INFO_ACCESS_VIOLATION,
+		  JKR_CCE_ERR_INFO_ACCESS_VIOLATION_VALID_SMASK);
+	return si;
 }
 
 static ssize_t vf2pf_lb_debug_show(struct device *device,
