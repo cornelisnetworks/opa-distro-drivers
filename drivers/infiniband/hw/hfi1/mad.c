@@ -5577,6 +5577,7 @@ int update_from_opa_portinfo(struct hfi1_pportdata *ppd,
 		ppd->lmc = lmc;
 		sdma_update_lmc(dd, ~((1U << lmc) - 1),
 				lid >= be16_to_cpu(IB_MULTICAST_LID_BASE) ? 0 : lid);
+		hfi1_set_ib_cfg(ppd, HFI1_IB_CFG_LIDLMC, 0);
 		/* XXX - do any contexts require update?
 		 */
 		/* ppd_dev_info(ppd, "got a lid: 0x%x\n", lid); */

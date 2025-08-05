@@ -572,35 +572,36 @@ struct net_device *hfi1_vnic_alloc_rn(struct ib_device *device,
 				      void (*setup)(struct net_device *))
 {
 	struct hfi1_devdata *dd = dd_from_ibdev(device);
-	struct hfi1_pportdata *ppd;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	struct hfi1_portrsrcs *pr;
 	struct hfi1_vnic_vport_info *vinfo;
 	struct net_device *netdev;
 	struct rdma_netdev *rn;
-	int i, size, rc;
+	int i, size, rc, num_txq;
 
 	if (!port_num || (port_num > dd->num_pports))
 		return ERR_PTR(-EINVAL);
-	ppd = &dd->pport[port_num - 1];
+	pr = &dr->ppd[port_num - 1];
 
-	if (!ppd->num_netdev_contexts)
+	if (!pr->num_netdev_contexts)
 		return ERR_PTR(-EOPNOTSUPP);
 
 	if (type != RDMA_NETDEV_OPA_VNIC)
 		return ERR_PTR(-EOPNOTSUPP);
 
 	size = sizeof(struct opa_vnic_rdma_netdev) + sizeof(*vinfo);
-	netdev = alloc_netdev_mqs(size, name, name_assign_type, setup,
-				  chip_sdma_engines(dd),
-				  ppd->num_netdev_contexts);
+	num_txq = dr->last_sdma_engine - dr->first_sdma_engine;
+	netdev = alloc_netdev_mqs(size, name, name_assign_type, setup, num_txq,
+				  pr->num_netdev_contexts);
 	if (!netdev)
 		return ERR_PTR(-ENOMEM);
 
 	rn = netdev_priv(netdev);
 	vinfo = opa_vnic_dev_priv(netdev);
 	vinfo->dd = dd;
-	vinfo->ppd = ppd;
-	vinfo->num_tx_q = chip_sdma_engines(dd);
-	vinfo->num_rx_q = ppd->num_netdev_contexts;
+	vinfo->ppd = &dd->pport[port_num - 1];
+	vinfo->num_tx_q = num_txq;
+	vinfo->num_rx_q = pr->num_netdev_contexts;
 	vinfo->netdev = netdev;
 	rn->free_rdma_netdev = hfi1_vnic_free_rn;
 	rn->set_id = hfi1_vnic_set_vesw_id;

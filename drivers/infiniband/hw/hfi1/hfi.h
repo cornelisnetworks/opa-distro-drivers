@@ -915,22 +915,8 @@ struct hfi1_pportdata {
 	struct send_context **kernel_send_context;
 	/* array of vl maps */
 	struct pio_vl_map __rcu *pio_map;
-	/* starting receive context for this port */
-	u16 rcv_context_base;
-	/* number of receive contexts in use for this port */
-	u16 num_rcv_contexts;
-	/* number of available user/netdev contexts for this port */
-	u16 num_user_contexts;
-	/* Lowest context number which can be used by user processes or VNIC */
-	u16 first_dyn_alloc_ctxt;
-	/* number of kernel recieve queues (includes control context) */
-	u16 n_krcv_queues;
-	/* number of reserved contexts for netdev usage */
-	u16 num_netdev_contexts;
 	/* current number of receive user ctxts available for this port */
 	u32 freectxts;
-	/* starting RcvArray entry for this port */
-	u32 rcv_array_base;
 
 	u32 sm_trap_qp;
 	u32 sa_qp;
@@ -1435,6 +1421,52 @@ struct bar_map {
 #define ctxt_bar_idx(ctxt) (((ctxt) >> 8) & 0x3)
 #define ctxt_bar_ctxt(ctxt) ((ctxt) & 0xff)
 
+/*
+ * Resources for describing contexts.
+ */
+struct hfi1_ctxtrsrcs {
+	u16 first_rcv_context; /* first receive context to use */
+	u16 last_rcv_context;
+	u16 first_send_context; /* first send send context to use */
+	u16 last_send_context;
+	u32 first_rcvarray_entry; /* first RcvArray entroy to use */
+	u32 last_rcvarray_entry;
+	u32 first_pio_block; /* first PIO block to use */
+	u32 last_pio_block;
+};
+
+/*
+ * Per-port resources.
+ */
+struct hfi1_portrsrcs {
+	u32 num_rcv_contexts; /* total number of receive contexts */
+	u16 n_krcv_queues; /* total number of recv queues */
+	u32 num_bulksvc_contexts; /*total number of bulksvc contexts */
+	u16 num_netdev_contexts; /* number of reserved contexts for netdev */
+	u32 num_user_contexts; /* total number of available user contexts */
+	u16 rcv_context_base; /* starting receive context for this port */
+	u16 first_bulksvc_alloc_ctxt; /* starting bulksvc context number */
+	u16 first_dyn_alloc_ctxt; /* starting user (or VNIC) context number */
+	u32 rcv_array_base; /* starting RcvArray entry for this port */
+};
+
+/*
+ * Device resources.
+ */
+struct hfi1_devrsrcs {
+	u8 pfunit;	/* unit number of PF0 */
+	u8 si_idx;	/* SI index of this VF/PF */
+	u8 num_vfs;	/* max number VFs to be configured */
+	/* per-VF ranges */
+	struct hfi1_ctxtrsrcs c;
+	u8 first_sdma_engine; /* first SDMA engine to use */
+	u8 last_sdma_engine;
+	/*
+	 * The rest are not valid until driver runs set_up_context_variables()
+	 */
+	struct hfi1_portrsrcs ppd[LARGEST_NUM_PORTS];
+};
+
 typedef int (*send_routine)(struct rvt_qp *, struct hfi1_pkt_state *, u64);
 struct hfi1_netdev_rx;
 struct hfi1_devdata {
@@ -1451,6 +1483,7 @@ struct hfi1_devdata {
 	const struct chip_params *params;
 	struct hfi1_cport *cport;
 	struct workqueue_struct *hfi1_wq;
+	struct hfi1_bulksvc *bulksvc; /* allocation implies emablement */
 
 	struct bar_map bar_maps[4]; /* use 3, last is mask round-up */
 
@@ -1515,18 +1548,10 @@ struct hfi1_devdata {
 	u64 __percpu *send_schedule;
 	/* number of pio send contexts in use by the driver */
 	u32 num_send_contexts;
-	/* first RcvArray entroy to use */
-	u32 first_rcvarray_entry;
-	/* first PIO block to use */
-	u32 first_pio_block;
-	/* first receive context to use */
-	u16 first_rcv_context;
-	/* first send send context to use */
-	u16 first_send_context;
-	/* first available RSM rule */
-	u8 first_rsm_rule;
-	/* RSM rules are initialized (first_rsm_rule is valid) */
-	bool rsm_rule_init;
+	struct hfi1_devrsrcs rsrcs;
+
+	u8 first_rsm_rule; /* first available RSM rule */
+	bool rsm_rule_init; /* RSM rules are initialized (first_rsm_rule is valid) */
 
 	/* base receive interrupt timeout, in CSR units */
 	u32 rcv_intr_timeout_csr;
@@ -1818,6 +1843,8 @@ struct hfi1_filedata {
 	u32 invalid_tid_idx;
 	/* protect invalid_tids array and invalid_tid_idx */
 	spinlock_t invalid_lock;
+
+	struct hfi1_bulksvc_user_info* bulksvc_user_info;
 };
 
 extern struct xarray hfi1_dev_table;
@@ -1846,7 +1873,9 @@ void handle_user_interrupt(struct hfi1_ctxtdata *rcd);
 int start_cport(struct hfi1_devdata *dd);
 int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd);
 int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd);
+void hfi1_enable_kctxt(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd);
 int hfi1_create_kctxts(struct hfi1_devdata *dd);
+int hfi1_create_kctxt(struct hfi1_pportdata *ppd, u16 ctxt, bool is_bulksvc);
 #define DYNAMIC_CONTEXT 0xffff /* dynamic context request */
 int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa, u16 ctxt,
 			 struct hfi1_ctxtdata **rcd);
@@ -1876,8 +1905,10 @@ void hfi1_make_ud_req_16B(struct rvt_qp *qp,
 /* return true if the port is available for use */
 static inline bool port_available_ppd(struct hfi1_pportdata *ppd)
 {
+	struct hfi1_portrsrcs *pr = &ppd->dd->rsrcs.ppd[ppd->hw_pidx];
+
 	/* check is only valid after set_up_context_variables() is called */
-	return ppd->n_krcv_queues != 0;
+	return pr->n_krcv_queues != 0;
 }
 
 /* return true if the port index available for use */
@@ -1969,8 +2000,7 @@ static inline bool last_rcv_seq(struct hfi1_ctxtdata *rcd, u32 seq)
 	return seq != rcd->seq_cnt;
 }
 
-/**
- * rcd_seq_incr - increment context sequence number
+/** * rcd_seq_incr - increment context sequence number
  * @rcd: the receive context
  * @seq: the current sequence number
  *
@@ -1999,13 +2029,15 @@ static inline u8 get_hdrqentsize(struct hfi1_ctxtdata *rcd)
 static inline u8 kctxt_hdrqentsize(struct hfi1_pportdata *ppd)
 {
 	struct hfi1_ctxtdata *rcd;
+	struct hfi1_devrsrcs *dr = &ppd->dd->rsrcs;
+	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
 
 	/* use default if port not available */
 	if (!port_available_ppd(ppd))
 		return DEFAULT_HDRQ_ENTSIZE;
 
 	/* use port's first rcv context */
-	rcd = ppd->dd->rcd[ppd->rcv_context_base];
+	rcd = ppd->dd->rcd[pr->rcv_context_base];
 	return get_hdrqentsize(rcd);
 }
 
