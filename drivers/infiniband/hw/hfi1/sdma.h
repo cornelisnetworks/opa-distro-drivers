@@ -17,6 +17,12 @@
 #include "verbs.h"
 #include "sdma_txreq.h"
 
+#define SDMA_COMPLETED_HEAD_MASK (0xffffull)
+#define SDMA_COMPLETED_HEAD_SHIFT (0)
+
+#define SDMA_CHECK_GEN_ENABLE (0x4)
+#define SDMA_CHECK_GEN_DISABLE (0x0)
+
 static inline bool wfr_sdma_qw_get_first_desc(u64 *qw)
 {
 	return !!(qw[0] & WFR_SDMA_DESC0_FIRST_DESC_FLAG);
@@ -83,6 +89,16 @@ static inline void jkr_sdma_qw_set_last_desc(u64 *qw)
 	qw[1] |= JKR_SDMA_DESC1_LAST_DESC_FLAG;
 }
 
+static inline void jkr_sdma_qw_set_head_to_host(u64 *qw)
+{
+	qw[1] |= SDMA_DESC1_HEAD_TO_HOST_FLAG;
+}
+
+static inline void jkr_sdma_qw_set_int_req(u64 *qw)
+{
+	qw[1] |= SDMA_DESC1_INT_REQ_FLAG;
+}
+
 static inline u32 jkr_sdma_qw_get_byte_count(u64 *qw)
 {
 	return (qw[1] >> JKR_SDMA_DESC1_BYTE_COUNT_SHIFT) &
@@ -108,6 +124,46 @@ static inline void jkr_sdma_qw_set_phy_addr(u64 *qw, u64 phy_addr)
 	qw[0] |= (phy_addr & JKR_SDMA_DESC0_PHY_ADDR_MASK) <<
 			JKR_SDMA_DESC0_PHY_ADDR_SHIFT;
 }
+
+static inline void jkr_sdma_qw_set_header_mode(u64 *qw, u8 mode)
+{
+	/* assumes starting field is zero */
+	qw[1] |= ((u64)mode & SDMA_DESC1_HEADER_MODE_MASK) <<
+			SDMA_DESC1_HEADER_MODE_SHIFT;
+}
+
+static inline u8 jkr_sdma_qw_get_header_mode(u64 *qw)
+{
+	/* assumes starting field is zero */
+	return (u8) ((qw[1] >> SDMA_DESC1_HEADER_MODE_SHIFT) & SDMA_DESC1_HEADER_MODE_MASK);
+}
+
+static inline void jkr_sdma_qw_set_header_index(u64 *qw, u8 index)
+{
+	/* assumes starting field is zero */
+	qw[1] |= ((u64)index & SDMA_DESC1_HEADER_INDEX_MASK) <<
+			SDMA_DESC1_HEADER_INDEX_SHIFT;
+}
+
+static inline u8 jkr_sdma_qw_get_header_index(u64 *qw)
+{
+	/* assumes starting field is zero */
+	return (u8) ((qw[1] >> SDMA_DESC1_HEADER_INDEX_SHIFT) & SDMA_DESC1_HEADER_INDEX_MASK);
+}
+
+static inline void jkr_sdma_qw_set_header_dws(u64 *qw, u8 dws)
+{
+	/* assumes starting field is zero */
+	qw[1] |= ((u64)dws & SDMA_DESC1_HEADER_DWS_MASK) <<
+			SDMA_DESC1_HEADER_DWS_SHIFT;
+}
+
+static inline u8 jkr_sdma_qw_get_header_dws(u64 *qw)
+{
+	/* assumes starting field is zero */
+	return (u8) ((qw[1] >> SDMA_DESC1_HEADER_DWS_SHIFT) & SDMA_DESC1_HEADER_DWS_MASK);
+}
+
 
 /* Per-chip setter inlining wrapper */
 #define sdma_qw_set(dd, field, ...) do { \
@@ -313,6 +369,7 @@ struct sdma_engine {
 	dma_addr_t            descq_phys;
 	/* private */
 	u32 sdma_mask;
+	u32 num_credits;
 	/* private */
 	struct sdma_state state;
 	/* private */
@@ -321,6 +378,8 @@ struct sdma_engine {
 	u8 sdma_shift;
 	/* private: */
 	u8 this_idx; /* zero relative engine */
+	/* private */
+	u8 check_generation;
 	/* protect changes to senddmactrl shadow */
 	spinlock_t senddmactrl_lock;
 	/* private: */
@@ -391,7 +450,7 @@ struct sdma_engine {
 int sdma_init(struct hfi1_devdata *dd);
 void sdma_start(struct hfi1_devdata *dd);
 void sdma_exit(struct hfi1_devdata *dd);
-void sdma_clean(struct hfi1_devdata *dd, size_t num_engines);
+void sdma_clean(struct hfi1_devdata *dd);
 void sdma_all_running(struct hfi1_devdata *dd);
 void sdma_all_idle(struct hfi1_devdata *dd);
 void sdma_freeze_notify(struct hfi1_devdata *dd, int go_idle);
@@ -427,6 +486,13 @@ static inline u16 sdma_descq_inprocess(struct sdma_engine *sde)
 static inline u16 sdma_descq_freecnt(struct sdma_engine *sde)
 {
 	return sde->descq_cnt - 1 - sdma_descq_inprocess(sde);
+}
+
+static inline void sdma_gethead_dma(struct sdma_engine *sde)
+{
+	u64 head = (le64_to_cpu(*sde->head_dma) >> SDMA_COMPLETED_HEAD_SHIFT ) & SDMA_COMPLETED_HEAD_MASK;
+	sde->descq_head = (u32)head;
+	smp_wmb();
 }
 
 /*
@@ -1209,4 +1275,5 @@ u16 sdma_get_descq_cnt(void);
 extern uint mod_num_sdma;
 
 void sdma_update_lmc(struct hfi1_devdata *dd, u64 mask, u32 lid);
+void sdma_set_desc_cnt_all(struct sdma_engine *sde);
 #endif

@@ -65,7 +65,9 @@ bool hfi1_can_pin_pages(struct hfi1_devdata *dd, struct mm_struct *mm,
 		 */
 		usr_ctxts = 0;
 		for (pidx = 0; pidx < dd->num_pports; pidx++)
-			usr_ctxts += dd->pport[pidx].num_rcv_contexts - dd->pport[pidx].n_krcv_queues;
+			usr_ctxts += (dd->rsrcs.ppd[pidx].num_rcv_contexts -
+				      dd->rsrcs.ppd[pidx].n_krcv_queues -
+				      dd->rsrcs.ppd[pidx].num_bulksvc_contexts);
 		if (nlocked + npages > (ulimit_pages / usr_ctxts / 4))
 			return false;
 	}
@@ -83,10 +85,22 @@ bool hfi1_can_pin_pages(struct hfi1_devdata *dd, struct mm_struct *mm,
 int hfi1_acquire_user_pages(struct mm_struct *mm, unsigned long vaddr, size_t npages,
 			    bool writable, struct page **pages)
 {
+	if (WARN_ON(!mm) || WARN_ON(!pages) || WARN_ON(npages == 0))
+		return -EINVAL;
+	
 	int ret;
 	unsigned int gup_flags = FOLL_LONGTERM | (writable ? FOLL_WRITE : 0);
 
-	ret = pin_user_pages_fast(vaddr, npages, gup_flags, pages);
+	if (!current || !current->mm || current->mm != mm) {
+		mmap_read_lock(mm);
+		int locked = 1;
+		ret = pin_user_pages_remote(mm, vaddr, npages, gup_flags, pages, &locked);
+		if (locked) {
+			mmap_read_unlock(mm);
+		}
+	} else {
+		ret = pin_user_pages_fast(vaddr, npages, gup_flags, pages);
+	}
 	if (ret < 0)
 		return ret;
 

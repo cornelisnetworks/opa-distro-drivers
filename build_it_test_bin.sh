@@ -89,12 +89,12 @@ if [[ $test_arg == "test" ]]; then
 	cat /sys/module/rdmavt/srcversion
 
 	echo "HFI from build:"
-	modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
+	modinfo lib/modules/`uname -r`/extra/internal-kernel-updates/hfi1.ko | grep srcversion | awk '{print $2}' > hfi1.srcversion
 	cat hfi1.srcversion
 
 	if [[ $use_nvidia = y ]]; then
 		echo "Checking GPU support:"
-		modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko | grep -i nvidia
+		modinfo lib/modules/`uname -r`/extra/internal-kernel-updates/hfi1.ko | grep -i nvidia
 		if [[ $? -eq 0 ]]; then
 			echo "GPU biuld detected"
 		else
@@ -105,7 +105,7 @@ if [[ $test_arg == "test" ]]; then
 
 	if [[ $use_amd = y ]] ; then
 		echo "Checking AMD GPU support:"
-		modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko | grep -E '\<(amd_|amdgpu)'
+		modinfo lib/modules/`uname -r`/extra/internal-kernel-updates/hfi1.ko | grep -E '\<(amd_|amdgpu)'
 		if [[ $? -eq 0 ]] ; then
 			echo "AMD features detected"
 		else
@@ -115,7 +115,7 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	echo "RDMAVT from build:"
-	modinfo lib/modules/`uname -r`/extra/opxs-kernel-updates/rdmavt.ko | grep srcversion | awk '{print $2}' > rdmavt.srcversion
+	modinfo lib/modules/`uname -r`/extra/internal-kernel-updates/rdmavt.ko | grep srcversion | awk '{print $2}' > rdmavt.srcversion
 	cat rdmavt.srcversion
 
 	echo "Removing drivers"
@@ -137,8 +137,8 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	echo "Time to load..."
-	sudo insmod lib/modules/`uname -r`/extra/opxs-kernel-updates/rdmavt.ko
-	sudo insmod lib/modules/`uname -r`/extra/opxs-kernel-updates/hfi1.ko
+	sudo insmod lib/modules/`uname -r`/extra/internal-kernel-updates/rdmavt.ko
+	sudo insmod lib/modules/`uname -r`/extra/internal-kernel-updates/hfi1.ko
 
 	echo "Checking Srcversions:"
 	echo "HFI (current):"

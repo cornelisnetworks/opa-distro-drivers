@@ -592,6 +592,7 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 	const struct cpumask *local_mask;
 	int curr_cpu, possible, i, ret;
 	bool new_entry = false;
+	u16 max_krcvq;
 
 	local_mask = cpumask_of_node(dd->node);
 	if (cpumask_first(local_mask) >= nr_cpu_ids)
@@ -599,6 +600,14 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 
 	mutex_lock(&node_affinity.lock);
 	entry = node_affinity_lookup(dd->node);
+
+	max_krcvq = 0;
+	for (i = 0; i < dd->num_pports; ++i) {
+		struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[i];
+
+		if (pr->n_krcv_queues > max_krcvq)
+			max_krcvq = pr->n_krcv_queues;
+	}
 
 	/*
 	 * If this is the first time this NUMA node's affinity is used,
@@ -654,9 +663,12 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 			 * 1 port.
 			 */
 			count = 0;
-			for (i = 0; i < dd->num_pports; i++)
-				if (dd->pport[i].n_krcv_queues)
-					count += dd->pport[i].n_krcv_queues - 1;
+			for (i = 0; i < dd->num_pports; i++) {
+				struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[i];
+
+				if (pr->n_krcv_queues)
+					count += pr->n_krcv_queues - 1;
+			}
 			count *= hfi1_per_node_cntr[dd->node];
 
 			/*

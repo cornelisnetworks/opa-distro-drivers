@@ -10,6 +10,7 @@
 #include "mad.h"
 #include "trace.h"
 #include "chip_gen.h"
+#include "bulksvc.h"
 
 static struct hfi1_pportdata *hfi1_get_pportdata_kobj(struct kobject *kobj)
 {
@@ -405,9 +406,9 @@ static ssize_t num_ctxts_show(struct ib_device *ibdev, u32 port_num,
 			      struct ib_port_attribute *attr, char *buf)
 {
 	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
-	struct hfi1_pportdata *ppd = &dd->pport[port_num - 1];
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[port_num - 1];
 
-	return sysfs_emit(buf, "%u\n", ppd->num_user_contexts);
+	return sysfs_emit(buf, "%u\n", pr->num_user_contexts);
 }
 
 static IB_PORT_ATTR_RO(num_ctxts);
@@ -486,7 +487,7 @@ static ssize_t nctxts_show(struct device *device,
 
 	total = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++)
-		total += dd->pport[pidx].num_user_contexts;
+		total += dd->rsrcs.ppd[pidx].num_user_contexts;
 
 	return sysfs_emit(buf, "%u\n", total);
 }
@@ -629,6 +630,83 @@ static ssize_t tempsense_show(struct device *device,
 static DEVICE_ATTR_RO(tempsense);
 
 /*
+ * Dump device resource assignments.
+ */
+static ssize_t hw_resources_show(struct device *device,
+				 struct device_attribute *attr, char *buf)
+{
+	struct hfi1_ibdev *dev =
+		rdma_device_to_drv_device(device, struct hfi1_ibdev, rdi.ibdev);
+	struct hfi1_devdata *dd = dd_from_dev(dev);
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	ssize_t off = 0;
+	int pidx;
+
+	off += sysfs_emit_at(buf, off,
+			     "pfunit %u\n"
+			     "si_idx %u\n"
+			     "numvfs %u\n",
+			     dr->pfunit, dr->si_idx, dr->num_vfs);
+
+	off += sysfs_emit_at(buf, off,
+			     "sctxt  %u-%u\n"
+			     "rctxt  %u-%u\n"
+			     "sde    %u-%u\n"
+			     "rcvary %u-%u\n"
+			     "pio    %u-%u\n",
+			     dr->c.first_send_context, dr->c.last_send_context - 1,
+			     dr->c.first_rcv_context, dr->c.last_rcv_context - 1,
+			     dr->first_sdma_engine, dr->last_sdma_engine - 1,
+			     dr->c.first_rcvarray_entry, dr->c.last_rcvarray_entry - 1,
+			     dr->c.first_pio_block, dr->c.last_pio_block - 1);
+
+	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
+		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+
+		if (!pr->num_rcv_contexts) {
+			off += sysfs_emit_at(buf, off, "p%d not used\n", pidx);
+			continue;
+		}
+
+		off += sysfs_emit_at(buf, off,
+				     "p%d.rctxt        %u-%u\n"
+				     "p%d.firstbulksvc %u\n"
+				     "p%d.firstdyn     %u\n",
+				     pidx, pr->rcv_context_base,
+				     pr->rcv_context_base + pr->num_rcv_contexts - 1,
+				     pidx, pr->first_bulksvc_alloc_ctxt,
+				     pidx, pr->first_dyn_alloc_ctxt);
+		off += sysfs_emit_at(buf, off,
+				     "p%d.nkrcvq    %u\n"
+				     "p%d.nbulksvc  %u\n"
+				     "p%d.nnetdev   %u\n"
+				     "p%d.nuctxts   %u\n",
+				     pidx, pr->n_krcv_queues,
+				     pidx, pr->num_bulksvc_contexts,
+				     pidx, pr->num_netdev_contexts,
+				     pidx, pr->num_user_contexts);
+		off += sysfs_emit_at(buf, off,
+				     "p%d.rcvary    %u\n",
+				     pidx, pr->rcv_array_base);
+	}
+	if (dd->bulksvc &&  dd->bulksvc->rsrc.sde_arr) {
+		u32 end = dd->bulksvc->prereqs.num_sdma - 1;
+		off += sysfs_emit_at(buf, off,
+		       "bulksvc.sde %u-%u\n",
+		       dd->bulksvc->rsrc.sde_arr[0]->this_idx,
+		       dd->bulksvc->rsrc.sde_arr[end]->this_idx);
+	}
+
+	/* add more resource printing here (SRIOV) */
+	if (off >= PAGE_SIZE) {
+		dd_dev_warn(dd, "hw_resources exceeds PAGE_SIZE.\n");
+		return -EFBIG;
+	}
+	return off;
+}
+static DEVICE_ATTR_RO(hw_resources);
+
+/*
  * end of per-unit (or driver, in some cases, but replicated
  * per unit) functions
  */
@@ -643,6 +721,7 @@ static struct attribute *hfi1_attributes[] = {
 	&dev_attr_boardversion.attr,
 	&dev_attr_tempsense.attr,
 	&dev_attr_chip_reset.attr,
+	&dev_attr_hw_resources.attr,
 	NULL,
 };
 
@@ -761,11 +840,12 @@ static struct sde_attribute *sde_attribs[] = {
  */
 int hfi1_verbs_register_sysfs(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct ib_device *dev = &dd->verbs_dev.rdi.ibdev;
 	struct device *class_dev = &dev->dev;
 	int i, j, ret;
 
-	for (i = 0; i < dd->num_sdma; i++) {
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; i++) {
 		ret = kobject_init_and_add(&dd->per_sdma[i].kobj,
 					   &sde_ktype, &class_dev->kobj,
 					   "sdma%d", i);
@@ -787,7 +867,7 @@ bail:
 	 * has been added successfully. The sysfs files created under the
 	 * kobject directory will also be removed during the process.
 	 */
-	for (; i >= 0; i--)
+	for (; i >= dr->first_sdma_engine; i--)
 		kobject_put(&dd->per_sdma[i].kobj);
 
 	return ret;
@@ -798,9 +878,17 @@ bail:
  */
 void hfi1_verbs_unregister_sysfs(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	u32 bulksvc_num_sdma = 0;
 	int i;
 
 	/* Unwind operations in hfi1_verbs_register_sysfs() */
-	for (i = 0; i < dd->num_sdma; i++)
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; i++)
 		kobject_put(&dd->per_sdma[i].kobj);
+
+	/* sde's owned by bulksvc are tracked seperately */
+	if (dd->bulksvc && dd->bulksvc->rsrc.sde_arr)
+		bulksvc_num_sdma = dd->bulksvc->prereqs.num_sdma;
+	for (i = 0; i < bulksvc_num_sdma; i++)
+		kobject_put(&dd->bulksvc->rsrc.sde_arr[i]->kobj);
 }

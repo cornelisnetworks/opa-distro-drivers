@@ -28,6 +28,7 @@
 #include "fault.h"
 #include "netdev.h"
 #include "chip_registers_jkr.h"
+#include "bulksvc.h"
 
 uint num_vls = HFI1_MAX_VLS_SUPPORTED;
 module_param(num_vls, uint, S_IRUGO);
@@ -89,6 +90,7 @@ uint quick_linkup; /* skip LNI */
 #define RSM_TYPE_VERBS            3
 #define RSM_TYPE_MAD_RSP          4
 #define RSM_TYPE_MAD_ACTION       5
+#define RSM_TYPE_BULKSVC          6
 
 /* Bit offset into the GUID which carries HFI id information */
 #define GUID_HFI_INDEX_SHIFT     39
@@ -1334,9 +1336,12 @@ static u64 dev_access_sde_desc_fetched_cnt(const struct cntr_entry *entry,
 					   u64 data)
 {
 	struct hfi1_devdata *dd = context;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	u32 csr = dd->params->send_dma_desc_fetched_cnt_reg +
 		  (dd->params->txe_sdma_stride * idx);
 
+	if (idx < dr->first_sdma_engine || idx >= dr->last_sdma_engine)
+		return 0;
 	return read_write_csr(dd, csr, mode, data);
 }
 
@@ -1344,8 +1349,9 @@ static u64 access_sde_err_cnt(const struct cntr_entry *entry,
 			      void *context, int idx, int mode, u64 data)
 {
 	struct hfi1_devdata *dd = (struct hfi1_devdata *)context;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 
-	if (dd->per_sdma && idx < dd->num_sdma)
+	if (dd->per_sdma && idx >= dr->first_sdma_engine && idx < dr->last_sdma_engine)
 		return dd->per_sdma[idx].err_cnt;
 	return 0;
 }
@@ -1354,8 +1360,9 @@ static u64 access_sde_int_cnt(const struct cntr_entry *entry,
 			      void *context, int idx, int mode, u64 data)
 {
 	struct hfi1_devdata *dd = (struct hfi1_devdata *)context;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 
-	if (dd->per_sdma && idx < dd->num_sdma)
+	if (dd->per_sdma && idx >= dr->first_sdma_engine && idx < dr->last_sdma_engine)
 		return dd->per_sdma[idx].sdma_int_cnt;
 	return 0;
 }
@@ -1364,8 +1371,9 @@ static u64 access_sde_idle_int_cnt(const struct cntr_entry *entry,
 				   void *context, int idx, int mode, u64 data)
 {
 	struct hfi1_devdata *dd = (struct hfi1_devdata *)context;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 
-	if (dd->per_sdma && idx < dd->num_sdma)
+	if (dd->per_sdma && idx >= dr->first_sdma_engine && idx < dr->last_sdma_engine)
 		return dd->per_sdma[idx].idle_int_cnt;
 	return 0;
 }
@@ -1375,8 +1383,9 @@ static u64 access_sde_progress_int_cnt(const struct cntr_entry *entry,
 				       u64 data)
 {
 	struct hfi1_devdata *dd = (struct hfi1_devdata *)context;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 
-	if (dd->per_sdma && idx < dd->num_sdma)
+	if (dd->per_sdma && idx >= dr->first_sdma_engine && idx < dr->last_sdma_engine)
 		return dd->per_sdma[idx].progress_int_cnt;
 	return 0;
 }
@@ -6048,9 +6057,18 @@ void is_sendctxt_err_int(struct hfi1_devdata *dd, unsigned int hw_context)
 void handle_sdma_eng_err(struct hfi1_devdata *dd, unsigned int source,
 			 u64 status)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct sdma_engine *sde;
 	int i = 0;
 
+	int bulksvc_engines = 0;
+	if (dd->bulksvc) {
+		bulksvc_engines = dd->bulksvc->prereqs.num_sdma;
+	}
+	if (source < dr->first_sdma_engine || source >= dr->last_sdma_engine + bulksvc_engines) {
+		dd_dev_err(dd, "handle_sdma_eng_err: engine %u out of range\n", source);
+		return; /* TODO: still update counters? */
+	}
 	sde = &dd->per_sdma[source];
 #ifdef CONFIG_SDMA_VERBOSITY
 	dd_dev_err(sde->dd, "CONFIG SDMA(%u) %s:%d %s()\n", sde->this_idx,
@@ -6077,6 +6095,12 @@ void handle_sdma_eng_err(struct hfi1_devdata *dd, unsigned int source,
  */
 static void is_sdma_eng_err_int(struct hfi1_devdata *dd, unsigned int source)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+
+	if (source < dr->first_sdma_engine || source >= dr->last_sdma_engine) {
+		dd_dev_err(dd, "handle_sdma_eng_err: engine %u out of range\n", source);
+		goto clear_down; /* must not access sde, but must clear intr */
+	}
 #ifdef CONFIG_SDMA_VERBOSITY
 	struct sdma_engine *sde = &dd->per_sdma[source];
 
@@ -6086,6 +6110,7 @@ static void is_sdma_eng_err_int(struct hfi1_devdata *dd, unsigned int source)
 		   source);
 	sdma_dumpstate(sde);
 #endif
+clear_down:
 	interrupt_clear_down(dd, source, &sdma_eng_err);
 }
 
@@ -6838,16 +6863,19 @@ static void wait_for_freeze_status(struct hfi1_devdata *dd, int freeze)
  */
 static void rxe_freeze(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i, j;
 	struct hfi1_ctxtdata *rcd;
 
 	/* disable all receive contexts */
 	for (i = 0; i < dd->num_pports; i++) {
+		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+
 		/* disable port */
 		clear_rcvctrl(&dd->pport[i], RCV_CTRL_RCV_PORT_ENABLE_SMASK);
 
-		for (j = 0; j < dd->pport[i].num_rcv_contexts; j++) {
-			u16 ctxt = dd->pport[i].rcv_context_base + j;
+		for (j = 0; j < pr->num_rcv_contexts; j++) {
+			u16 ctxt = pr->rcv_context_base + j;
 
 			rcd = hfi1_rcd_get_by_index(dd, ctxt);
 			hfi1_rcvctrl(dd, HFI1_RCVCTRL_CTXT_DIS, rcd);
@@ -6863,6 +6891,7 @@ static void rxe_freeze(struct hfi1_devdata *dd)
  */
 static void rxe_kernel_unfreeze(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct hfi1_ctxtdata *rcd;
 	u32 rcvmask;
 	u16 i;
@@ -6871,9 +6900,10 @@ static void rxe_kernel_unfreeze(struct hfi1_devdata *dd)
 	/* enable all kernel contexts */
 	for (i = 0; i < dd->num_pports; i++) {
 		struct hfi1_pportdata *ppd = dd->pport + i;
+		struct hfi1_portrsrcs *pr = &dr->ppd[i];
 
-		for (j = 0; j < ppd->num_rcv_contexts; j++) {
-			u16 ctxt = ppd->rcv_context_base + j;
+		for (j = 0; j < pr->num_rcv_contexts; j++) {
+			u16 ctxt = pr->rcv_context_base + j;
 
 			rcd = hfi1_rcd_get_by_index(dd, ctxt);
 			/*
@@ -8207,6 +8237,7 @@ void is_send_credit_int(struct hfi1_devdata *dd, unsigned int source)
  */
 void is_sdma_eng_int(struct hfi1_devdata *dd, unsigned int source)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	/* what interrupt */
 	unsigned int what  = source / TXE_NUM_SDMA_ENGINES;
 	/* which engine */
@@ -8215,13 +8246,17 @@ void is_sdma_eng_int(struct hfi1_devdata *dd, unsigned int source)
 #ifdef CONFIG_SDMA_VERBOSITY
 	dd_dev_err(dd, "CONFIG SDMA(%u) %s:%d %s()\n", which,
 		   slashstrip(__FILE__), __LINE__, __func__);
-	sdma_dumpstate(&dd->per_sdma[which]);
 #endif
 
-	if (likely(what < 3 && which < dd->num_sdma)) {
+	if (likely(what < 3 && which >= dr->first_sdma_engine &&
+	    which < dr->last_sdma_engine)) {
+#ifdef CONFIG_SDMA_VERBOSITY
+		sdma_dumpstate(&dd->per_sdma[which]);
+#endif
 		sdma_engine_interrupt(&dd->per_sdma[which], 1ull << source);
 	} else {
 		/* should not happen */
+		/* TODO: still need to clear-down? */
 		dd_dev_err(dd, "Invalid SDMA interrupt 0x%x\n", source);
 	}
 }
@@ -8418,9 +8453,21 @@ irqreturn_t sdma_interrupt(int irq, void *data)
 #endif
 
 	this_cpu_inc(*dd->int_counter);
+	off = 8 * (dd->params->is_sdma_start / 64);
+
+	/* hand over to bulksvc irq handler
+	 * TODO this is temporary, eventually a fn pointer or handler
+	 * specific function at irq registration would be better
+	 */
+	if (sde->this_idx >= dd->rsrcs.last_sdma_engine && dd->bulksvc) {
+		sdma_set_desc_cnt_all(sde);
+		/* just clear all 3 interrupts, no expensive status reads */
+		write_csr(dd, dd->params->cce_int_clear_reg + off, sde->imask);
+		bulksvc_sdma_irq(dd, sde);
+		return IRQ_HANDLED;
+	}
 
 	/* This read_csr is really bad in the hot path */
-	off = 8 * (dd->params->is_sdma_start / 64);
 	status = read_csr(dd, dd->params->cce_int_status_reg + off) & sde->imask;
 	if (likely(status)) {
 		/* handle the interrupt(s) */
@@ -8596,7 +8643,7 @@ static void __hfi1_rcd_eoi_intr(struct hfi1_ctxtdata *rcd)
  *  processing in interrupt service routines, interrupt service thread
  *  and softirqs
  */
-static void hfi1_rcd_eoi_intr(struct hfi1_ctxtdata *rcd)
+void hfi1_rcd_eoi_intr(struct hfi1_ctxtdata *rcd)
 {
 	unsigned long flags;
 
@@ -10389,8 +10436,10 @@ static void set_lidlmc(struct hfi1_pportdata *ppd)
 		       (((lid & mask) & SEND_CTXT_CHECK_SLID_VALUE_MASK) <<
 				SEND_CTXT_CHECK_SLID_VALUE_SHIFT);
 	} else {
-		sreg = ((u64)(mask & 0xffffff) << 32) | (lid & 0xffffff) |
-			BIT_ULL(63); /* PermissiveSlidAllowed */
+		sreg = ((u64)(mask & JKR_SEND_CTXT_CHECK_SLID_MASK_MASK) <<
+						JKR_SEND_CTXT_CHECK_SLID_MASK_SHIFT) |
+				(lid & JKR_SEND_CTXT_CHECK_SLID_VALUE_MASK) |
+				BIT_ULL(63); /* PermissiveSlidAllowed */
 	}
 
 	for (i = 0; i < dd->num_send_contexts; i++) {
@@ -12204,23 +12253,31 @@ void set_hdrq_regs(struct hfi1_pportdata *ppd, u16 ctxt, u8 entsize, u16 hdrcnt,
 /* this is a type of kernel context */
 bool is_control_context(struct hfi1_ctxtdata *rcd)
 {
-	return rcd->ctxt == rcd->ppd->rcv_context_base + HFI1_CTRL_CTXT;
+	return rcd->ctxt == rcd->ppd->dd->rsrcs.ppd[rcd->ppd->hw_pidx].rcv_context_base +
+			    HFI1_CTRL_CTXT;
 }
 
 /* includes control context */
 bool is_kernel_context(struct hfi1_ctxtdata *rcd)
 {
+	struct hfi1_pportdata *ppd = rcd->ppd;
+	struct hfi1_devrsrcs *dr = &ppd->dd->rsrcs;
+	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
+
 	/* assumes in sequential order from base */
-	return rcd->ctxt < rcd->ppd->first_dyn_alloc_ctxt;
+	return rcd->ctxt >= pr->rcv_context_base &&
+	       rcd->ctxt < pr->first_bulksvc_alloc_ctxt;
 }
 
 /* includes user and vnic contexts */
 bool is_dynamic_context(struct hfi1_ctxtdata *rcd)
 {
 	struct hfi1_pportdata *ppd = rcd->ppd;
+	struct hfi1_devrsrcs *dr = &ppd->dd->rsrcs;
+	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
 
-	return rcd->ctxt >= ppd->first_dyn_alloc_ctxt &&
-	       rcd->ctxt < (ppd->rcv_context_base + ppd->num_rcv_contexts);
+	return rcd->ctxt >= pr->first_dyn_alloc_ctxt &&
+	       rcd->ctxt < (pr->rcv_context_base + pr->num_rcv_contexts);
 }
 
 /* does *not* include vnic contexts */
@@ -13090,6 +13147,7 @@ static char *fill_cntr_names(struct hfi1_devdata *dd,
 
 static int init_cntrs(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i, j;
 	size_t sz;
 	struct hfi1_pportdata *ppd;
@@ -13148,8 +13206,10 @@ static int init_cntrs(struct hfi1_devdata *dd)
 	 */
 	bitmap_fill(dd->ovf_disabled, MAX_CTXTS);
 	for (i = 0; i < dd->num_pports; i++) {
-		for (j = 0; j < dd->pport[i].num_rcv_contexts; j++) {
-			u16 ctxt = dd->pport[i].rcv_context_base + j;
+		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+
+		for (j = 0; j < pr->num_rcv_contexts; j++) {
+			u16 ctxt = pr->rcv_context_base + j;
 
 			clear_bit(ctxt, dd->ovf_disabled);
 		}
@@ -13593,6 +13653,7 @@ int set_intr_bits(struct hfi1_devdata *dd, u16 first, u16 last, bool set)
  */
 void clear_all_interrupts(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i;
 	u32 cce_int_clear_reg = dd->params->cce_int_clear_reg;
 
@@ -13602,9 +13663,9 @@ void clear_all_interrupts(struct hfi1_devdata *dd)
 	write_csr(dd, dd->params->csr_err_clear_reg, ~(u64)0);
 	write_csr(dd, dd->params->send_pio_err_clear_reg, ~(u64)0);
 	write_csr(dd, dd->params->send_dma_err_clear_reg, ~(u64)0);
-	for (i = dd->first_send_context; i < chip_send_contexts(dd); i++)
+	for (i = dr->c.first_send_context; i < dr->c.last_send_context; i++)
 		write_sctxt_csr(dd, i, dd->params->send_ctxt_err_clear_reg, ~(u64)0);
-	for (i = 0; i < chip_sdma_engines(dd); i++)
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; i++)
 		write_sdma_csr(dd, i, dd->params->send_dma_eng_err_clear_reg, ~(u64)0);
 
 	if (dd->params->chip_type == CHIP_WFR) {
@@ -13792,31 +13853,42 @@ static bool hardware_pidx_available(struct hfi1_devdata *dd, int pidx)
  * Receive contexts allocated in order at each port base:
  *	Control context
  *	Kernel contexts
+ *	Bulk service contexts
  *	Dynamic context pool (user and netdev)
  *
  * These fields are set:
  *
+ * dd->rsrcs.ppd[*]:
+ *   num_rcv_contexts	  - number of contexts being used for this port
+ *   n_krcv_queues	  - number of kernel contexts for each port
+ *			      (includes control context)
+ *   num_netdev_contexts  - number of reserved netdev contexts for each port
+ *   num_user_conexts	  - number of user contexts for this port
+ *   rcv_context_base	  - first context for this port
+ *   first_bulksvc_alloc_ctxt - first context used for bulksvc
+ *   first_dyn_alloc_ctxt - first dynamically allocated (user) context for
+ *			    this port
  * dd:
  *   rcv_entries	  - details on RcvArray entries for each port
  *   num_send_contexts	  - number of PIO send contexts being used
  * ppd:
- *   n_krcv_queues	  - number of kernel contexts for each port
- *			      (includes control context)
- *   num_netdev_contexts  - number of reserved netdev contexts for each port
- *   num_rcv_contexts	  - number of contexts being used for this port
- *   num_user_conexts	  - number of user contexts for this port
- *   rcv_context_base	  - first context for this port
- *   first_dyn_alloc_ctxt - first dynamically allocated (user) context for
- *			      this port
  *   freectxts		  - number of free user contexts for this port
  *   rcv_array_base	  - first RcvArray entry for this port
  */
 static int set_up_context_variables(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	struct hfi1_bulksvc *svc = dd->bulksvc;
 	u32 num_kernel_contexts[LARGEST_NUM_PORTS];
 	u32 num_netdev_contexts[LARGEST_NUM_PORTS];
+	u32 num_bulksvc_contexts[LARGEST_NUM_PORTS];
 	u32 def_kernel_contexts;
 	u32 def_netdev_contexts;
+	u32 def_bulksvc_contexts;
+	u32 num_usr_ctxts;
+	u32 num_netdev;
+	u32 num_bulksvc;
+	u32 num_kctxts;
 	int ret;
 	int pidx;
 	int base;
@@ -13830,8 +13902,8 @@ static int set_up_context_variables(struct hfi1_devdata *dd)
 	char *limited;
 	u32 total_rcv;
 	u32 n_usr_ctxts[LARGEST_NUM_PORTS];
-	u32 send_contexts = chip_send_contexts(dd) - dd->first_send_context;
-	u32 rcv_contexts = chip_rcv_contexts(dd) - dd->first_rcv_context;
+	u32 send_contexts = dr->c.last_send_context - dr->c.first_send_context;
+	u32 rcv_contexts = dr->c.last_rcv_context - dr->c.first_rcv_context;
 	bool recalculated = false;
 
 	/*
@@ -13848,8 +13920,16 @@ static int set_up_context_variables(struct hfi1_devdata *dd)
 	def_netdev_contexts = hfi1_num_netdev_contexts(dd,
 						       HFI1_MAX_NETDEV_CTXTS,
 						       &node_affinity.real_cpu_mask);
+	if (svc)
+		def_bulksvc_contexts = svc->prereqs.num_rcv_ctxs;
+	else
+		def_bulksvc_contexts = 0;
 
 	/* obtain requested user context numbers from module parameters */
+	num_usr_ctxts = 0;
+	num_netdev = 0;
+	num_kctxts = 0;
+	num_bulksvc = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		int count = get_num_user_contexts(dd, pidx);
 		/*
@@ -13869,10 +13949,29 @@ static int set_up_context_variables(struct hfi1_devdata *dd)
 		if (count == 0) {
 			num_kernel_contexts[pidx] = 0;
 			num_netdev_contexts[pidx] = 0;
+			num_bulksvc_contexts[pidx] = 0;
 		} else {
 			num_kernel_contexts[pidx] = def_kernel_contexts;
 			num_netdev_contexts[pidx] = def_netdev_contexts;
+			num_bulksvc_contexts[pidx] = def_bulksvc_contexts;
+			num_netdev += def_netdev_contexts;
+			num_kctxts += def_kernel_contexts;
+			num_bulksvc += def_bulksvc_contexts;
 		}
+		num_usr_ctxts += n_usr_ctxts[pidx];
+	}
+	if (rcv_contexts < num_kctxts + num_usr_ctxts + num_bulksvc) {
+		dd_dev_warn(dd,"Disabling bulksvc on small configuration\n");
+		for (pidx = 0; pidx < dd->num_pports; pidx++)
+			num_bulksvc_contexts[pidx] = 0;
+		num_bulksvc = 0;
+		hfi1_bulksvc_teardown(dd);
+	}
+	if (rcv_contexts < num_kctxts + num_usr_ctxts + num_bulksvc +
+	    num_netdev) {
+		dd_dev_warn(dd, "Disabling netdev on small configuration\n");
+		for (pidx = 0; pidx < dd->num_pports; pidx++)
+			num_netdev_contexts[pidx] = 0;
 	}
 
 do_recalc:
@@ -13883,7 +13982,8 @@ do_recalc:
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		total_rcv += num_kernel_contexts[pidx] +
 			     num_netdev_contexts[pidx] +
-			     n_usr_ctxts[pidx];
+			     n_usr_ctxts[pidx] +
+			     num_bulksvc_contexts[pidx];
 	}
 
 	if (rcv_contexts < total_rcv) {
@@ -13917,6 +14017,7 @@ do_recalc:
 			     + n_usr_ctxts[pidx]
 			     + num_netdev_contexts[pidx]
 			     + NUM_NETDEV_MAP_ENTRIES
+			     + num_bulksvc_contexts[pidx]
 			     + qos_rmt_entries(num_kernel_contexts[pidx] - 1, NULL, NULL);
 	}
 
@@ -13933,32 +14034,37 @@ do_recalc:
 	 */
 
 	dd_dev_info(dd, "rcv contexts: avail %d\n", rcv_contexts);
-	base = dd->first_rcv_context;
+	base = dr->c.first_rcv_context;
 	total_rcv = 0; /* recalculate */
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		struct hfi1_pportdata *ppd = &dd->pport[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
 
-		ppd->n_krcv_queues = num_kernel_contexts[pidx];
-		ppd->num_netdev_contexts = num_netdev_contexts[pidx];
-		ppd->num_rcv_contexts = num_kernel_contexts[pidx] +
-					num_netdev_contexts[pidx] +
-					n_usr_ctxts[pidx];
-		ppd->num_user_contexts = n_usr_ctxts[pidx];
-		ppd->rcv_context_base = base;
-		ppd->freectxts = ppd->num_user_contexts;
-		ppd->first_dyn_alloc_ctxt = ppd->rcv_context_base
-					    + num_kernel_contexts[pidx];
-		dd_dev_info(dd,
-			    "  pidx[%d]: base %d, used %d (kernel %d, netdev %u, user %u)\n",
-			    pidx,
-			    ppd->rcv_context_base,
-			    ppd->num_rcv_contexts,
-			    ppd->n_krcv_queues,
-			    ppd->num_netdev_contexts,
-			    ppd->num_user_contexts);
+		pr->n_krcv_queues = num_kernel_contexts[pidx];
+		pr->num_netdev_contexts = num_netdev_contexts[pidx];
+		pr->num_rcv_contexts = num_kernel_contexts[pidx] +
+				       num_netdev_contexts[pidx] +
+				       n_usr_ctxts[pidx] +
+				       num_bulksvc_contexts[pidx];
+		pr->num_user_contexts = n_usr_ctxts[pidx];
+		pr->num_bulksvc_contexts = num_bulksvc_contexts[pidx];
+		pr->rcv_context_base = base;
+		ppd->freectxts = pr->num_user_contexts;
+		pr->first_bulksvc_alloc_ctxt = pr->rcv_context_base +
+					       num_kernel_contexts[pidx];
+		pr->first_dyn_alloc_ctxt = pr->first_bulksvc_alloc_ctxt +
+					   num_bulksvc_contexts[pidx];
+		ppd_dev_info(ppd,
+			     "  rcv ctxts: base %d, used %d (kernel %d, bulksvc %u, netdev %u, user %u)\n",
+			     pr->rcv_context_base,
+			     pr->num_rcv_contexts,
+			     pr->n_krcv_queues,
+			     pr->num_bulksvc_contexts,
+			     pr->num_netdev_contexts,
+			     pr->num_user_contexts);
 
-		base += ppd->num_rcv_contexts;
-		total_rcv += ppd->num_rcv_contexts;
+		base += pr->num_rcv_contexts;
+		total_rcv += pr->num_rcv_contexts;
 	}
 
 	/*
@@ -13973,7 +14079,7 @@ do_recalc:
 	 *   The number of groups are evenly divided among all contexts.
 	 */
 	dd->rcv_entries.group_size = RCV_INCREMENT;
-	rcvarray_avail = chip_rcv_array_count(dd) - dd->first_rcvarray_entry;
+	rcvarray_avail = dr->c.last_rcvarray_entry - dr->c.first_rcvarray_entry;
 	total_groups = rcvarray_avail / dd->rcv_entries.group_size;
 	if (total_rcv)
 		dd->rcv_entries.ngroups = total_groups / total_rcv;
@@ -13989,16 +14095,16 @@ do_recalc:
 		limited = "";
 	}
 	dd_dev_info(dd, "RcvArray per-context groups %u%s, unused groups %u\n",
-		    dd->rcv_entries.ngroups,
-		    limited,
+		    dd->rcv_entries.ngroups, limited,
 		    total_groups - (dd->rcv_entries.ngroups * total_rcv));
 
-	base = dd->first_rcvarray_entry;
+	base = dr->c.first_rcvarray_entry;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		struct hfi1_pportdata *ppd = &dd->pport[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
 
-		ppd->rcv_array_base = base;
-		base += ppd->num_rcv_contexts * (dd->rcv_entries.ngroups * dd->rcv_entries.group_size);
+		pr->rcv_array_base = base;
+		base += pr->num_rcv_contexts *
+			(dd->rcv_entries.ngroups * dd->rcv_entries.group_size);
 	}
 
 	/*
@@ -14011,8 +14117,7 @@ do_recalc:
 
 	dd_dev_info(dd,
 		    "send contexts: avail %d, used %d (kernel %d, ack %d, user %d, vl15 %d)\n",
-		    send_contexts,
-		    dd->num_send_contexts,
+		    send_contexts, dd->num_send_contexts,
 		    dd->sc_sizes[SC_KERNEL].count,
 		    dd->sc_sizes[SC_ACK].count,
 		    dd->sc_sizes[SC_USER].count,
@@ -14026,10 +14131,10 @@ do_recalc:
 	rcv_pool_count = 0;
 	total_netdev = 0;
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		struct hfi1_pportdata *ppd = &dd->pport[pidx];
+		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
 
-		rcv_pool_count += ppd->num_netdev_contexts + ppd->num_user_contexts;
-		total_netdev += ppd->num_netdev_contexts;
+		rcv_pool_count += pr->num_netdev_contexts + pr->num_user_contexts;
+		total_netdev += pr->num_netdev_contexts;
 	}
 
 	if (rcv_pool_count > dd->sc_sizes[SC_USER].count) {
@@ -14053,8 +14158,7 @@ do_recalc:
 		ret = reduce_rcv_ctxts(dd, n_usr_ctxts, over, "available send contexts");
 		if (ret)
 			return -EINVAL;
-		dd_dev_info(dd, "reducing requested receive contexts by %d",
-			    over);
+		dd_dev_info(dd, "reducing requested receive contexts by %d", over);
 		recalculated = true;
 		goto do_recalc;
 	}
@@ -14256,9 +14360,10 @@ static void reset_misc_csrs(struct hfi1_devdata *dd)
 	/* MISC_ERR_FORCE leave alone */
 }
 
-/* set TXE CSRs to chip reset defaults */
+/* set TXE CSRs to chip reset defaults - only called on WFR */
 static void reset_txe_csrs(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i, j;
 
 	/*
@@ -14345,7 +14450,7 @@ static void reset_txe_csrs(struct hfi1_devdata *dd)
 	/*
 	 * TXE Per-Context CSRs
 	 */
-	for (i = dd->first_send_context; i < chip_send_contexts(dd); i++) {
+	for (i = dr->c.first_send_context; i < dr->c.last_send_context; i++) {
 		write_tctxt_csr(dd, i, dd->params->send_ctxt_ctrl_reg, 0);
 		write_sctxt_csr(dd, i, dd->params->send_ctxt_credit_ctrl_reg, 0);
 		write_sctxt_csr(dd, i, dd->params->send_ctxt_credit_return_addr_reg, 0);
@@ -14855,30 +14960,8 @@ static void init_qpmap_table(struct hfi1_pportdata *ppd,
 		    | RCV_CTRL_RCV_BYPASS_ENABLE_SMASK);
 }
 
-struct rsm_map_table {
-	unsigned int used;
-	u64 map[];
-};
-
 static void set_rmt_entry(struct hfi1_devdata *dd, struct rsm_map_table *rmt,
 			  u16 idx, u16 value);
-
-struct rsm_rule_data {
-	u16 offset;
-	u8 pkt_type;
-	u8 pidx_mask;
-	u32 field1_off;
-	u32 field2_off;
-	u32 index1_off;
-	u32 index1_width;
-	u32 index2_off;
-	u32 index2_width;
-	u32 mask1;
-	u32 value1;
-	u32 mask2;
-	u32 value2;
-};
-
 /*
  * Return an initialized RMT map table for users to fill in.  OK if it
  * returns NULL, indicating no table.
@@ -14925,7 +15008,7 @@ static void complete_rsm_map_table(struct hfi1_devdata *dd,
 /*
  * Add a receive side mapping rule.
  */
-static void add_rsm_rule(struct hfi1_devdata *dd, u8 rule_index,
+void add_rsm_rule(struct hfi1_devdata *dd, u8 rule_index,
 			 struct rsm_rule_data *rrd)
 {
 	write_csr(dd, dd->params->rcv_rsm_cfg_reg + (8 * rule_index),
@@ -14986,7 +15069,7 @@ void release_rsm_rules(struct hfi1_devdata *dd)
  * Allocate a RSM rule index.
  * Returns >=0 rule index, or -ENOSPC if no room
  */
-static int alloc_rsm_rule(struct hfi1_devdata *dd, int type)
+int alloc_rsm_rule(struct hfi1_devdata *dd, int type)
 {
 	unsigned long rule_index;
 
@@ -15067,6 +15150,9 @@ no_qos:
 static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 {
 	struct hfi1_devdata *dd = ppd->dd;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
+	unsigned int rcb = pr->rcv_context_base;
 	struct rsm_rule_data rrd;
 	unsigned int qpns_per_vl, extended_vl, ctxt, i, qpn, n, m;
 	unsigned int rmt_entries;
@@ -15074,9 +15160,9 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 
 	if (!rmt)
 		goto bail;
-	if (!ppd->n_krcv_queues)
+	if (!pr->n_krcv_queues)
 		goto bail;
-	rmt_entries = qos_rmt_entries(ppd->n_krcv_queues - 1, &m, &n);
+	rmt_entries = qos_rmt_entries(pr->n_krcv_queues - 1, &m, &n);
 	if (rmt_entries == 0)
 		goto bail;
 	qpns_per_vl = 1 << m;
@@ -15092,12 +15178,12 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 		goto bail;
 
 	/* fill block in RMT with this port's control context */
-	ctxt = ppd->rcv_context_base + HFI1_CTRL_CTXT;
+	ctxt = rcb + HFI1_CTRL_CTXT;
 	for (i = 0; i < rmt_entries; i++)
 		set_rmt_entry(dd, rmt, rmt->used + i, ctxt);
 
 	/* overwrite applicable qos entries */
-	ctxt = ppd->rcv_context_base + FIRST_KERNEL_KCTXT;
+	ctxt = rcb + FIRST_KERNEL_KCTXT;
 	for (i = 0; i < num_vls; i++) {
 		unsigned int tctxt;
 		unsigned int idx;
@@ -15144,16 +15230,15 @@ static void init_qos_port(struct hfi1_pportdata *ppd, struct rsm_map_table *rmt)
 	ppd->qos_shift = n + 1;
 
 	/* map everything else to this port's mcast/err/vl15 context */
-	init_qpmap_table(ppd, ppd->rcv_context_base + HFI1_CTRL_CTXT,
-			 ppd->rcv_context_base + HFI1_CTRL_CTXT);
+	init_qpmap_table(ppd, rcb + HFI1_CTRL_CTXT, rcb + HFI1_CTRL_CTXT);
 	return;
 bail:
 	ppd->qos_shift = 1;
 
-	if (ppd->n_krcv_queues) {
+	if (pr->n_krcv_queues) {
 		/* map everything to this port's kernel contexts */
-		init_qpmap_table(ppd, ppd->rcv_context_base + FIRST_KERNEL_KCTXT,
-				 ppd->rcv_context_base + ppd->n_krcv_queues - 1);
+		init_qpmap_table(ppd, rcb + FIRST_KERNEL_KCTXT,
+				 rcb + pr->n_krcv_queues - 1);
 	}
 }
 
@@ -15187,6 +15272,8 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 			       struct rsm_map_table *rmt)
 {
 	struct hfi1_devdata *dd = ppd->dd;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	struct hfi1_portrsrcs *pr = &dr->ppd[ppd->hw_pidx];
 	struct rsm_rule_data rrd;
 	int i, idx, start, end;
 	u16 offset;
@@ -15199,10 +15286,10 @@ static void init_fecn_handling(struct hfi1_pportdata *ppd,
 
 	if (HFI1_CAP_IS_KSET(TID_RDMA))
 		/* Exclude control context */
-		start = ppd->rcv_context_base + 1;
+		start = pr->rcv_context_base + 1;
 	else
-		start = ppd->first_dyn_alloc_ctxt;
-	end = ppd->rcv_context_base + ppd->num_rcv_contexts;
+		start = pr->first_bulksvc_alloc_ctxt;
+	end = pr->rcv_context_base + pr->num_rcv_contexts;
 
 	total_cnt = end - start;
 
@@ -15570,6 +15657,7 @@ static int do_port_mapping(struct hfi1_pportdata *ppd,
 static int init_port_mapping(struct hfi1_pportdata *ppd,
 			     struct rsm_map_table *rmt)
 {
+	struct hfi1_portrsrcs *pr = &ppd->dd->rsrcs.ppd[ppd->hw_pidx];
 	int ret;
 
 	/* no port mapping for WFR */
@@ -15582,7 +15670,7 @@ static int init_port_mapping(struct hfi1_pportdata *ppd,
 	 */
 	ret = do_port_mapping(ppd, rmt, mad_response_rules,
 			      ARRAY_SIZE(mad_response_rules),
-			      ppd->rcv_context_base + HFI1_CTRL_CTXT,
+			      pr->rcv_context_base + HFI1_CTRL_CTXT,
 			      RSM_TYPE_MAD_RSP);
 	if (ret)
 		return ret;
@@ -15621,6 +15709,8 @@ static int init_rxe(struct hfi1_devdata *dd)
 			goto done;
 		init_fecn_handling(dd->pport + i, rmt);
 	}
+	if (dd->bulksvc)
+		bulksvc_rsm_reserve(dd, rmt);
 	complete_rsm_map_table(dd, rmt);
 	/* reserve RMT entries for netdev */
 	for (i = 0; i < dd->num_pports; i++) {
@@ -15642,7 +15732,9 @@ static int init_rxe(struct hfi1_devdata *dd)
 	 */
 
 	for (i = 0; i < dd->num_pports; i++) {
-		u64 control = dd->pport[i].rcv_context_base + HFI1_CTRL_CTXT;
+		struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[i];
+
+		u64 control = pr->rcv_context_base + HFI1_CTRL_CTXT;
 
 		/* set 16 bytes (4 DW) header available in header queue */
 		/* set bypass context to the port control context */
@@ -15712,6 +15804,7 @@ void assign_remote_cm_au_table(struct hfi1_pportdata *ppd, u8 vcu)
 
 static void init_txe(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i;
 
 	/* enable all PIO, SDMA, general, and Egress errors */
@@ -15724,19 +15817,19 @@ static void init_txe(struct hfi1_devdata *dd)
 	}
 
 	/* enable all per-context and per-SDMA engine errors */
-	for (i = dd->first_send_context; i < chip_send_contexts(dd); i++)
+	for (i = dr->c.first_send_context; i < dr->c.last_send_context; i++)
 		write_sctxt_csr(dd, i, dd->params->send_ctxt_err_mask_reg, ~0ull);
-	for (i = 0; i < chip_sdma_engines(dd); i++)
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; i++)
 		write_sdma_csr(dd, i, dd->params->send_dma_eng_err_mask_reg, ~0ull);
 
-	/* set the local CU to AU mapping */
-	for (i = 0; i < dd->num_pports; i++)
-		assign_local_cm_au_table(dd->pport + i, dd->vcu);
-
-	/*
-	 * Set reasonable default for Credit Return Timer
-	 */
 	if (dd->params->chip_type == CHIP_WFR) {
+		/* set the local CU to AU mapping */
+		for (i = 0; i < dd->num_pports; i++)
+			assign_local_cm_au_table(dd->pport + i, dd->vcu);
+
+		/*
+		 * Set reasonable default for Credit Return Timer
+		 */
 		for (i = 0; i < dd->num_pports; i++) {
 			write_eport_csr(dd, i,
 					dd->params->send_cm_timer_ctrl_reg,
@@ -15971,11 +16064,18 @@ err_exit:
 
 int wfr_find_used_resources(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+
 	/* set resource allocation start values */
-	dd->first_rcvarray_entry = 0;
-	dd->first_pio_block = 1; /* do not use block 0, HAS entry 291585 */
-	dd->first_rcv_context = 0;
-	dd->first_send_context = 0;
+	dr->pfunit = dd->unit;
+	dr->c.first_rcvarray_entry = 0;
+	dr->c.last_rcvarray_entry = chip_rcv_array_count(dd);
+	dr->c.first_pio_block = 1; /* do not use block 0, HAS entry 291585 */
+	dr->c.last_pio_block = chip_pio_mem_size(dd) / PIO_BLOCK_SIZE;
+	dr->c.first_rcv_context = 0;
+	dr->c.last_rcv_context = chip_rcv_contexts(dd);
+	dr->c.first_send_context = 0;
+	dr->c.last_send_context = chip_send_contexts(dd);
 	dd->rsm_rule_init = true;
 
 	return 0;
@@ -16068,6 +16168,7 @@ int wfr_late_per_chip_init(struct hfi1_devdata *dd)
  */
 int hfi1_init_dd(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct pci_dev *pdev = dd->pcidev;
 	struct hfi1_pportdata *ppd;
 	u64 reg;
@@ -16115,8 +16216,16 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 		    /* count must be >= vls */
 		    mod_num_sdma >= num_vls)
 			sdma_engines = mod_num_sdma;
-
+		if (dd->bulksvc) {
+			/* don't touch num_sdma yet but do some prequisite
+			 * checks before we reserve credits for these engines
+			 */
+			if (dd->bulksvc->prereqs.num_sdma > sdma_engines - num_vls)
+				hfi1_bulksvc_teardown(dd); /* disable bulksvc */
+		}
 		dd->num_sdma = sdma_engines;
+		dr->first_sdma_engine = 0;
+		dr->last_sdma_engine = dd->num_sdma;
 	} else {
 		HFI1_CAP_CLEAR(SDMA_AHG);
 		dd->num_sdma = 0;
