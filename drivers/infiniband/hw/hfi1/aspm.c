@@ -190,10 +190,8 @@ void aspm_disable_all(struct hfi1_devdata *dd)
 	u16 j;
 
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_pportdata *ppd = dd->pport + i;
-
-		for (j = ppd->rcv_context_base;
-		     j < ppd->first_dyn_alloc_ctxt;
+		for (j = dd->rsrcs.ppd[i].rcv_context_base;
+		     j < dd->rsrcs.ppd[i].first_bulksvc_alloc_ctxt;
 		     j++) {
 			rcd = hfi1_rcd_get_by_index(dd, j);
 			if (!rcd)
@@ -224,10 +222,8 @@ void aspm_enable_all(struct hfi1_devdata *dd)
 		return;
 
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_pportdata *ppd = dd->pport + i;
-
-		for (j = ppd->rcv_context_base;
-		     j < ppd->first_dyn_alloc_ctxt;
+		for (j = dd->rsrcs.ppd[i].rcv_context_base;
+		     j < dd->rsrcs.ppd[i].first_bulksvc_alloc_ctxt;
 		     j++) {
 			rcd = hfi1_rcd_get_by_index(dd, j);
 			if (!rcd)
@@ -260,10 +256,8 @@ void aspm_init(struct hfi1_devdata *dd)
 	dd->aspm_supported = aspm_hw_l1_supported(dd);
 
 	for (i = 0; i < dd->num_pports; i++) {
-		struct hfi1_pportdata *ppd = dd->pport + i;
-
-		for (j = ppd->rcv_context_base;
-		     j < ppd->first_dyn_alloc_ctxt;
+		for (j = dd->rsrcs.ppd[i].rcv_context_base;
+		     j < dd->rsrcs.ppd[i].first_bulksvc_alloc_ctxt;
 		     j++) {
 			rcd = hfi1_rcd_get_by_index(dd, j);
 			if (rcd)

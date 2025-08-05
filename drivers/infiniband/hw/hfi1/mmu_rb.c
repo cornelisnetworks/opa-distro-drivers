@@ -135,8 +135,9 @@ int hfi1_mmu_rb_insert(struct mmu_rb_handler *handler,
 
 	trace_hfi1_mmu_rb_insert(mnode);
 
-	if (current->mm != handler->mn.mm)
-		return -EPERM;
+	// Figure this out, need to pin from poll loop.
+	// if (current->mm != handler->mn.mm)
+	// 	return -EPERM;
 
 	spin_lock_irqsave(&handler->lock, flags);
 	node = __mmu_rb_search(handler, mnode->addr, mnode->len);
@@ -188,6 +189,21 @@ static struct mmu_rb_node *__mmu_rb_search(struct mmu_rb_handler *handler,
 	}
 	return node;
 }
+
+/* Caller must hold handler lock */
+struct mmu_rb_node *hfi1_mmu_rb_search(struct mmu_rb_handler *handler,
+					  unsigned long addr, unsigned long len)
+{
+	struct mmu_rb_node *node;
+
+	trace_hfi1_mmu_rb_search(addr, len);
+	node = __mmu_rb_search(handler, addr, len);
+	if (node)
+		list_move_tail(&node->list, &handler->lru_list);
+	return node;
+}
+
+
 
 /*
  * Must NOT call while holding mnode->handler->lock.

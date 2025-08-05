@@ -234,6 +234,7 @@ inline bool hfi1_vnic_sdma_write_avail(struct hfi1_vnic_vport_info *vinfo,
 
 void hfi1_vnic_sdma_init(struct hfi1_vnic_vport_info *vinfo)
 {
+	struct hfi1_devrsrcs *dr = &vinfo->dd->rsrcs;
 	int i;
 
 	for (i = 0; i < vinfo->num_tx_q; i++) {
@@ -242,7 +243,7 @@ void hfi1_vnic_sdma_init(struct hfi1_vnic_vport_info *vinfo)
 		iowait_init(&vnic_sdma->wait, 0, NULL, NULL,
 			    hfi1_vnic_sdma_sleep,
 			    hfi1_vnic_sdma_wakeup, NULL, NULL);
-		vnic_sdma->sde = &vinfo->dd->per_sdma[i];
+		vnic_sdma->sde = &vinfo->dd->per_sdma[dr->first_sdma_engine + i];
 		vnic_sdma->dd = vinfo->dd;
 		vnic_sdma->vinfo = vinfo;
 		vnic_sdma->q_idx = i;

@@ -18,6 +18,7 @@
 #include "sdma.h"
 #include "iowait.h"
 #include "trace.h"
+#include "bulksvc.h"
 
 /* must be a power of 2 >= 64 <= 32768 */
 #define SDMA_DESCQ_CNT 2048
@@ -357,9 +358,10 @@ static void sdma_wait_for_packet_egress(struct sdma_engine *sde, int pause)
  */
 void sdma_wait(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i;
 
-	for (i = 0; i < dd->num_sdma; i++) {
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; i++) {
 		struct sdma_engine *sde = &dd->per_sdma[i];
 
 		sdma_wait_for_packet_egress(sde, 0);
@@ -376,6 +378,12 @@ static inline void sdma_set_desc_cnt(struct sdma_engine *sde, unsigned cnt)
 	reg &= SD(DESC_CNT_CNT_MASK);
 	reg <<= SD(DESC_CNT_CNT_SHIFT);
 	write_sde_csr(sde, sde->dd->params->send_dma_desc_cnt_reg, reg);
+}
+
+/* set with sdma_desct_intr */
+void sdma_set_desc_cnt_all(struct sdma_engine *sde)
+{
+	sdma_set_desc_cnt(sde, sdma_desct_intr);
 }
 
 static inline void complete_tx(struct sdma_engine *sde,
@@ -505,11 +513,13 @@ static void sdma_err_halt_wait(struct work_struct *work)
 
 static void sdma_err_progress_check_schedule(struct sdma_engine *sde)
 {
+	struct hfi1_devrsrcs *dr = &sde->dd->rsrcs;
+
 	if (!is_bx(sde->dd) && HFI1_CAP_IS_KSET(SDMA_AHG)) {
 		unsigned index;
 		struct hfi1_devdata *dd = sde->dd;
 
-		for (index = 0; index < dd->num_sdma; index++) {
+		for (index = dr->first_sdma_engine; index < dr->last_sdma_engine; index++) {
 			struct sdma_engine *curr_sdma = &dd->per_sdma[index];
 
 			if (curr_sdma != sde)
@@ -527,9 +537,10 @@ static void sdma_err_progress_check(struct timer_list *t)
 {
 	unsigned index;
 	struct sdma_engine *sde = from_timer(sde, t, err_progress_check_timer);
+	struct hfi1_devrsrcs *dr = &sde->dd->rsrcs;
 
 	dd_dev_err(sde->dd, "SDE progress check event\n");
-	for (index = 0; index < sde->dd->num_sdma; index++) {
+	for (index = dr->first_sdma_engine; index < dr->last_sdma_engine; index++) {
 		struct sdma_engine *curr_sde = &sde->dd->per_sdma[index];
 		unsigned long flags;
 
@@ -806,6 +817,7 @@ struct sdma_engine *sdma_select_engine_vl(struct hfi1_pportdata *ppd,
 					  u32 selector, u8 vl)
 {
 	struct hfi1_devdata *dd = ppd->dd;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct sdma_vl_map *m;
 	struct sdma_map_elem *e;
 	struct sdma_engine *rval;
@@ -823,14 +835,14 @@ struct sdma_engine *sdma_select_engine_vl(struct hfi1_pportdata *ppd,
 	m = rcu_dereference(ppd->sdma_map);
 	if (unlikely(!m)) {
 		rcu_read_unlock();
-		return &dd->per_sdma[0];
+		return &dd->per_sdma[dr->first_sdma_engine];
 	}
 	e = m->map[vl & m->mask];
 	rval = e->sde[selector & e->mask];
 	rcu_read_unlock();
 
 done:
-	rval =  !rval ? &dd->per_sdma[0] : rval;
+	rval =  !rval ? &dd->per_sdma[dr->first_sdma_engine] : rval;
 	trace_hfi1_sdma_engine_select(dd, selector, vl, rval->this_idx);
 	return rval;
 }
@@ -1235,20 +1247,28 @@ static void sdma_map_rcu_callback(struct rcu_head *list)
 int sdma_map_init(struct hfi1_pportdata *ppd, u8 num_vls, u8 *vl_engines)
 {
 	struct hfi1_devdata *dd = ppd->dd;
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i, j;
 	int extra, sde_per_vl;
-	int engine = 0;
+	int engine = dr->first_sdma_engine;
+	int num_sdma = dr->last_sdma_engine - dr->first_sdma_engine;
 	u8 lvl_engines[OPA_MAX_VLS];
 	struct sdma_vl_map *oldmap, *newmap;
 
 	if (!(dd->flags & HFI1_HAS_SEND_DMA))
 		return 0;
 
+	/* If bulksvc planned but not yet loaned then last_sdma_engine is not
+	 * yet adjusted. We don't want to assign those SDE's to any VL's 
+	 */
+	if (dd->bulksvc && !dd->bulksvc->rsrc.sde_arr)
+		num_sdma -= dd->bulksvc->prereqs.num_sdma;
+
 	if (!vl_engines) {
 		/* truncate divide */
-		sde_per_vl = dd->num_sdma / num_vls;
+		sde_per_vl = num_sdma / num_vls;
 		/* extras */
-		extra = dd->num_sdma % num_vls;
+		extra = num_sdma % num_vls;
 		vl_engines = lvl_engines;
 		/* add extras from last vl down */
 		for (i = num_vls - 1; i >= 0; i--, extra--)
@@ -1326,8 +1346,9 @@ bail:
  * This routine can be called regardless of the success of
  * sdma_init()
  */
-void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
+void sdma_clean(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	size_t i;
 	struct sdma_engine *sde;
 	int pidx;
@@ -1346,7 +1367,7 @@ void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 		dd->sdma_heads_dma = NULL;
 		dd->sdma_heads_phys = 0;
 	}
-	for (i = 0; dd->per_sdma && i < num_engines; ++i) {
+	for (i = dr->first_sdma_engine; dd->per_sdma && i < dr->last_sdma_engine; ++i) {
 		sde = &dd->per_sdma[i];
 
 		sde->head_dma = NULL;
@@ -1442,19 +1463,25 @@ static struct hw_sdma_desc sdma_pad;
  */
 int sdma_init(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	unsigned int this_idx;
 	unsigned int start_bit;
 	struct sdma_engine *sde;
 	struct rhashtable *tmp_sdma_rht;
 	u16 descq_cnt;
-	u64 offset;
+	void *curr_head;
 	struct hfi1_pportdata *ppd;
 	u32 per_sdma_credits;
+	u32 bulksvc_num_sdma;
+	u32 blk_start, blk_end;
+	u32 bulksvc_per_sdma_credits;
+	u32 bulksvc_total_sdma_credits = 0;
 	u32 chip_engines;
 	uint idle_cnt = sdma_idle_cnt;
 	size_t num_engines = dd->num_sdma;
 	int ret = -ENOMEM;
 	int pidx;
+	u32 credit_offset = 0;
 
 	if (prime_sdma_memories(dd))
 		return -EIO;
@@ -1524,7 +1551,35 @@ int sdma_init(struct hfi1_devdata *dd)
 		    dd->sdma_align);
 
 	per_sdma_credits = sdma_per_engine_credits(dd, num_engines);
+	/* rebalance if blksvc wants its sde's to have more credits */
+	if (dd->bulksvc) {
+		struct hfi1_bulksvc *b = dd->bulksvc;
+		u32 n = dr->last_sdma_engine - dr->first_sdma_engine;
+		u32 max_credits = per_sdma_credits * n;
 
+		bulksvc_num_sdma = b->prereqs.num_sdma;
+		bulksvc_per_sdma_credits = b->prereqs.credits_per_sdma;
+
+		blk_end =  dr->last_sdma_engine;
+		blk_start = blk_end -  bulksvc_num_sdma;
+
+		/* ensure at least 2 credits for remaining smda engines */
+		n -= bulksvc_num_sdma;
+		max_credits -= (n * 2);
+		bulksvc_total_sdma_credits = bulksvc_num_sdma *
+				  bulksvc_per_sdma_credits;
+		if (bulksvc_total_sdma_credits > max_credits) {
+			dd_dev_err(dd, "Bulk service cannot reserve %u*%u credits\n",
+			   bulksvc_num_sdma, bulksvc_per_sdma_credits);
+			hfi1_bulksvc_teardown(dd);
+			bulksvc_total_sdma_credits = 0;
+			bulksvc_num_sdma = 0;
+		} else {
+			max_credits -= bulksvc_total_sdma_credits;
+			/* redistribute remaining credits */
+			per_sdma_credits = (max_credits / n) & ~1;
+		}
+	}
 	/* set up freeze waitqueue */
 	init_waitqueue_head(&dd->sdma_unfreeze_wq);
 	atomic_set(&dd->sdma_unfreeze_count, 0);
@@ -1562,10 +1617,11 @@ int sdma_init(struct hfi1_devdata *dd)
 	}
 
 	/* Allocate memory for SendDMA descriptor FIFOs */
-	for (this_idx = 0; this_idx < num_engines; ++this_idx) {
+	for (this_idx = dr->first_sdma_engine; this_idx < dr->last_sdma_engine; ++this_idx) {
 		sde = &dd->per_sdma[this_idx];
 		sde->dd = dd;
 		sde->this_idx = this_idx;
+		sde->check_generation = SDMA_CHECK_GEN_ENABLE;
 		sde->descq_cnt = descq_cnt;
 		sde->desc_avail = sdma_descq_freecnt(sde);
 		sde->sdma_shift = ilog2(descq_cnt);
@@ -1630,7 +1686,8 @@ int sdma_init(struct hfi1_devdata *dd)
 		write_sdmacfg_csr(dd, this_idx, dd->params->send_dma_cfg_memory_reg, 0);
 
 
-	dd->sdma_heads_size = L1_CACHE_BYTES * num_engines;
+	dd->sdma_heads_size = L1_CACHE_BYTES *
+			      (dr->last_sdma_engine - dr->first_sdma_engine);
 	/* Allocate memory for DMA of head registers to memory */
 	dd->sdma_heads_dma = dma_alloc_coherent(&dd->pcidev->dev,
 						dd->sdma_heads_size,
@@ -1649,14 +1706,26 @@ int sdma_init(struct hfi1_devdata *dd)
 		goto bail;
 	}
 
-	/* assign each engine to a different cacheline and init registers */
-	offset = 0;
-	for (this_idx = 0; this_idx < num_engines; ++this_idx) {
+	/* assign each engine to different cacheline and init registers */
+	curr_head = (void *)dd->sdma_heads_dma;
+	for (this_idx = dr->first_sdma_engine; this_idx < dr->last_sdma_engine; ++this_idx) {
+		unsigned long phys_offset;
+
 		sde = &dd->per_sdma[this_idx];
-		sde->head_dma = (void *)dd->sdma_heads_dma + offset;
-		sde->head_phys = dd->sdma_heads_phys + offset;
-		offset += L1_CACHE_BYTES;
-		init_sdma_regs(sde, per_sdma_credits, idle_cnt);
+		sde->num_credits = per_sdma_credits;
+		/* sde's to be given to bulksvc are special */
+		if (dd->bulksvc) {
+			if (this_idx >= blk_start &&
+			    this_idx < dr->last_sdma_engine)
+				sde->num_credits = bulksvc_per_sdma_credits;
+		}
+		sde->head_dma = curr_head;
+		curr_head += L1_CACHE_BYTES;
+		phys_offset = (unsigned long)sde->head_dma -
+			      (unsigned long)dd->sdma_heads_dma;
+		sde->head_phys = dd->sdma_heads_phys + phys_offset;
+		init_sdma_regs(sde, credit_offset, idle_cnt);
+		credit_offset += sde->num_credits;
 	}
 	dd->flags |= HFI1_HAS_SEND_DMA;
 	dd->flags |= idle_cnt ? HFI1_HAS_SDMA_TIMEOUT : 0;
@@ -1686,7 +1755,7 @@ int sdma_init(struct hfi1_devdata *dd)
 	return 0;
 
 bail:
-	sdma_clean(dd, num_engines);
+	sdma_clean(dd);
 	return ret;
 }
 
@@ -1698,11 +1767,12 @@ bail:
  */
 void sdma_all_running(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct sdma_engine *sde;
 	unsigned int i;
 
 	/* move all engines to running */
-	for (i = 0; i < dd->num_sdma; ++i) {
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i) {
 		sde = &dd->per_sdma[i];
 		sdma_process_event(sde, sdma_event_e30_go_running);
 	}
@@ -1716,11 +1786,12 @@ void sdma_all_running(struct hfi1_devdata *dd)
  */
 void sdma_all_idle(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct sdma_engine *sde;
 	unsigned int i;
 
 	/* idle all engines */
-	for (i = 0; i < dd->num_sdma; ++i) {
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i) {
 		sde = &dd->per_sdma[i];
 		sdma_process_event(sde, sdma_event_e70_go_idle);
 	}
@@ -1736,11 +1807,12 @@ void sdma_all_idle(struct hfi1_devdata *dd)
  */
 void sdma_start(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	unsigned i;
 	struct sdma_engine *sde;
 
 	/* kick off the engines state processing */
-	for (i = 0; i < dd->num_sdma; ++i) {
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i) {
 		sde = &dd->per_sdma[i];
 		sdma_process_event(sde, sdma_event_e10_go_hw_start);
 	}
@@ -1755,11 +1827,13 @@ void sdma_start(struct hfi1_devdata *dd)
  */
 void sdma_exit(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	unsigned this_idx;
 	struct sdma_engine *sde;
 
-	for (this_idx = 0; dd->per_sdma && this_idx < dd->num_sdma;
-			++this_idx) {
+	for (this_idx = dr->first_sdma_engine;
+	     dd->per_sdma && this_idx < dr->last_sdma_engine;
+	     ++this_idx) {
 		sde = &dd->per_sdma[this_idx];
 		if (!list_empty(&sde->dmawait))
 			dd_dev_err(dd, "sde %u: dmawait list not empty!\n",
@@ -2167,11 +2241,12 @@ static void sdma_setlengen(struct sdma_engine *sde)
 	 * count to enable generation checking and load the internal
 	 * generation counter.
 	 */
+	pr_debug("SDMA(%u) Setting LEN_GEN with check=%d\n", sde->this_idx, sde->check_generation);
 	write_sde_csr(sde, sde->dd->params->send_dma_len_gen_reg,
 		      (sde->descq_cnt / 64) << SD(LEN_GEN_LENGTH_SHIFT));
 	write_sde_csr(sde, sde->dd->params->send_dma_len_gen_reg,
 		      ((sde->descq_cnt / 64) << SD(LEN_GEN_LENGTH_SHIFT)) |
-		      (4ULL << SD(LEN_GEN_GENERATION_SHIFT)));
+		      (((u64) sde->check_generation) << SD(LEN_GEN_GENERATION_SHIFT)));
 }
 
 static inline void sdma_update_tail(struct sdma_engine *sde, u16 tail)
@@ -2216,15 +2291,18 @@ static void set_sdma_integrity(struct sdma_engine *sde)
 		      hfi1_pkt_base_sdma_integrity(dd));
 }
 
-static void init_sdma_regs(struct sdma_engine *sde, u32 credits, uint idle_cnt)
+static void init_sdma_regs(struct sdma_engine *sde, u32 credit_offset, uint idle_cnt)
 {
 	u64 opval, opmask;
 	struct hfi1_devdata *dd = sde->dd;
+	u64 credits = sde->num_credits;
 
 #ifdef CONFIG_SDMA_VERBOSITY
 	dd_dev_err(dd, "CONFIG SDMA(%u) %s:%d %s()\n",
 		   sde->this_idx, slashstrip(__FILE__), __LINE__, __func__);
 #endif
+	dd_dev_dbg(dd, "SDE#%u: %llu credits at offset %u\n",
+		  sde->this_idx, credits, credit_offset);
 
 	write_sde_csr(sde, dd->params->send_dma_base_addr_reg, sde->descq_phys);
 	sdma_setlengen(sde);
@@ -2234,7 +2312,7 @@ static void init_sdma_regs(struct sdma_engine *sde, u32 credits, uint idle_cnt)
 	write_sde_csr(sde, dd->params->send_dma_head_addr_reg, sde->head_phys);
 	write_sdecfg_csr(sde, dd->params->send_dma_cfg_memory_reg,
 			 ((u64)credits << SD(MEMORY_SDMA_MEMORY_CNT_SHIFT)) |
-			 ((u64)(credits * sde->this_idx) <<
+			 ((u64)(credit_offset) <<
 			  SD(MEMORY_SDMA_MEMORY_INDEX_SHIFT)));
 	write_sde_csr(sde, dd->params->send_dma_eng_err_mask_reg, ~0ull);
 	if (dd->params->chip_type == CHIP_WFR) {
@@ -3498,6 +3576,7 @@ fail:
 /* Update sdes when the lmc changes */
 void sdma_update_lmc(struct hfi1_devdata *dd, u64 mask, u32 lid)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct sdma_engine *sde;
 	int i;
 	u64 sreg;
@@ -3511,7 +3590,7 @@ void sdma_update_lmc(struct hfi1_devdata *dd, u64 mask, u32 lid)
 		(((lid & mask) & SD(CHECK_SLID_VALUE_MASK)) <<
 		SD(CHECK_SLID_VALUE_SHIFT));
 
-	for (i = 0; i < dd->num_sdma; i++) {
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i) {
 		hfi1_cdbg(LINKVERB, "SendDmaEngine[%d].SLID_CHECK = 0x%x",
 			  i, (u32)sreg);
 		sde = &dd->per_sdma[i];
@@ -3637,15 +3716,16 @@ void sdma_ahg_free(struct sdma_engine *sde, int ahg_index)
  */
 void sdma_freeze_notify(struct hfi1_devdata *dd, int link_down)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i;
 	enum sdma_events event = link_down ? sdma_event_e85_link_down :
 					     sdma_event_e80_hw_freeze;
 
 	/* set up the wait but do not wait here */
-	atomic_set(&dd->sdma_unfreeze_count, dd->num_sdma);
+	atomic_set(&dd->sdma_unfreeze_count, dr->last_sdma_engine - dr->first_sdma_engine);
 
 	/* tell all engines to stop running and wait */
-	for (i = 0; i < dd->num_sdma; i++)
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i)
 		sdma_process_event(&dd->per_sdma[i], event);
 
 	/* sdma_freeze() will wait for all engines to have stopped */
@@ -3657,6 +3737,7 @@ void sdma_freeze_notify(struct hfi1_devdata *dd, int link_down)
  */
 void sdma_freeze(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i;
 	int ret;
 
@@ -3672,10 +3753,10 @@ void sdma_freeze(struct hfi1_devdata *dd)
 		return;
 
 	/* set up the count for the next wait */
-	atomic_set(&dd->sdma_unfreeze_count, dd->num_sdma);
+	atomic_set(&dd->sdma_unfreeze_count, dr->last_sdma_engine - dr->first_sdma_engine);
 
 	/* tell all engines that the SPC is frozen, they can start cleaning */
-	for (i = 0; i < dd->num_sdma; i++)
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i)
 		sdma_process_event(&dd->per_sdma[i], sdma_event_e81_hw_frozen);
 
 	/*
@@ -3698,10 +3779,11 @@ void sdma_freeze(struct hfi1_devdata *dd)
  */
 void sdma_unfreeze(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i;
 
 	/* tell all engines start freeze clean up */
-	for (i = 0; i < dd->num_sdma; i++)
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i)
 		sdma_process_event(&dd->per_sdma[i],
 				   sdma_event_e82_hw_unfreeze);
 }

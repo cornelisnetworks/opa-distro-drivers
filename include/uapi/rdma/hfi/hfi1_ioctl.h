@@ -654,4 +654,18 @@ struct hfi1_pin_stats_rsp {
 	__u64 external_evictions; /* system-driven evictions */
 };
 
-#endif /* _LINIUX__HFI1_IOCTL_H */
+struct hfi1_bulksvc_queue_info {
+	__u32 queue_id;
+	__u64 queue_ctrl_mmap_token;
+	__u32 queue_ctrl_mmap_size;
+	__u64 queue_buffer_mmap_token;
+	__u32 queue_buffer_mmap_size;
+};
+
+#define HFI1_BULKSVC_CLIENT_FLAG_DOORBELL (1u << 0)
+struct hfi1_bulksvc_client_init {
+	__u32 client_key;
+	__u32 flags;
+};
+
+#endif /* _LINUX__HFI1_IOCTL_H */

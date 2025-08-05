@@ -1302,6 +1302,7 @@ void init_early_variables(struct hfi1_devdata *dd);
 void wfr_set_port_max_mtu(struct hfi1_pportdata *ppd, u32 maxvlmtu);
 u32 slow_rhf_rcv_seq(struct hfi1_ctxtdata *rcd, u64 rhf);
 void release_rsm_rules(struct hfi1_devdata *dd);
+void hfi1_rcd_eoi_intr(struct hfi1_ctxtdata *rcd);
 
 /*
  * Interrupt source table.
@@ -1364,6 +1365,27 @@ struct err_reg_info {
 #define EE_E(reg, handler, desc) \
 	{ reg##_STATUS, reg##_CLEAR, reg##_MASK, ICD_EGRESS, handler, desc }
 
+struct rsm_map_table {
+	unsigned int used;
+	u64 map[];
+};
+
+struct rsm_rule_data {
+	u16 offset;
+	u8 pkt_type;
+	u8 pidx_mask;
+	u32 field1_off;
+	u32 field2_off;
+	u32 index1_off;
+	u32 index1_width;
+	u32 index2_off;
+	u32 index2_width;
+	u32 mask1;
+	u32 value1;
+	u32 mask2;
+	u32 value2;
+};
+
 char *is_sdma_eng_err_name(char *buf, size_t bsize, unsigned int source);
 char *is_sendctxt_err_name(char *buf, size_t bsize, unsigned int source);
 char *is_sdma_eng_name(char *buf, size_t bsize, unsigned int source);
@@ -1391,6 +1413,9 @@ const char *link_state_name(u32 state);
 const char *link_state_reason_name(struct hfi1_pportdata *ppd, u32 state);
 void log_state_transition(struct hfi1_pportdata *ppd, u32 state);
 void update_xmit_counters(struct hfi1_pportdata *ppd, u16 link_width);
+int alloc_rsm_rule(struct hfi1_devdata *dd, int type);
+void add_rsm_rule(struct hfi1_devdata *dd, u8 rule_index,
+			 struct rsm_rule_data *rrd);
 
 struct cntr_entry {
 	/* counter name */

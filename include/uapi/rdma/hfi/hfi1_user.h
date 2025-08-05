@@ -324,4 +324,181 @@ enum hfi1_ureg {
 	ur_rcvtidflowtable = 256
 };
 
+struct hfi1_bulksvc_queue_ctrl {
+	union {
+		__u32 head;
+		/* TODO use proper alignment utils */
+		__u8 padding1[64];
+	};
+	union {
+		__u32 tail;
+		/* TODO use proper alignment utils */
+		__u8 padding2[64];
+	};
+};
+
+struct hfi1_bulksvc_cmd_reg_dma_buffer {
+	__u64 vaddr;
+	__u64 app_context;
+	__u64 flags;
+	__u32 cmplq_id;
+	__u32 size_bytes;
+	__u32 access_key;
+};
+
+struct hfi1_bulksvc_cmd_rdma_read_va {
+	__u64 app_context;
+	__u64 vaddr;
+	__u64 imm_data;
+	__u64 flags;
+	__u64 remote_offset;
+	__u32 len_bytes;
+	__u32 access_key;
+	__u32 client_key;
+	__u32 lid;
+	__u32 cmplq_id;
+} __attribute__((packed, aligned(4)));
+
+struct hfi1_bulksvc_cmd_rdma_read {
+	__u64 app_context;
+	__u64 imm_data;
+	__u64 flags;
+	__u64 mr_offset;
+	__u32 mr_key;
+	__u32 len_bytes;
+	__u64 remote_offset;
+	__u32 access_key;
+	__u32 client_key;
+	__u32 lid;
+	__u32 cmplq_id;
+} __attribute__((packed, aligned(4)));
+
+struct hfi1_bulksvc_cmd_rdma_write {
+	__u64 app_context;
+	__u64 imm_data;
+	__u64 flags;
+	__u64 mr_offset;
+	__u32 mr_key;
+	__u32 len_bytes;
+	__u64 remote_offset;
+	__u32 access_key;
+	__u32 client_key;
+	__u32 lid;
+	__u32 cmplq_id;
+} __attribute__((packed, aligned(4)));
+
+struct hfi1_bulksvc_cmd_dma_access_once {
+	__u64 app_context;
+	__u64 flags;
+	__u32 mr_key;
+	__u32 len;
+	__u64 offset;
+	__u32 access_key;
+	__u32 cmplq_id;
+} __attribute__((packed, aligned(4)));
+
+struct hfi1_bulksvc_cmd_dma_access_enable {
+	__u64 app_context;
+	__u64 flags;
+	__u64 notification_app_context;
+	__u32 mr_key;
+	__u32 len;
+	__u64 offset;
+	__u32 access_key;
+	__u32 cmplq_id;
+	__u32 notification_cmplq_id;
+} __attribute__((packed, aligned(4)));
+
+struct hfi1_bulksvc_cmd_dma_access_disable {
+	__u64 app_context;
+	__u64 flags;
+	__u32 access_key;
+	__u32 cmplq_id;
+} __attribute__((packed, aligned(4)));
+
+#define HFI1_BULKSVC_MR_FLAG_MODE_VADDR (1u << 0)
+
+struct hfi1_bulksvc_cmd_mr_open {
+	__u64 app_context;
+	__u64 vaddr;
+	__u64 flags;
+	__u32 len;
+	__u32 cmplq_id;
+	__u32 hmem_iface;
+	__u32 hmem_device;
+} __attribute__((packed, aligned(4)));
+
+struct hfi1_bulksvc_cmd_mr_close {
+	__u64 app_context;
+	__u64 flags;
+	__u32 mr_key;
+	__u32 cmplq_id;
+} __attribute__((packed, aligned(4)));
+
+enum hfi1_bulksvc_cmd_op {
+	HFI1_BULKSVC_CMD_REG_DMA_BUFFER,
+	HFI1_BULKSVC_CMD_RDMA_READ_VA,
+	HFI1_BULKSVC_CMD_RDMA_READ,
+	HFI1_BULKSVC_CMD_RDMA_WRITE,
+	HFI1_BULKSVC_CMD_DMA_ACCESS_ONCE,
+	HFI1_BULKSVC_CMD_DMA_ACCESS_ENABLE,
+	HFI1_BULKSVC_CMD_DMA_ACCESS_DISABLE,
+	HFI1_BULKSVC_CMD_MR_OPEN,
+	HFI1_BULKSVC_CMD_MR_CLOSE,
+};
+
+union hfi1_bulksvc_cmd {
+	__u8 bytes[128];
+	__u32 dw[32];
+	union {
+		struct hfi1_bulksvc_cmd_reg_dma_buffer register_dma_buffer;
+		struct hfi1_bulksvc_cmd_rdma_read_va rdma_read_va;
+		struct hfi1_bulksvc_cmd_rdma_read rdma_read;
+		struct hfi1_bulksvc_cmd_rdma_write rdma_write;
+		struct hfi1_bulksvc_cmd_dma_access_once dma_access_once;
+		struct hfi1_bulksvc_cmd_dma_access_enable dma_access_enable;
+		struct hfi1_bulksvc_cmd_dma_access_disable dma_access_disable;
+		struct hfi1_bulksvc_cmd_mr_open mr_open;
+		struct hfi1_bulksvc_cmd_mr_close mr_close;
+		struct {
+			__u32 reserved[31];
+			enum hfi1_bulksvc_cmd_op op;
+		} __attribute__((packed, aligned(4)));
+	} __attribute__((packed, aligned(4)));
+};
+
+enum hfisvc_client_cq_entry_type {
+	HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT,
+	HFISVC_CLIENT_CQ_ENTRY_TYPE_MR,
+	HFISVC_CLIENT_CQ_ENTRY_TYPE_NOTIFY,
+};
+
+struct hfi1_bulksvc_cmplq_entry {
+	__u64 app_context;
+	__u32 type;
+	__u32 status;
+	union {
+		struct {
+			__u32 access_key;
+		} type_default;
+		struct {
+			__u32 mr_key;
+		} type_mr;
+		struct {
+			__u32 access_key;
+			__u32 flags;
+			__u64 imm_data;
+		} type_notify;
+	};
+};
+
+union hfi1_bulksvc_upd {
+	__u8 bytes[64];
+	struct {
+		union {
+			struct hfi1_bulksvc_cmplq_entry cmplq_entry;
+		};
+	};
+};
+
 #endif /* _LINIUX__HFI1_USER_H */
