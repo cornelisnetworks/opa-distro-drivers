@@ -109,6 +109,7 @@ void pio_send_control(struct hfi1_pportdata *ppd, int op)
 #define SCC_PER_VL -1
 #define SCC_PER_CPU  -2
 #define SCC_PER_KRCVQ  -3
+#define SCC_MIN_WC SCC_PER_KRCVQ
 
 /* Send Context Size (SCS) constants */
 #define SCS_ACK_CREDITS  32
@@ -192,11 +193,11 @@ static const char *sc_type_name(int index)
  */
 int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct mem_pool_info mem_pool_info[NUM_SC_POOLS] = { { 0 } };
 	/* do not use first N blocks */
-	int total_blocks = (chip_pio_mem_size(dd) / PIO_BLOCK_SIZE) -
-				dd->first_pio_block;
-	u32 usable_sc = chip_send_contexts(dd) - dd->first_send_context;
+	int total_blocks = dr->c.last_pio_block - dr->c.first_pio_block;
+	u32 usable_sc = dr->c.last_send_context - dr->c.first_send_context;
 	int total_contexts = 0;
 	int fixed_blocks;
 	int pool_blocks;
@@ -294,6 +295,7 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 		int count = sc_config_sizes[i].count;
 		int size = sc_config_sizes[i].size;
 		int pool;
+		int newcnt;
 
 		/*
 		 * Sanity check count: Either a positive value or
@@ -301,35 +303,28 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 		 * value is checked later when we compare against total
 		 * memory available.
 		 */
-		if (count == SCC_PER_KRCVQ) {
-			count = 0;
-			for (pidx = 0; pidx < dd->num_pports; pidx++)
-				count += dd->pport[pidx].n_krcv_queues;
-		} else if (count == SCC_PER_VL) {
-			count = 0;
-			for (pidx = 0; pidx < dd->num_pports; pidx++) {
-				count += port_available_pidx(dd, pidx) ?
-						INIT_SC_PER_VL * num_vls : 0;
-			}
-		} else if (count == SCC_PER_CPU) {
-			/* "user" is the user + netdev contexts */
-			count = 0;
-			for (pidx = 0; pidx < dd->num_pports; pidx++)
-				count += dd->pport[pidx].num_rcv_contexts - dd->pport[pidx].n_krcv_queues;
-		} else if (count < 0) {
+		if (count < SCC_MIN_WC) {
 			dd_dev_err(dd,
 				   "%s send context invalid count wildcard %d\n",
 				   sc_type_name(i), count);
 			return -EINVAL;
-		} else {
-			/* config table is per-port - add active ports */
-			int port_count = count;
-
-			count = 0;
-			for (pidx = 0; pidx < dd->num_pports; pidx++)
-				count += port_available_pidx(dd, pidx) ?
-						port_count : 0;
 		}
+		newcnt = 0;
+		for (pidx = 0; pidx < dd->num_pports; ++pidx) {
+			struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+			if (!port_available_pidx(dd, pidx))
+				continue;
+
+			if (count == SCC_PER_KRCVQ)
+				newcnt += pr->n_krcv_queues;
+			else if (count == SCC_PER_VL)
+				newcnt += INIT_SC_PER_VL * num_vls;
+			else if (count == SCC_PER_CPU)
+				newcnt += pr->num_rcv_contexts - pr->n_krcv_queues;
+			else
+				newcnt += count;
+		}
+		count = newcnt;
 
 		/* only expect SC_USER to possibly overflow */
 		if (total_contexts + count > usable_sc) {
@@ -445,7 +440,8 @@ int init_sc_pools_and_sizes(struct hfi1_devdata *dd)
 
 int init_send_contexts(struct hfi1_devdata *dd)
 {
-	u32 num_sc = chip_send_contexts(dd);
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	u32 num_hw_sc = chip_send_contexts(dd);
 	u16 base;
 	int ret, i, j, context;
 
@@ -453,7 +449,7 @@ int init_send_contexts(struct hfi1_devdata *dd)
 	if (ret)
 		return ret;
 
-	dd->hw_to_sw = kmalloc_array(num_sc, sizeof(u16), GFP_KERNEL);
+	dd->hw_to_sw = kmalloc_array(num_hw_sc, sizeof(u16), GFP_KERNEL);
 	dd->send_contexts = kcalloc(dd->num_send_contexts,
 				    sizeof(struct send_context_info),
 				    GFP_KERNEL);
@@ -465,7 +461,7 @@ int init_send_contexts(struct hfi1_devdata *dd)
 	}
 
 	/* hardware context map starts with invalid send context indices */
-	for (i = 0; i < num_sc; i++)
+	for (i = 0; i < num_hw_sc; i++)
 		dd->hw_to_sw[i] = INVALID_SCI;
 
 	/*
@@ -473,7 +469,7 @@ int init_send_contexts(struct hfi1_devdata *dd)
 	 * for each context one after another from the global space.
 	 */
 	context = 0;
-	base = dd->first_pio_block; /* do not use first N blocks */
+	base = dr->c.first_pio_block; /* do not use first N blocks */
 	for (i = 0; i < SC_MAX; i++) {
 		struct sc_config_sizes *scs = &dd->sc_sizes[i];
 
@@ -500,8 +496,8 @@ int init_send_contexts(struct hfi1_devdata *dd)
 static int sc_hw_alloc(struct hfi1_devdata *dd, int type, u32 *sw_index,
 		       u32 *hw_context)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct send_context_info *sci;
-	int num_send = chip_send_contexts(dd);
 	u32 index;
 	u32 context;
 
@@ -511,9 +507,9 @@ static int sc_hw_alloc(struct hfi1_devdata *dd, int type, u32 *sw_index,
 			sci->allocated = 1;
 			/*
 			 * Use a 1:1 mapping, but use back-to-front.  This
-			 * avoids the reserved range 0..dd->first_send_context.
+			 * avoids the reserved range 0..dr->c.first_send_context.
 			 */
-			context = num_send - index - 1;
+			context = dr->c.last_send_context - index - 1;
 			dd->hw_to_sw[context] = index;
 			*sw_index = index;
 			*hw_context = context;
@@ -569,8 +565,9 @@ static inline u32 group_size(u32 group)
  */
 static void cr_group_addresses(struct send_context *sc, dma_addr_t *dma)
 {
-	u32 gc = group_context(sc->hw_context, sc->group);
+	u32 hw_gc = group_context(sc->hw_context, sc->group);
 	u32 index = sc->hw_context & 0x7;
+	u32 gc = sc->dd->hw_to_sw[hw_gc];
 
 	sc->hw_free = &sc->dd->cr_base[sc->node].va[gc].cr[index];
 	*dma = (unsigned long)
@@ -804,6 +801,10 @@ struct send_context *sc_alloc(struct hfi1_pportdata *ppd, int type,
 	init_waitqueue_head(&sc->halt_wait);
 
 	/* grouping is always single context for now */
+	/*
+	 * changing this may require alignment of dr->c.first_send_context,
+	 * or some other compensation/adjustment.
+	 */
 	sc->group = 0;
 
 	sc->sw_index = sw_index;
@@ -2192,7 +2193,9 @@ freesc15:
 
 int init_credit_return(struct hfi1_devdata *dd)
 {
-	size_t bytes = chip_send_contexts(dd) * sizeof(struct credit_return);
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	size_t bytes = (dr->c.last_send_context - dr->c.first_send_context) *
+		       sizeof(struct credit_return);
 	int ret;
 	int i;
 
@@ -2232,7 +2235,9 @@ free_cr_base:
 
 void free_credit_return(struct hfi1_devdata *dd)
 {
-	size_t bytes = chip_send_contexts(dd) * sizeof(struct credit_return);
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	size_t bytes = (dr->c.last_send_context - dr->c.first_send_context) *
+		       sizeof(struct credit_return);
 	int i;
 
 	if (!dd->cr_base)

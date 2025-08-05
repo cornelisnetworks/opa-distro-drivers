@@ -369,6 +369,9 @@ struct rvt_driver_provided {
 
 	/* driver mmap */
 	int (*mmap)(struct ib_ucontext *context, struct vm_area_struct *vma);
+
+	/* bulk service functions */
+	/* TODO */
 };
 
 struct rvt_dev_info {
@@ -411,6 +414,7 @@ struct rvt_dev_info {
 	spinlock_t n_srqs_lock; /* Protect srqs allocated count */
 
 	int flags;
+	bool use_bulksvc;
 	struct rvt_ibport **ports;
 
 	/* QP */
@@ -538,5 +542,4 @@ int rvt_lkey_ok(struct rvt_lkey_table *rkt, struct rvt_pd *pd,
 		struct ib_sge *sge, int acc);
 struct rvt_mcast *rvt_mcast_find(struct rvt_ibport *ibp, union ib_gid *mgid,
 				 u16 lid);
-
 #endif          /* DEF_RDMA_VT_H */

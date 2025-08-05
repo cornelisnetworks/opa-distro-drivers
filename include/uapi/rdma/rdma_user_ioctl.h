@@ -85,6 +85,11 @@
 #define HFI1_IOCTL_PIN_STATS		_IOWR(RDMA_IOCTL_MAGIC, 0xEF, struct hfi1_pin_stats)
 #define HFI1_IOCTL_TID_UPDATE_V3	_IOWR(RDMA_IOCTL_MAGIC, 0xF0, struct hfi1_tid_info_v3)
 
+#define HFI1_IOCTL_BULKSVC_GET_CMPLQ _IOR(RDMA_IOCTL_MAGIC, 0xF1, struct hfi1_bulksvc_queue_info)
+#define HFI1_IOCTL_BULKSVC_GET_CMDQ _IOR(RDMA_IOCTL_MAGIC, 0xF2, struct hfi1_bulksvc_queue_info)
+#define HFI1_IOCTL_BULKSVC_CLIENT_INIT _IOR(RDMA_IOCTL_MAGIC, 0xF3, struct hfi1_bulksvc_client_init)
+#define HFI1_IOCTL_BULKSVC_DOORBELL			_IOW(RDMA_IOCTL_MAGIC, 0xF4, __u32)
+
 #ifdef NVIDIA_GPU_DIRECT
 #define HFI1_IOCTL_SDMA_CACHE_EVICT     _IOWR(RDMA_IOCTL_MAGIC, 0xFD, struct hfi1_sdma_gpu_cache_evict_params)
 
