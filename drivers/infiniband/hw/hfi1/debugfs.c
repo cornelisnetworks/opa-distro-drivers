@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015-2018 Intel Corporation.
+ * Copyright(c) 2024 Cornelis Networks.
  */
 
+#include "linux/ktime.h"
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/kernel.h>
@@ -11,6 +13,11 @@
 #include <linux/types.h>
 #include <linux/ratelimit.h>
 #include <linux/fault-inject.h>
+#include <linux/xarray.h>
+#include <linux/parser.h>
+#include <linux/uaccess.h>
+#include <linux/delay.h>
+#include <linux/atomic.h>
 
 #include "hfi.h"
 #include "trace.h"
@@ -20,6 +27,10 @@
 #include "sdma.h"
 #include "fault.h"
 #include "cport.h"
+#include <linux/slab.h>
+#include <linux/atomic.h>
+#include "mem_region.h"
+#include "file_ops.h"
 
 static struct dentry *hfi1_dbg_root;
 
@@ -81,8 +92,7 @@ static int opcode_stats_show(struct seq_file *s, u8 i, u64 packets, u64 bytes)
 {
 	if (!packets && !bytes)
 		return SEQ_SKIP;
-	seq_printf(s, "%02x %llu/%llu\n", i,
-		   (unsigned long long)packets,
+	seq_printf(s, "%02x %llu/%llu\n", i, (unsigned long long)packets,
 		   (unsigned long long)bytes);
 
 	return 0;
@@ -95,12 +105,15 @@ static int _opcode_stats_seq_show(struct seq_file *s, void *v)
 	u64 n_packets = 0, n_bytes = 0;
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	struct hfi1_ctxtdata *rcd;
 	int pidx;
 
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		for (j = 0; j < dd->pport[pidx].n_krcv_queues; j++) {
-			u16 ctxt = dd->pport[pidx].rcv_context_base + j;
+		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+
+		for (j = 0; j < pr->n_krcv_queues; j++) {
+			u16 ctxt = pr->rcv_context_base + j;
 
 			rcd = hfi1_rcd_get_by_index(dd, ctxt);
 			if (rcd) {
@@ -247,8 +260,7 @@ static void *_qp_stats_seq_start(struct seq_file *s, loff_t *pos)
 }
 
 static void *_qp_stats_seq_next(struct seq_file *s, void *iter_ptr,
-				loff_t *pos)
-	__must_hold(RCU)
+				loff_t *pos) __must_hold(RCU)
 {
 	struct rvt_qp_iter *iter = iter_ptr;
 
@@ -315,10 +327,13 @@ static int _sdes_seq_show(struct seq_file *s, void *v)
 {
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	loff_t *spos = v;
 	loff_t i = *spos;
 
-	sdma_seqfile_dump_sde(s, &dd->per_sdma[i]);
+	if (dd->per_sdma && i >= dr->first_sdma_engine &&
+	    i < dr->last_sdma_engine)
+		sdma_seqfile_dump_sde(s, &dd->per_sdma[i]);
 	return 0;
 }
 
@@ -431,7 +446,7 @@ static ssize_t dev_counters_read(struct file *file, char __user *buf,
 
 	dd = private2dd(file);
 	avail = hfi1_read_cntrs(dd, NULL, &counters);
-	rval =  simple_read_from_buffer(buf, count, ppos, counters, avail);
+	rval = simple_read_from_buffer(buf, count, ppos, counters, avail);
 	return rval;
 }
 
@@ -446,7 +461,7 @@ static ssize_t dev_names_read(struct file *file, char __user *buf,
 
 	dd = private2dd(file);
 	avail = hfi1_read_cntrs(dd, &names, NULL);
-	rval =  simple_read_from_buffer(buf, count, ppos, names, avail);
+	rval = simple_read_from_buffer(buf, count, ppos, names, avail);
 	return rval;
 }
 
@@ -592,7 +607,7 @@ static ssize_t asic_flags_write(struct file *file, const char __user *buf,
 	/* return the number of bytes written */
 	ret = count;
 
- do_free:
+do_free:
 	kfree(buff);
 	return ret;
 }
@@ -620,7 +635,7 @@ static ssize_t dc8051_memory_read(struct file *file, char __user *buf,
 	 * Adjust start and end to fit.  Skip reading anything if out of
 	 * range.
 	 */
-	start = *ppos & ~0x7;	/* round down */
+	start = *ppos & ~0x7; /* round down */
 	if (start < DC8051_DATA_MEM_SIZE) {
 		end = (*ppos + count + 7) & ~0x7; /* round up */
 		if (end > DC8051_DATA_MEM_SIZE)
@@ -704,7 +719,7 @@ static ssize_t debugfs_lcb_write(struct file *file, const char __user *buf,
 }
 
 /*
- * read the per-port QSFP data for ppd
+ * read the per-port QSFP data for pp
  */
 static ssize_t qsfp_debugfs_dump(struct file *file, char __user *buf,
 				 size_t count, loff_t *ppos)
@@ -760,7 +775,7 @@ static ssize_t __i2c_debugfs_write(struct file *file, const char __user *buf,
 
 	ret = total_written;
 
- _free:
+_free:
 	kfree(buff);
 	return ret;
 }
@@ -820,7 +835,7 @@ static ssize_t __i2c_debugfs_read(struct file *file, char __user *buf,
 
 	ret = total_read;
 
- _free:
+_free:
 	kfree(buff);
 	return ret;
 }
@@ -867,7 +882,7 @@ static ssize_t __qsfp_debugfs_write(struct file *file, const char __user *buf,
 
 	ret = total_written;
 
- _free:
+_free:
 	kfree(buff);
 	return ret;
 }
@@ -924,9 +939,9 @@ static ssize_t __qsfp_debugfs_read(struct file *file, char __user *buf,
 
 	ret = total_read;
 
- _free:
+_free:
 	kfree(buff);
- _return:
+_return:
 	return ret;
 }
 
@@ -1095,29 +1110,27 @@ static int exprom_wp_debugfs_release(struct inode *in, struct file *fp)
 	return 0;
 }
 
-#define DEBUGFS_OPS(nm, readroutine, writeroutine)	\
-{ \
-	.name = nm, \
-	.ops = { \
-		.owner = THIS_MODULE, \
-		.read = readroutine, \
-		.write = writeroutine, \
-		.llseek = generic_file_llseek, \
-	}, \
-}
+#define DEBUGFS_OPS(nm, readroutine, writeroutine)                             \
+	{                                                                      \
+		.name = nm, .ops = {                                           \
+			.owner = THIS_MODULE,                                  \
+			.read = readroutine,                                   \
+			.write = writeroutine,                                 \
+			.llseek = generic_file_llseek,                         \
+		},                                                             \
+	}
 
-#define DEBUGFS_XOPS(nm, readf, writef, openf, releasef) \
-{ \
-	.name = nm, \
-	.ops = { \
-		.owner = THIS_MODULE, \
-		.read = readf, \
-		.write = writef, \
-		.llseek = generic_file_llseek, \
-		.open = openf, \
-		.release = releasef \
-	}, \
-}
+#define DEBUGFS_XOPS(nm, readf, writef, openf, releasef)                       \
+	{                                                                      \
+		.name = nm, .ops = {                                           \
+			.owner = THIS_MODULE,                                  \
+			.read = readf,                                         \
+			.write = writef,                                       \
+			.llseek = generic_file_llseek,                         \
+			.open = openf,                                         \
+			.release = releasef                                    \
+		},                                                             \
+	}
 
 static const struct counter_info cntr_ops[] = {
 	DEBUGFS_OPS("counter_names", dev_names_read, NULL),
@@ -1187,11 +1200,10 @@ DEBUGFS_SEQ_FILE_OPS(sdma_cpu_list);
 DEBUGFS_SEQ_FILE_OPEN(sdma_cpu_list)
 DEBUGFS_FILE_OPS(sdma_cpu_list);
 
-static ssize_t link_debug_read(struct file *file,
-			       char __user *user_buf, size_t count,
-			       loff_t *ppos)
+static ssize_t link_debug_read(struct file *file, char __user *user_buf,
+			       size_t count, loff_t *ppos)
 {
-	//struct hfi1_devdata *dd = file->private_data;
+	// struct hfi1_devdata *dd = file->private_data;
 	return 0;
 }
 
@@ -1240,10 +1252,10 @@ static void fake_active(struct hfi1_devdata *dd, int pidx)
 
 	/* IB Port 1 = LID 1, IB Port 2 = LID 2 */
 	lid = pidx + 1;
-	lmc = 0x0;	// only allow 1
+	lmc = 0x0; // only allow 1
 
 	printk("%s: fake active port index %d, lid %d (with set_mtu call)\n",
-		__func__, pidx, lid);
+	       __func__, pidx, lid);
 
 	/*
 	 * From __subn_set_opa_portinfo().  In there, this comes after
@@ -1269,14 +1281,13 @@ static void fake_active(struct hfi1_devdata *dd, int pidx)
 
 	// swiped from set_link_state - sorta.  go_port_active() is new in this
 	// stack of patches
-	//can't call update_statusp() - static to chip.c, but may be needed
-	//for faking user libraries
-	//update_statusp(ppd, IB_PORT_ACTIVE);
+	// can't call update_statusp() - static to chip.c, but may be needed
+	// for faking user libraries
+	// update_statusp(ppd, IB_PORT_ACTIVE);
 	go_port_active(ppd);
 }
 
-static ssize_t link_debug_write(struct file *file,
-				const char __user *user_buf,
+static ssize_t link_debug_write(struct file *file, const char __user *user_buf,
 				size_t count, loff_t *ppos)
 {
 	struct hfi1_devdata *dd = file->private_data;
@@ -1314,9 +1325,8 @@ static const struct file_operations _link_debug_ops = {
 	.llseek = default_llseek,
 };
 
-static ssize_t cport_ping_read(struct file *file,
-			       char __user *user_buf, size_t count,
-			       loff_t *ppos)
+static ssize_t cport_ping_read(struct file *file, char __user *user_buf,
+			       size_t count, loff_t *ppos)
 {
 	struct hfi1_devdata *dd = file->private_data;
 	char buf[16];
@@ -1338,8 +1348,7 @@ static ssize_t cport_ping_read(struct file *file,
 	return count;
 }
 
-static ssize_t cport_ping_write(struct file *file,
-				const char __user *user_buf,
+static ssize_t cport_ping_write(struct file *file, const char __user *user_buf,
 				size_t count, loff_t *ppos)
 {
 	struct hfi1_devdata *dd = file->private_data;
@@ -1374,7 +1383,7 @@ static const struct file_operations _cport_ping_ops = {
 };
 
 static void add_port_files(struct dentry *root, struct hfi1_pportdata *ppd,
-		      const struct counter_info *port_ops, int num_ops)
+			   const struct counter_info *port_ops, int num_ops)
 {
 	char name[64];
 	int i;
@@ -1418,7 +1427,8 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 	debugfs_create_file("sdma_cpu_list", 0444, root, ibd,
 			    &_sdma_cpu_list_file_ops);
 	if (dd->cport)
-		debugfs_create_file("cport_ping", 0644, root, dd, &_cport_ping_ops);
+		debugfs_create_file("cport_ping", 0644, root, dd,
+				    &_cport_ping_ops);
 	debugfs_create_file("link_debug", 0644, root, dd, &_link_debug_ops);
 
 	/* dev counter files */
@@ -1464,18 +1474,11 @@ out:
  * if hfi1_ib_stats changes, this needs to change.  Names need to be
  * 12 chars or less (w/o newline), for proper display by hfistats utility.
  */
-static const char * const hfi1_statnames[] = {
+static const char *const hfi1_statnames[] = {
 	/* must be element 0*/
-	"KernIntr",
-	"ErrorIntr",
-	"Tx_Errs",
-	"Rcv_Errs",
-	"H/W_Errs",
-	"NoPIOBufs",
-	"CtxtsOpen",
-	"RcvLen_Errs",
-	"EgrBufFull",
-	"EgrHdrFull"
+	"KernIntr",    "ErrorIntr", "Tx_Errs",    "Rcv_Errs",
+	"H/W_Errs",    "NoPIOBufs", "CtxtsOpen",  "RcvLen_Errs",
+	"EgrBufFull",  "EgrHdrFull"
 };
 
 static void *_driver_stats_names_seq_start(struct seq_file *s, loff_t *pos)
@@ -1485,10 +1488,8 @@ static void *_driver_stats_names_seq_start(struct seq_file *s, loff_t *pos)
 	return pos;
 }
 
-static void *_driver_stats_names_seq_next(
-	struct seq_file *s,
-	void *v,
-	loff_t *pos)
+static void *_driver_stats_names_seq_next(struct seq_file *s, void *v,
+					  loff_t *pos)
 {
 	++*pos;
 	if (*pos >= ARRAY_SIZE(hfi1_statnames))
@@ -1564,7 +1565,7 @@ DEBUGFS_FILE_OPS(driver_stats);
 
 void hfi1_dbg_init(void)
 {
-	hfi1_dbg_root  = debugfs_create_dir(DRIVER_NAME, NULL);
+	hfi1_dbg_root = debugfs_create_dir(DRIVER_NAME, NULL);
 	debugfs_create_file("driver_stats_names", 0444, hfi1_dbg_root, NULL,
 			    &_driver_stats_names_file_ops);
 	debugfs_create_file("driver_stats", 0444, hfi1_dbg_root, NULL,

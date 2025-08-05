@@ -10,11 +10,20 @@
 
 int jkr_find_used_resources(struct hfi1_devdata *dd)
 {
-	u32 num_send = chip_send_contexts(dd);
-	u32 num_rcv = chip_rcv_contexts(dd);
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	u64 val;
 	bool found_first_unused;
 	int i;
+
+	dr->pfunit = dd->unit;
+	dr->c.first_send_context = 0;
+	dr->c.last_send_context = chip_send_contexts(dd);
+	dr->c.first_rcv_context = 0;
+	dr->c.last_rcv_context = chip_rcv_contexts(dd);
+	dr->c.first_rcvarray_entry = 0;
+	dr->c.last_rcvarray_entry = chip_rcv_array_count(dd);
+	dr->c.first_pio_block = 0;
+	dr->c.last_pio_block = chip_pio_mem_size(dd) / PIO_BLOCK_SIZE;
 
 	/*
 	 * Find reserved resources.  Expectations:  All used resources are
@@ -26,15 +35,13 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 	 * Look for send reserved.
 	 */
 	found_first_unused = false;
-	dd->first_send_context = 0;
-	dd->first_pio_block = 0;
-	for (i = 0; i < num_send; i++) {
+	for (i = 0; i < dr->c.last_send_context; i++) {
 		val = read_ctxt_csr(dd, JKR_SEND_CTXT_SI_IDX, i, 8);
 		if (val == 0) {		/* 0 means pf0 */
 			/* this context is for the driver */
 			if (!found_first_unused) {
 				found_first_unused = true;
-				dd->first_send_context = i;
+				dr->c.first_send_context = i;
 			}
 		} else {
 			u32 base;	/* in blocks */
@@ -64,29 +71,29 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 			 * involve much more complicated range lists that are
 			 * not worth doing.
 			 */
-			if (dd->first_pio_block != base) {
+			if (dr->c.first_pio_block != base) {
 				dd_dev_warn(dd, "%s: WARNING: unexpected PIO blocks used\n",
 					    __func__);
 			}
 			/* adjust top used */
-			if (dd->first_pio_block < base + size)
-				dd->first_pio_block = base + size;
+			if (dr->c.first_pio_block < base + size)
+				dr->c.first_pio_block = base + size;
 		}
 	}
+	if (dr->c.first_send_context >= dr->c.last_send_context)
+		return -ENOSPC;
 
 	/*
 	 * Look for receive reserved.
 	 */
 	found_first_unused = false;
-	dd->first_rcv_context = 0;
-	dd->first_rcvarray_entry = 0;
-	for (i = 0; i < num_rcv; i++) {
+	for (i = 0; i < dr->c.last_rcv_context; i++) {
 		val = read_rctxt_csr(dd, i, JKR_RCV_SI_IDX);
 		if (val == 0) {		/* 0 means pf0 */
 			/* this context is for the driver */
 			if (!found_first_unused) {
 				found_first_unused = true;
-				dd->first_rcv_context = i;
+				dr->c.first_rcv_context = i;
 			}
 		} else {
 			u32 egr_base;
@@ -134,15 +141,17 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 			 * involve much more complicated range lists that are
 			 * not worth doing.
 			 */
-			if (dd->first_rcvarray_entry != egr_base) {
+			if (dr->c.first_rcvarray_entry != egr_base) {
 				dd_dev_warn(dd, "%s: WARNING: unexpected RcvArray entries used\n",
 					    __func__);
 			}
 
-			if (dd->first_rcvarray_entry < egr_base + egr_count)
-				dd->first_rcvarray_entry = egr_base + egr_count;
+			if (dr->c.first_rcvarray_entry < egr_base + egr_count)
+				dr->c.first_rcvarray_entry = egr_base + egr_count;
 		}
 	}
+	if (dr->c.first_rcv_context >= dr->c.last_rcv_context)
+		return -ENOSPC;
 
 	/*
 	 * Look for RSM rules being used.
@@ -152,7 +161,7 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 		if (val == 0)
 			break;
 	}
-	if (val == dd->params->rsm_rule_size) {
+	if (i == dd->params->rsm_rule_size) {
 		dd_dev_err(dd, "All %d RSM rules used\n",
 			   dd->params->rsm_rule_size);
 		return -EINVAL;
@@ -164,8 +173,8 @@ int jkr_find_used_resources(struct hfi1_devdata *dd)
 	dd->rsm_rule_init = true;
 
 	dd_dev_info(dd, "Resource starts: send ctxt %d, pio block %d, rcv ctxt %d, RcvArray %d, rsm rule %d\n",
-		    dd->first_send_context, dd->first_pio_block,
-		    dd->first_rcv_context, dd->first_rcvarray_entry,
+		    dr->c.first_send_context, dr->c.first_pio_block,
+		    dr->c.first_rcv_context, dr->c.first_rcvarray_entry,
 		    dd->first_rsm_rule);
 
 	return 0;

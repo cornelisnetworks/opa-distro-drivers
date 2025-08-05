@@ -24,3 +24,4 @@ __print_symbolic(etype,                         \
 #include "trace_iowait.h"
 #include "trace_tid.h"
 #include "trace_pin.h"
+#include "trace_dms.h"

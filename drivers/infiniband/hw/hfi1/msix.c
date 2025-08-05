@@ -15,6 +15,7 @@
  */
 int msix_initialize(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	u32 total;
 	int ret;
 	int pidx;
@@ -25,12 +26,17 @@ int msix_initialize(struct hfi1_devdata *dd)
 	 *	one for the general, "slow path" interrupt
 	 *	one per used SDMA engine
 	 *	one per kernel receive context
+	 *	one for each bulksvc context
 	 *	one for each VNIC context
 	 *      ...any new IRQs should be added here.
 	 */
-	total = 1 + dd->num_sdma;
-	for (pidx = 0; pidx < dd->num_pports; pidx++)
-		total += dd->pport[pidx].n_krcv_queues + dd->pport[pidx].num_netdev_contexts;
+	total = 1 + (dr->last_sdma_engine - dr->first_sdma_engine);
+	for (pidx = 0; pidx < dd->num_pports; pidx++) {
+		struct hfi1_portrsrcs *pr = &dr->ppd[pidx];
+
+		total += pr->n_krcv_queues + pr->num_netdev_contexts +
+			 pr->num_bulksvc_contexts;
+	}
 
 	if (total >= CCE_NUM_MSIX_VECTORS)
 		return -EINVAL;
@@ -263,6 +269,7 @@ static void enable_sdma_srcs(struct hfi1_devdata *dd, int i)
  */
 int msix_request_irqs(struct hfi1_devdata *dd)
 {
+	struct hfi1_devrsrcs *dr = &dd->rsrcs;
 	int i;
 	int j;
 	int ret;
@@ -283,7 +290,7 @@ int msix_request_irqs(struct hfi1_devdata *dd)
 			   dd->msix_info.msix_entries[0].irq);
 	}
 
-	for (i = 0; i < dd->num_sdma; i++) {
+	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; i++) {
 		struct sdma_engine *sde = &dd->per_sdma[i];
 
 		ret = msix_request_sdma_irq(sde);
@@ -293,8 +300,10 @@ int msix_request_irqs(struct hfi1_devdata *dd)
 	}
 
 	for (i = 0; i < dd->num_pports; i++) {
-		for (j = 0; j < dd->pport[i].n_krcv_queues; j++) {
-			u16 ctxt = dd->pport[i].rcv_context_base + j;
+		struct hfi1_portrsrcs *pr = &dr->ppd[i];
+
+		for (j = 0; j < pr->n_krcv_queues; j++) {
+			u16 ctxt = pr->rcv_context_base + j;
 			struct hfi1_ctxtdata *rcd = hfi1_rcd_get_by_index(dd, ctxt);
 
 			if (rcd)

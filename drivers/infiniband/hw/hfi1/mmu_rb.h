@@ -78,6 +78,9 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg);
 struct mmu_rb_node *hfi1_mmu_rb_get_first(struct mmu_rb_handler *handler,
 					  unsigned long addr,
 					  unsigned long len);
+struct mmu_rb_node *hfi1_mmu_rb_search(struct mmu_rb_handler *handler,
+					  unsigned long addr,
+					  unsigned long len);
 unsigned long hfi1_mmu_rb_for_n(struct mmu_rb_handler *handler,
 				unsigned long start, int count,
 				void (*fn)(const struct mmu_rb_node *rb_node, void *),

@@ -4,7 +4,11 @@ DEFAULT_KERNEL_VERSION=""
 kerneldir="./"
 
 # ridiculously long to encourage good names later
-rpmname="opxs-kernel-updates"
+if [[ $MVERSION == "dev-build" ]]; then
+	rpmname="internal-kernel-updates"
+else
+	rpmname="opxs-kernel-updates"
+fi
 
 set -e
 
