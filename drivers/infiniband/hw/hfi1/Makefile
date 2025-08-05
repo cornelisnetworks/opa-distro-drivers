@@ -17,12 +17,15 @@ ccflags-$(CONFIG_HFI_CPORT_POLLING) += -DCONFIG_HFI_CPORT_POLLING
 hfi1-y := \
 	affinity.o \
 	aspm.o \
+	bulksvc.o \
+	bulksvc_user.o \
 	chip.o \
 	chip_gen.o \
 	chip_jkr.o \
 	cport.o \
 	device.o \
 	diag.o \
+	dms.o \
 	driver.o \
 	efivar.o \
 	eprom.o \
@@ -36,6 +39,7 @@ hfi1-y := \
 	ipoib_rx.o \
 	ipoib_tx.o \
 	mad.o \
+	mem_region.o \
 	mmu_rb.o \
 	msix.o \
 	netdev_rx.o \

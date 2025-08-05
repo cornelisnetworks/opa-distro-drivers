@@ -168,6 +168,9 @@ struct diag_pkt {
  * and memory bits that are visible to and/or used by user-mode software.
  */
 
+#define HFI1_L2_TYPE_16B 0x2
+#define HFI1_L2_TYPE_9B 0x3
+
 /*
  * Receive Header Flags
  */
@@ -212,6 +215,9 @@ struct diag_pkt {
 #define RHF_ECC_ERR		(0x1ull << 61)
 #define RHF_RESERVED		(0x1ull << 62)
 #define RHF_ICRC_ERR		(0x1ull << 63)
+
+#define RHF_JKR_L2_TYPE_SHIFT 54
+#define RHF_JKR_L2_TYPE_MASK 0x3ull
 
 #define RHF_ERROR_SMASK 0xffe0000000000000ull		/* bits 63:53 */
 
@@ -331,5 +337,10 @@ static inline u64 wfr_rhf_dc_info(u64 rhf)
 static inline u32 rhf_egr_buf_offset(u64 rhf)
 {
 	return (rhf >> RHF_EGR_OFFSET_SHIFT) & RHF_EGR_OFFSET_MASK;
+}
+
+static inline u32 jkr_rhf_l2_type(u64 rhf)
+{
+	return (u32) ((rhf >> RHF_JKR_L2_TYPE_SHIFT) & RHF_JKR_L2_TYPE_MASK);
 }
 #endif /* _COMMON_H */

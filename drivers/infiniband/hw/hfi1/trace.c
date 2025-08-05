@@ -537,3 +537,4 @@ __hfi1_trace_fn(RCVCTRL);
 __hfi1_trace_fn(TID);
 __hfi1_trace_fn(MMU);
 __hfi1_trace_fn(IOCTL);
+__hfi1_trace_fn(BULKSVC);

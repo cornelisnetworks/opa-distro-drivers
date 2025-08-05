@@ -939,6 +939,7 @@ static void set_all_fastpath(struct hfi1_ctxtdata *rcd)
 {
 	struct hfi1_devdata *dd = rcd->dd;
 	struct hfi1_pportdata *ppd = rcd->ppd;
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
 	u16 i;
 
 // FIXME: This comment is incorrect about vnic.  Talk to Denny.
@@ -954,8 +955,8 @@ static void set_all_fastpath(struct hfi1_ctxtdata *rcd)
 		return;
 	}
 
-	for (i = 0; i < ppd->num_rcv_contexts; i++) {
-		u16 ctxt = ppd->rcv_context_base + i;
+	for (i = 0; i < pr->num_rcv_contexts; i++) {
+		u16 ctxt = pr->rcv_context_base + i;
 
 		rcd = hfi1_rcd_get_by_index(dd, ctxt);
 		if (rcd && !is_control_context(rcd) &&
@@ -968,12 +969,13 @@ static void set_all_fastpath(struct hfi1_ctxtdata *rcd)
 void set_all_slowpath(struct hfi1_pportdata *ppd)
 {
 	struct hfi1_devdata *dd = ppd->dd;
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
 	struct hfi1_ctxtdata *rcd;
 	u16 i;
 
 	/* control context must always use the slow path interrupt handler */
-	for (i = 0; i < ppd->num_rcv_contexts; i++) {
-		u16 ctxt = ppd->rcv_context_base + i;
+	for (i = 0; i < pr->num_rcv_contexts; i++) {
+		u16 ctxt = pr->rcv_context_base + i;
 
 		rcd = hfi1_rcd_get_by_index(dd, ctxt);
 		if (!rcd)
@@ -1215,6 +1217,7 @@ void receive_interrupt_work(struct work_struct *work)
 	struct hfi1_pportdata *ppd = container_of(work, struct hfi1_pportdata,
 						  linkstate_active_work);
 	struct hfi1_devdata *dd = ppd->dd;
+	struct hfi1_portrsrcs *pr = &dd->rsrcs.ppd[ppd->hw_pidx];
 	struct hfi1_ctxtdata *rcd;
 	u16 i;
 
@@ -1226,7 +1229,7 @@ void receive_interrupt_work(struct work_struct *work)
 	 * Interrupt all statically allocated kernel contexts that could
 	 * have had an interrupt during auto activation.
 	 */
-	for (i = ppd->rcv_context_base; i < ppd->first_dyn_alloc_ctxt; i++) {
+	for (i = pr->rcv_context_base; i < pr->first_bulksvc_alloc_ctxt; i++) {
 		rcd = hfi1_rcd_get_by_index(dd, i);
 		if (rcd)
 			force_recv_intr(rcd);

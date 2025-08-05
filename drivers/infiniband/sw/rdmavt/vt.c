@@ -625,3 +625,4 @@ int rvt_init_port(struct rvt_dev_info *rdi, struct rvt_ibport *port,
 	return 0;
 }
 EXPORT_SYMBOL(rvt_init_port);
+
