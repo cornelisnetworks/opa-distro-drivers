@@ -4,6 +4,7 @@
  */
 
 #include <linux/types.h>
+#include <linux/device.h>
 #include <linux/string.h>
 
 #include "pinning.h"
