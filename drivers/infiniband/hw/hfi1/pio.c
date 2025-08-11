@@ -1093,7 +1093,7 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 		reg = read_epscarr_csr(dd, ppd->hw_pidx, sc->hw_context,
 				       dd->params->send_egress_ctxt_status_reg);
 		/* done if any halt bits, SW or HW are set */
-		if (sc->flags & SCF_HALTED ||
+		if (sc->flags & (SCF_HALTED | SCF_LINK_DOWN) ||
 		    is_sc_halted(dd, sc->hw_context) || egress_halted(reg))
 			break;
 		reg = packet_occupancy(reg);
