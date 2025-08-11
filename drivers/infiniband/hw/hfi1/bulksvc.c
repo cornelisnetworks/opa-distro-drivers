@@ -411,15 +411,13 @@ static void flush_event_queue(struct hfi1_bulksvc *svc)
 	struct list_head *entry, *tmp_entry;
 
 	if (list_empty(&svc->event_queue))
-		goto exit;
+		return;
 
 	list_for_each_safe(entry, tmp_entry, &svc->event_queue) {
 		list_del(entry);
 		kfree(list_entry(entry, struct hfi1_bulksvc_event_entry,
 				 list));
 	}
-
-exit:
 }
 
 /* can be called multiple times */
@@ -680,7 +678,7 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
 	if (svc->first_rsm_rule < 0 || svc->first_rsm_index < 0) {
 		dd_dev_err(svc->dd, "%s:%d:%s() bulksvc: No RSM rules reserved, cannot initialize RSM\n",
 			   __FILENAME__, __LINE__, __func__);
-		goto exit;
+		return;
 	}
 
 	for (int i = 0; i < dd->num_pports; ++i) {
@@ -735,7 +733,6 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
 
 	dd_dev_warn(dd, "%s:%d:%s() bulksvc: Finished registering RSM rules for bulksvc\n",
 		    __FILENAME__, __LINE__, __func__);
-exit:
 }
 
 /**
