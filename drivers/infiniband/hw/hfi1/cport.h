@@ -107,9 +107,12 @@ struct cport_how_payload {
 	/* qword 4 */
 	u64 started:8;
 	u64 temp_valid:1;
-	u64 _resv_q4_9:7;
+	u64 qsfp1_temp_valid:1;
+	u64 qsfp2_temp_valid:1;
+	u64 _resv_q4_15_11:5;
 	u64 temp:16;
-	u64 _resv2:32;
+	u64 qsfp1_temp:16;
+	u64 qsfp2_temp:16;
 };
 
 /* Fields in 1-qword payload of START request/response */
