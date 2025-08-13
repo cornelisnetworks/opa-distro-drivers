@@ -1057,12 +1057,32 @@ struct err_info_constraint {
 	u32 slid;
 };
 
+/**
+ * WFR HFI temperature data.
+ */
 struct hfi1_temp {
 	unsigned int curr;       /* current temperature */
 	unsigned int lo_lim;     /* low temperature limit */
 	unsigned int hi_lim;     /* high temperature limit */
 	unsigned int crit_lim;   /* critical temperature limit */
 	u8 triggers;      /* temperature triggers */
+};
+
+/**
+ * JKR and newer ASIC and QSFP temperature data.
+ *
+ * All temperature values are signed in 0.125 degC increments.
+ *
+ * For each temperature field <V>, there is a <V>_valid
+ * indicating if a valid value was returned by CPORT.
+ */
+struct cport_temp {
+	s16 asic;
+	s16 qsfp1;
+	s16 qsfp2;
+	u8 asic_valid:1;
+	u8 qsfp1_valid:1;
+	u8 qsfp2_valid:1;
 };
 
 struct hfi1_i2c_bus {
@@ -1394,8 +1414,7 @@ struct hfi1_cport {
 #ifdef CONFIG_HFI_CPORT_POLLING
 	struct task_struct *poll_th;
 #endif
-	s16 temp;			/* cached temperature in 0.125 degC */
-					/*   increments */
+	struct cport_temp temp;		/* cached CPORT temperature data */
 	unsigned long temp_timeout;	/* jiffies when cache times out */
 	atomic_t nping;			/* CPORT ping counter */
 	struct task_struct *ping_th;	/* kthread currently running ping */
