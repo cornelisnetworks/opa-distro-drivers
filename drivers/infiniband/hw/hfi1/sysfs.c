@@ -548,6 +548,36 @@ static DEVICE_ATTR_WO(chip_reset);
 #define temp_d(t) ((t) >> 2)
 #define temp_f(t) (((t)&0x3) * 25u)
 
+static ssize_t emit_temperature(char *buf, ssize_t off, const char *lbl,
+				s16 temp, bool valid)
+{
+	int n = temp * 125;
+	bool neg = false;
+
+	if (!valid)
+		return sysfs_emit_at(buf, off, "%s none\n", lbl);
+	if (n < 0) {
+		neg = true;
+		n = -n;
+	}
+	return sysfs_emit_at(buf, off, "%s %s%u.%03u\n", lbl, neg ? "-" : "",
+			     n / 1000, n % 1000);
+}
+
+static ssize_t emit_cport_temp(struct hfi1_devdata *dd, char *buf,
+			       struct cport_temp *temp)
+{
+	ssize_t off = 0;
+
+	off += emit_temperature(buf, off, "ASIC", temp->asic,
+				temp->asic_valid);
+	off += emit_temperature(buf, off, "QSFP1", temp->qsfp1,
+				temp->qsfp1_valid);
+	off += emit_temperature(buf, off, "QSFP2", temp->qsfp2,
+				temp->qsfp2_valid);
+	return off;
+}
+
 /*
  * Dump tempsense values, in decimal, to ease shell-scripts.
  */
@@ -558,10 +588,8 @@ static ssize_t tempsense_show(struct device *device,
 		rdma_device_to_drv_device(device, struct hfi1_ibdev, rdi.ibdev);
 	struct hfi1_devdata *dd = dd_from_dev(dev);
 	struct hfi1_cport *cport;
+	struct cport_temp temp = {0};
 	int ret;
-	int n;
-	s16 gen_temp; /* signed, in 0.125 degC increments */
-	bool neg;
 
 	if (dd->params->chip_type == CHIP_WFR) {
 		struct hfi1_temp temp;
@@ -587,23 +615,16 @@ static ssize_t tempsense_show(struct device *device,
 
 	/* the firmware does not update often, use cached value until timeout */
 	if (time_after(jiffies, cport->temp_timeout)) {
-		ret = cport_read_temp(dd, &gen_temp);
+		ret = cport_read_temp(dd, &temp);
 		if (ret)
 			return ret;
-		cport->temp = gen_temp;
+		cport->temp = temp;
 		/* firmware updates every ~15 seconds */
 		cport->temp_timeout = jiffies + msecs_to_jiffies(5000);
 	} else {
-		gen_temp = cport->temp;
+		temp = cport->temp;
 	}
-	n = gen_temp * 125;
-	neg = false;
-	if (n < 0) {
-		neg = true;
-		n = -n;
-	}
-	return sysfs_emit(buf, "%s%u.%03u\n", neg ? "-" : "",
-			  n / 1000, n % 1000);
+	return emit_cport_temp(dd, buf, &temp);
 }
 static DEVICE_ATTR_RO(tempsense);
 
