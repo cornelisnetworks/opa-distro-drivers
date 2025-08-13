@@ -524,12 +524,25 @@ int cport_start_link(struct hfi1_pportdata *ppd, struct opa_port_info *pi)
 	return cport_set_link_state(ppd, pi, HLS_DN_POLL);
 }
 
-/* ask cport firmware for the temperature */
-int cport_read_temp(struct hfi1_devdata *dd, s16 *gen_temp)
+/**
+ * Ask cport firmware for the temperature.
+ *
+ * @gen_temp: temperature output.
+ *
+ * Return: 0 on success, -EINVAL on invalid reply from CPORT,
+ * -EOPNOTSUPP on reply from CPORT but ASIC temperature not
+ * valid/supported.
+ */
+int cport_read_temp(struct hfi1_devdata *dd, struct cport_temp *gen_temp)
 {
 	struct cport_how_payload *how = NULL;
 	int resp_len = 0;
 	int ret;
+
+	/* Don't trust the caller; assume invalid */
+	gen_temp->asic_valid = 0;
+	gen_temp->qsfp1_valid = 0;
+	gen_temp->qsfp2_valid = 0;
 
 	ret = cport_send_req(dd, CH_OP_HOW, 0, NULL, 0, (void **)&how, &resp_len, HZ);
 	if (ret) {
@@ -546,9 +559,16 @@ int cport_read_temp(struct hfi1_devdata *dd, s16 *gen_temp)
 		ret = -EOPNOTSUPP;
 		goto done;
 	}
+	gen_temp->asic_valid = 1;
+	gen_temp->asic = (s16)how->temp;
 
-	*gen_temp = (s16)how->temp;
+	gen_temp->qsfp1_valid = how->qsfp1_temp_valid;
+	if (how->qsfp1_temp_valid)
+		gen_temp->qsfp1 = (s16)how->qsfp1_temp;
 
+	gen_temp->qsfp2_valid = how->qsfp2_temp_valid;
+	if (how->qsfp2_temp_valid)
+		gen_temp->qsfp2 = (s16)how->qsfp2_temp;
 done:
 	kfree(how);
 	return ret;
