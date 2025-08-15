@@ -37,6 +37,8 @@ MODULE_PARM_DESC(cport_mad_to, "Timout for MADs to CPORT, seconds, default 1 (-1
 #define OPA_LINK_WIDTH_RESET_OLD 0x0fff
 #define OPA_LINK_WIDTH_RESET 0xffff
 
+#define OPA_WC_MCTXT_UMAD	1	/* MAD arrive via MCTXT UMAD channel */
+
 struct trap_node {
 	struct list_head list;
 	struct opa_mad_notice_attr data;
@@ -5311,6 +5313,14 @@ int cport_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 #endif
 	print_mad(dd, port, in_mad, __func__, !!in_grh);
 #endif
+	/* if this MAD arrived on MCTXT UMAD, do not ever send back to CPORT */
+	if (in_wc && in_wc->vendor_err == OPA_WC_MCTXT_UMAD) {
+#ifdef CPORT_UMAD_TRACE
+		print_hex_dump(KERN_INFO, "MCTXT UMAD2 ", DUMP_PREFIX_OFFSET, 16, 1, in_mad, 64, false);
+#endif
+		mad_result = IB_MAD_RESULT_SUCCESS;
+		goto done;
+	}
 	/* XXX - all SA MADs just return success.
 	 * in fact, everything returns success except specific MADs.
 	 */
@@ -6257,6 +6267,8 @@ static int cport_umad_handler(struct hfi1_devdata *dd, u8 op, u8 sideband,
 	struct ib_wc wc;
 	int mad_offset;
 	u32 tlen;
+	u32 slid, dlid;
+	u16 pkey;
 	int port;
 	int ret = 0;
 	int rc;
@@ -6315,13 +6327,48 @@ static int cport_umad_handler(struct hfi1_devdata *dd, u8 op, u8 sideband,
 	wc.wr_id = qp0->r_wr_id;
 	wc.status = IB_WC_SUCCESS;
 	wc.opcode = IB_WC_RECV;
-	wc.vendor_err = 0;
+	/* tag MAD so we don't reflect it back to CPORT */
+	wc.vendor_err = OPA_WC_MCTXT_UMAD;
 	wc.qp = &qp0->ibqp;
 	wc.src_qp = 0;	/* MCTXT has no QP, so just use 0 */
-	wc.pkey_index = 0;
-	wc.slid = be16_to_cpu(mad->dr_slid);
+	if (op == CH_OP_UMAD_16B) {
+		pkey = hfi1_16B_get_pkey(payload);
+	} else {
+		struct ib_header *hdr = payload;
+		struct ib_other_headers *ohdr;
+		u8 lnh = ib_get_lnh(hdr);
+
+		if (lnh == HFI1_LRH_GRH)
+			ohdr = &hdr->u.l.oth;
+		else
+			ohdr = &hdr->u.oth;
+		pkey = ib_bth_get_pkey(ohdr);
+	}
+	rc = hfi1_lookup_pkey_idx(&ppd->ibport_data, pkey); /* should never fail */
+	wc.pkey_index = rc < 0 ? 0 : rc;
+	if (mad->mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE) {
+		/* TODO: should these just always come from the payload header? */
+		if (mad->base_version == OPA_MGMT_BASE_VERSION) {
+			struct opa_smp *omad = (struct opa_smp *)mad;
+
+			slid = be32_to_cpu(omad->route.dr.dr_slid);
+			dlid = be32_to_cpu(omad->route.dr.dr_dlid);
+		} else {
+			slid = be16_to_cpu(mad->dr_slid);
+			dlid = be16_to_cpu(mad->dr_dlid);
+		}
+	} else {
+		if (op == CH_OP_UMAD_16B) {
+			slid = hfi1_16B_get_slid(payload);
+			dlid = hfi1_16B_get_dlid(payload);
+		} else {
+			slid = ib_get_slid(payload);
+			dlid = ib_get_dlid(payload);
+		}
+	}
+	wc.slid = slid;
+	wc.dlid_path_bits = dlid & ((1 << ppd->lmc) - 1);
 	wc.sl = ppd->ibport_data.sc_to_sl[15];
-	wc.dlid_path_bits = be16_to_cpu(mad->dr_dlid) & ((1 << ppd->lmc) - 1);
 	wc.port_num = qp0->port_num;
 
 #ifdef CPORT_UMAD_TRACE
