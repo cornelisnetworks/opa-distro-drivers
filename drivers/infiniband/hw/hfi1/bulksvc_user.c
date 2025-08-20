@@ -69,7 +69,7 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 	return bulksvc_user_info;
 }
 
-void bulksvc_user_info_event_release(struct kref *ref)
+static void bulksvc_user_info_event_release(struct kref *ref)
 {
 	struct hfi1_bulksvc_user_info* info = container_of(ref, struct hfi1_bulksvc_user_info, refcount);
 	struct hfi1_bulksvc_event_entry *event_entry = kzalloc(sizeof(*event_entry), GFP_KERNEL);
@@ -806,7 +806,7 @@ struct initiated_mr_rdma_transact_completion_cookie {
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 };
 
-static void on_mr_rdma_transact_complete(union hfi1_dms_completion_cookie *cookie)
+static void on_mr_rdma_transact_complete(union hfi1_dms_completion_cookie *cookie, int status)
 {
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
@@ -820,7 +820,7 @@ static void on_mr_rdma_transact_complete(union hfi1_dms_completion_cookie *cooki
 
 	give_completion(mr_transact_cookie->user_info, mr_transact_cookie->cmplq_record, &cmpl);
 
-	user_mr_record_put(mr_transact_cookie->mr_record); // one-time
+	user_mr_record_put(mr_transact_cookie->mr_record);
 	hfi1_bulksvc_user_info_put(mr_transact_cookie->user_info);
 }
 
@@ -956,7 +956,7 @@ struct rdma_va_completion_cookie {
 };
 
 static void on_rdma_va_complete(
-	union hfi1_dms_completion_cookie * const cookie)
+	union hfi1_dms_completion_cookie * const cookie, int status)
 {
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
@@ -1075,9 +1075,10 @@ static void bulksvc_on_user_cmd(struct hfi1_bulksvc * const svc,
 	}
 }
 
-void hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
+int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 {
 	struct hfi1_bulksvc_user_info *user_info;
+	int processed = 0;
 
 	mutex_lock(&svc->user_info_lock);
 	list_for_each_entry(user_info, &svc->user_infos, list_entry) {
@@ -1087,6 +1088,7 @@ void hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 			if (rc == -EINVAL || rc == 0) {
 				// EINVAL implies completion queue is gone, ok to drop/treat as success
 				user_info->num_completion_overflows--;
+				processed += 1;
 			} else {
 				break;
 			}
@@ -1119,7 +1121,9 @@ void hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 					rec->queue_buf)[j & rec->idx_mask]);
 			}
 			atomic_set_release(rec->head, end_tail);
+			processed += to_process;
 		}
 	}
 	mutex_unlock(&svc->user_info_lock);
+	return processed;
 }

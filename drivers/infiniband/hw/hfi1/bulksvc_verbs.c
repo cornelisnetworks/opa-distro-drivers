@@ -49,20 +49,27 @@ static struct hfi1_bulksvc_verbs_cmpl* hfi1_bulksvc_verbs_access_cmpl_create(
 
 // Executed in bulksvc thread, will enqueue a completion and schedule for bulksvc_rvt connector
 static void enqueue_and_schedule_bts_rvt_cmpl(
-	struct hfi1_bulksvc_verbs_state* const verbs_state,
+	struct hfi1_bulksvc* const svc,
 	struct hfi1_bulksvc_verbs_cmpl * const cmpl)
 {
-	if (WARN_ON(!cmpl || !verbs_state)) {
+	if (WARN_ON(!cmpl || !svc)) {
 		pr_err("%s:%d:%s() invalid cmpl or verbs_state\n",
 		       __FILENAME__, __LINE__, __func__);
 		return;
 	}
-	struct hfi1_bulksvc_verbs_cmpl_queue * const cmplq = &verbs_state->bulksvc_cmplq;
+	struct hfi1_bulksvc_verbs_cmpl_queue * const cmplq = &svc->verbs_state.bulksvc_cmplq;
 	mutex_lock(&cmplq->lock);
 	list_add_tail(&cmpl->node, &cmplq->list);
 	mutex_unlock(&cmplq->lock);
 
-	schedule_work(&verbs_state->cmpl_work);
+	static bool const do_sync_cmpls = true;
+	if (do_sync_cmpls) {
+		hfi1_bts_handle_verbs_cmpls(&svc->verbs_state);
+	}
+	else {
+		queue_work_node(svc->dd->node, system_wq, &svc->verbs_state.cmpl_work);
+	}
+
 }
 
 
@@ -71,19 +78,18 @@ static void enqueue_and_schedule_bts_rvt_cmpl(
 ///
 
 struct qp_rdma_cmpl_cookie {
-	struct hfi1_bulksvc_verbs_state* verbs_state;
+	struct hfi1_bulksvc* svc;
 	struct hfi1_bulksvc_verbs_cmd* cmd;
 	struct bts_verbs_mr_record* mr_record;
 	u32* remaining_wr_sges;
 };
 
 static void bulksvc_on_qp_cmd_rdma_complete(
-	union hfi1_dms_completion_cookie * const cookie)
+	union hfi1_dms_completion_cookie * const cookie, int status)
 {
 	struct qp_rdma_cmpl_cookie * const rdma_cookie =
 		(struct qp_rdma_cmpl_cookie *)cookie;
-	struct hfi1_bulksvc_verbs_state* const verbs_state =
-		rdma_cookie->verbs_state;
+	struct hfi1_bulksvc * const svc = rdma_cookie->svc;
 	struct hfi1_bulksvc_verbs_cmd * const cmd = rdma_cookie->cmd;
 
 	if (rdma_cookie->remaining_wr_sges) {
@@ -96,7 +102,7 @@ static void bulksvc_on_qp_cmd_rdma_complete(
 		rdma_cookie->remaining_wr_sges = NULL;
 	}
 
-	enqueue_and_schedule_bts_rvt_cmpl(verbs_state, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, cmd->rdma.txreq->bts_rc));
+	enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, cmd->rdma.txreq->bts_rc));
 
 release_cookie_resources:
 	hfi1_bulksvc_verbs_cmd_put(rdma_cookie->cmd);
@@ -243,7 +249,7 @@ static void bulksvc_on_qp_cmd_rdma_helper(struct hfi1_bulksvc * const svc,
 
 		struct qp_rdma_cmpl_cookie * cookie =
 			(struct qp_rdma_cmpl_cookie *) &completion.cookie;
-		cookie->verbs_state = &svc->verbs_state;
+		cookie->svc = svc;
 		hfi1_bulksvc_verbs_cmd_get(cmd);
 		cookie->cmd = cmd;
 		bts_verbs_mr_record_get(mr_record);
@@ -314,7 +320,7 @@ on_err:
 	if (!remaining_sges || (remaining_sges && *remaining_sges == 0)) {
 		// No outstanding sges
 		kfree(remaining_sges);
-		enqueue_and_schedule_bts_rvt_cmpl(verbs_state, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, (u32)err_rc));
+		enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, (u32)err_rc));
 	} else {
 		// sges in flight, enqueue error later
 		txreq->bts_rc = err_rc;
@@ -439,7 +445,7 @@ static void bulksvc_on_verbs_mr_accessed (
 			qp_info->num_rx_transfers_seen_for_current_transaction = 0;
 		}
 		struct rvt_qp* qp = qp_info->qp_priv->owner;
-		enqueue_and_schedule_bts_rvt_cmpl(verbs_state, hfi1_bulksvc_verbs_access_cmpl_create(qp, accessed_cookie->lkey, immdt, flags));
+		enqueue_and_schedule_bts_rvt_cmpl(accessed_cookie->svc, hfi1_bulksvc_verbs_access_cmpl_create(qp, accessed_cookie->lkey, immdt, flags));
 	}
 
 done:
@@ -485,7 +491,7 @@ static void bulksvc_on_verbs_cmd_mr_reg(struct hfi1_bulksvc * const svc,
 		pr_err("%s:%d:%s() bulksvc: Failed to register DMS data\n",
 		       __FILENAME__, __LINE__, __func__);
 	}
-	enqueue_and_schedule_bts_rvt_cmpl(&svc->verbs_state, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, rc));
+	enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, rc));
 	hfi1_bulksvc_verbs_cmd_put(cmd);
 }
 
@@ -514,7 +520,7 @@ static void bulksvc_on_verbs_cmd_mr_dereg(struct hfi1_bulksvc * const svc,
 		pr_err("%s:%d:%s() MR to deregister not found\n",
 		__FILENAME__, __LINE__, __func__);
 
-		enqueue_and_schedule_bts_rvt_cmpl(&svc->verbs_state, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, -ENOENT));
+		enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, -ENOENT));
 		hfi1_bulksvc_verbs_cmd_put(cmd);
 		return;
 	}
@@ -526,24 +532,23 @@ static void bulksvc_on_verbs_cmd_mr_dereg(struct hfi1_bulksvc * const svc,
 		pr_err("%s:%d:%s() Failed to deregister MR from DMS: %d\n",
 		       __FILENAME__, __LINE__, __func__, rc);
 
-		enqueue_and_schedule_bts_rvt_cmpl(&svc->verbs_state, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, -EINVAL));
+		enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, rc));
 		hfi1_bulksvc_verbs_cmd_put(cmd);
-		list_del(&mr_record->list_entry);
-		bts_verbs_mr_record_put(mr_record);
 		return;
 	}
 
-	enqueue_and_schedule_bts_rvt_cmpl(&svc->verbs_state, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, 0));
+	enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, 0));
 	hfi1_bulksvc_verbs_cmd_put(cmd);
 	list_del(&mr_record->list_entry);
 	bts_verbs_mr_record_put(mr_record);
 }
 
-void hfi1_bulksvc_poll_verbs_cmds(struct hfi1_bulksvc * const svc)
+int hfi1_bulksvc_poll_verbs_cmds(struct hfi1_bulksvc * const svc)
 {
 	struct hfi1_bulksvc_verbs_cmd *tmp;
 	struct list_head cmds;
 	unsigned long flags;
+	int processed = 0;
 
 	INIT_LIST_HEAD(&cmds);
 	spin_lock_irqsave(&svc->verbs_state.cmd_queue.lock, flags);
@@ -554,6 +559,7 @@ void hfi1_bulksvc_poll_verbs_cmds(struct hfi1_bulksvc * const svc)
 	struct hfi1_bulksvc_verbs_cmd *cmd;
 	list_for_each_entry_safe(cmd, tmp, &cmds, node) {
 		list_del(&cmd->node);
+		processed += 1;
 		switch (cmd->op) {
 			case HFI1_BULKSVC_VERBS_CMD_OP_RDMA:
 				bulksvc_on_qp_cmd(svc, cmd);
@@ -566,6 +572,7 @@ void hfi1_bulksvc_poll_verbs_cmds(struct hfi1_bulksvc * const svc)
 				break;
 		}
 	}
+	return processed;
 }
 
 ///
@@ -749,11 +756,6 @@ struct hfi1_bulksvc_verbs_cmpl* hfi1_bulksvc_verbs_access_cmpl_create(
 	return cmpl;
 }
 
-void hfi1_bulksvc_verbs_cmpl_get(struct hfi1_bulksvc_verbs_cmpl *cmpl)
-{
-	kref_get(&cmpl->refcount);
-}
-
 static void hfi1_bulksvc_verbs_cmpl_destroy(struct kref *refcount)
 {
 	struct hfi1_bulksvc_verbs_cmpl *cmpl =
@@ -869,7 +871,7 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 	// Pinned by rvt
 	dms_mr->npages_pinned = dms_mr->npages_total;
 
-	dms_mr->pages = kcalloc(dms_mr->npages_total, sizeof(struct page*), GFP_KERNEL);
+	dms_mr->pages = kvcalloc(dms_mr->npages_total, sizeof(struct page*), GFP_KERNEL);
 	if (!dms_mr->pages) {
 		pr_err("%s:%d:%s() bulksvc: Failed to allocate mr pages array\n",
 		       __FILENAME__, __LINE__, __func__);
@@ -883,7 +885,7 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 		s = i % RVT_SEGSZ;
 		/* sanity check */
 		if (WARN_ON((m * RVT_SEGSZ) + s >= rvt_mr->max_segs)) {
-			kfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->dms_mr.pages);
 			kfree(mr_record);
 			return NULL;
 		}
@@ -892,7 +894,7 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 			pr_err("%s:%d:%s() bulksvc: Failed to get page for addr %p\n",
 			       __FILENAME__, __LINE__, __func__,
 			       rvt_mr->map[m]->segs[s].vaddr);
-			kfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->dms_mr.pages);
 			kfree(mr_record);
 			return NULL;
 		}
@@ -900,14 +902,14 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 			pr_err("%s:%d:%s() bulksvc: Unexpected segment length %zu at map %d seg %u\n",
 				__FILENAME__, __LINE__, __func__,
 				rvt_mr->map[m]->segs[s].length, m, s);
-			kfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->dms_mr.pages);
 			kfree(mr_record);
 			return NULL;
 		}
 		dms_mr->pages[i] = page;
 	}
 
-	dms_mr->dma_list = kcalloc(dms_mr->npages_total, sizeof(dma_addr_t), GFP_KERNEL);
+	dms_mr->dma_list = kvcalloc(dms_mr->npages_total, sizeof(dma_addr_t), GFP_KERNEL);
 	if (!dms_mr->dma_list) {
 		pr_err("%s:%d:%s() bulksvc: Failed to allocate dma list\n",
 		       __FILENAME__, __LINE__, __func__);
@@ -925,8 +927,8 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 			pr_err("%s:%d:%s() bulksvc: Failed to map page %d for addr %lx\n",
 			       __FILENAME__, __LINE__, __func__, i,
 			       dms_mr->extended_vaddr.addr + (i << PAGE_SHIFT));
-			kfree(mr_record->dms_mr.dma_list);
-			kfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->dms_mr.dma_list);
+			kvfree(mr_record->dms_mr.pages);
 			kfree(mr_record);
 			return NULL;
 		}
@@ -947,7 +949,7 @@ static void bts_verbs_mr_record_get(struct bts_verbs_mr_record * const mr_record
 	kref_get(&mr_record->refcount);
 }
 
-static void bts_verbs_mr_record_destroy(struct kref* refcount)
+static void bts_verbs_mr_record_destroy(struct kref* refcount)\
 {
 	struct bts_verbs_mr_record * const mr_record =
 		container_of(refcount, struct bts_verbs_mr_record, refcount);
@@ -961,8 +963,8 @@ static void bts_verbs_mr_record_destroy(struct kref* refcount)
 		mr_record->qp_info = NULL;
 	}
 
-	kfree(mr_record->dms_mr.pages);
-	kfree(mr_record->dms_mr.dma_list);
+	kvfree(mr_record->dms_mr.pages);
+	kvfree(mr_record->dms_mr.dma_list);
 	kfree(mr_record);
 }
 

@@ -113,4 +113,7 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc);
 
 int hfi1_bulksvc_enqueue_event(struct hfi1_bulksvc *svc, struct hfi1_bulksvc_event_entry *entry);
 
+// Defined in bulksvc_user.c - should be called from bulksvc event polling thread only
+void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info);
+
 #endif          /* DEF_HFI1_BULKSVC_H */

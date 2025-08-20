@@ -20,7 +20,7 @@
 #define HFI1_DMS_AHG_HEADER_BLOCK_SIZE (1024)
 
 #define HFI1_DMS_MAX_ACCESS_FAST (1024)
-#define HFI1_DMS_RIFT_SIZE (256)
+#define HFI1_DMS_RIFT_SIZE (1024 * 8)
 
 struct sdma_engine;
 
@@ -53,7 +53,7 @@ union hfi1_dms_completion_cookie {
 	u64 qw[8];
 };
 
-typedef void (*hfi1_dms_completion_fn)(union hfi1_dms_completion_cookie *);
+typedef void (*hfi1_dms_completion_fn)(union hfi1_dms_completion_cookie *, int);
 
 struct hfi1_dms_tracker_completion {
 	hfi1_dms_completion_fn fn;
@@ -124,6 +124,8 @@ struct hfi1_dms_tx_tracker {
 	u32 payload_remaining;
 
 	u32 xfer_start_byte_offset; // byte offset from start of first mr page to the start of the xfer buffer
+	u32 remote_lid;
+	u16 remote_rift_index;
 
 	enum hfi1_dms_tx_tracker_op op;
 	union {
@@ -146,12 +148,12 @@ struct hfi1_dms_tx_tracker {
  };
 
 
-#define HFI1_DMS_TX_RIFT_INDEX_NOT_SET (-1)
-// TODO: a better way to handle this pending state?
-#define HFI1_DMS_TX_RIFT_INDEX_PENDING (-2)
+#define HFI1_DMS_RIFT_INDEX_NOT_SET (-1)
+
 struct hfi1_dms_rx_tracker {
 	struct hfi1_dms_dlist_element dlist;
 
+	u16 rift_index;
 	u32 payload_requested;
 	u32 payload_remaining;
 	u32 total_payload;
@@ -161,11 +163,13 @@ struct hfi1_dms_rx_tracker {
 	u64 rbuf_start_offset; // Offset into the rbuf where the data starts
 	u64 sbuf_start_offset; // Offset into the sbuf where the data starts; interpreted on the remote as either a byte offset or a virtual address
 
-	u32 src_lid;
+	u32 remote_lid;
 	int tx_rift_index;
 
 	// receiving buffer
 	struct hfi1_dms_mr *rbuf;
+	u8 head_misalignment;
+	u8 tail_misalignment;
 
 
 	enum hfi1_dms_rx_tracker_op op;
@@ -193,6 +197,7 @@ struct hfi1_dms_read_request_state {
 	u64 remaining_qws;
 	u64 total_requested_qws;
 	struct hfi1_dms_rx_tracker *rx_tracker;
+	s32 tid_set;
 };
 
 struct hfi1_dms_rx_tracker_block {
@@ -269,9 +274,9 @@ struct dms_counters
 {
 	u64 send_total;
 	u64 rget;
-	u64 make_read_request;
+	u64 make_data_request;
 	u64 map_tids;
-	u64 handle_read_request;
+	u64 handle_data_request;
 	u64 tid_send;
 	u64 first_packet_send;
 	u64 next_packet_send;
@@ -300,11 +305,24 @@ union hfi1_dms_tracker {
 };
 
 struct hfi1_dms_rift {
+	struct hfi1_dms_dlist waitlist;
 	u16 stack_top;
 	u16 stack[HFI1_DMS_RIFT_SIZE];
 	union hfi1_dms_tracker *arr[HFI1_DMS_RIFT_SIZE];
 };
 
+enum hfi1_dms_tidset_waiter_type {
+	HFI1_DMS_TIDSET_WAITER_TYPE_READ = 0,
+	HFI1_DMS_TIDSET_WAITER_TYPE_DATA,
+
+	HFI1_DMS_TIDSET_WAITER_TYPE_COUNT
+};
+
+struct hfi1_dms_tidset_waiters {
+	u64 head;
+	u64 tail;
+	u16 ring[HFI1_DMS_RIFT_SIZE*2];
+};
 
 struct hfi1_dms {
 	struct hfi1_devdata *dd; /* provided by bulksvc */
@@ -322,6 +340,8 @@ struct hfi1_dms {
 
 	// these are implicitly indexed by the associated TID set index
 	struct hfi1_dms_read_request_state read_requests[HFI1_DMS_TID_SET_IDX_MAX];
+
+	struct hfi1_dms_tidset_waiters tidset_waiters[HFI1_DMS_TIDSET_WAITER_TYPE_COUNT];
 
 	/* Internal pointers for protocol/registered buffers */
 	union hfi1_dms_proto_cmd *protocol_cmd_templates; /* Array of protocol command templates */
@@ -364,7 +384,7 @@ int hfi1_dms_register_access(struct hfi1_dms *dms, struct hfi1_dms_mr *mr, u64 o
 // This probably isn't a real function or won't be like this
 // but it's useful for now on the testing side
 int hfi1_dms_unregister_access(struct hfi1_dms *dms, u64 dms_key);
-int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, u64 dms_key, u64 offset, u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data, struct hfi1_dms_tracker_completion const completion);
+int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, u64 dms_key, u64 key_offset_or_vaddr, u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data, struct hfi1_dms_tracker_completion const completion);
 
 int hfi1_dms_dma_access_once(struct hfi1_dms *dms, u32 client_key, struct hfi1_dms_mr *mr, u32 access_key,
 			       u64 offset, u32 len,
@@ -383,7 +403,7 @@ int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, u64 dms_key, u64 rem
 int hfi1_dms_poll(struct hfi1_dms *dms);
 
 void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, u16 flags, u64 imm_data);
-void hfi1_dms_tracker_completion_fn_noop(union hfi1_dms_completion_cookie * cookie);
+void hfi1_dms_tracker_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, int status);
 
 /* called when user info is being freed */
 void hfi1_dms_release_client_key(struct hfi1_dms *dms, u32 client_key);

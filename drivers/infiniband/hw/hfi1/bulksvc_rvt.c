@@ -38,6 +38,7 @@ int verbs_bulksvc_reg_mr(struct hfi1_bulksvc *svc, struct rvt_mregion *mr)
 	list_add_tail(&cmd->node, &svc->verbs_state.cmd_queue.list);
 	spin_unlock_irqrestore(&svc->verbs_state.cmd_queue.lock, flags);
 
+	hfi1_bulksvc_schedule(svc);
 	return 0;
 }
 
@@ -58,6 +59,7 @@ void verbs_bulksvc_dereg_mr(struct hfi1_bulksvc *svc, struct rvt_mregion *mr)
 	spin_unlock_irqrestore(&svc->verbs_state.cmd_queue.lock, flags);
 
 	rvt_put_mr(mr);
+	hfi1_bulksvc_schedule(svc);
 
 	return;
 }
@@ -104,6 +106,12 @@ static int bts_on_verbs_rdma_op(struct hfi1_bulksvc_verbs_cmd *cmd)
 	list_add_tail(&cmd->node,
 		      &cmd_queue->list);
 	spin_unlock(&cmd_queue->lock);
+
+
+	struct hfi1_bulksvc *svc = container_of(cmd->rdma.qp_info->verbs_state,
+						struct hfi1_bulksvc,
+						verbs_state);
+	hfi1_bulksvc_schedule(svc);
 
 	return 0;
 }
@@ -170,6 +178,8 @@ bool hfi1_setup_bulksvc_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe)
 
 	wqe->wr.opcode = new_opcode;
 	wqe->lpsn = new_lpsn;
+	qp->s_ssn--; /* peer won't give us an MSN update so don't count this ssn */
+
 	return true;
 }
 
@@ -372,26 +382,69 @@ static void bts_mr_reg_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
 {
 }
 
-static void bts_mr_dereg_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
+static void bts_mr_dereg_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl, struct hfi1_bulksvc_verbs_state* verbs_state)
 {
+	if (cmpl->cmd.status == -EBUSY) {
+		pr_warn("verbs dereg_mr returned EBUSY from dms\n");
+		// TODO for now, do not retry
+		bool const do_retry = false;
+		if (do_retry) {
+			pr_warn("re-attempting to deregister verbs MR from dms\n");
+			struct hfi1_bulksvc_verbs_cmd * cmd = cmpl->cmd.bts_cmd;
+			hfi1_bulksvc_verbs_cmd_get(cmd);
+			
+			unsigned long flags;
+			spin_lock_irqsave(&verbs_state->cmd_queue.lock, flags);
+			list_add_tail(&cmd->node, &verbs_state->cmd_queue.list);
+			spin_unlock_irqrestore(&verbs_state->cmd_queue.lock, flags);
+			struct hfi1_bulksvc *svc = container_of(verbs_state,
+								struct hfi1_bulksvc,
+								verbs_state);
+			hfi1_bulksvc_schedule(svc);
+		}
+
+	}
 }
 
 static void bts_access_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
 {
+	struct hfi1_ibdev *verbs_dev;
+	struct rvt_qp *qp;
+	struct rvt_dev_info *rdi;
+	struct hfi1_devdata *dd;
+	struct ib_qp *ibqp;
+	struct ib_wc wc;
+	int ret;
 
 	if (WARN_ON(!cmpl) || WARN_ON(cmpl->type != HFI1_BULKSVC_VERBS_CMPL_TYPE_ACCESS)) {
 		pr_err("bts_access_complete called with invalid cmpl\n");
 		return;
 	}
 
-	struct rvt_qp * const qp = cmpl->access.qp;
+	qp = cmpl->access.qp;
 
-	struct ib_wc wc;
+	ibqp = &qp->ibqp;
+	ret = rvt_get_rwqe(qp, true);
+	if (ret <= 0) {
+		rdi = ib_to_rvt(ibqp->device);
+		verbs_dev = container_of(rdi, struct hfi1_ibdev, rdi);
+		dd = container_of(verbs_dev, struct hfi1_devdata, verbs_dev);
+		if (ret < 0)
+			dd_dev_err(dd, "bulksvc: Error getting rwqe\n");
+		else
+			dd_dev_dbg(dd, "bulksvc: No rwqe's available\n");
+
+		return;
+	}
+	if (!__test_and_clear_bit(RVT_R_WRID_VALID, &qp->r_aflags))
+		return;
+
 	wc.wr_id = qp->r_wr_id;
 	wc.status = IB_WC_SUCCESS;
 
 	if (cmpl->access.flags & HFI1_BULKSVC_VERBS_WRITE_FLAGS_IMMDT) {
 		wc.opcode = IB_WC_RECV_RDMA_WITH_IMM;
+		wc.wc_flags = IB_WC_WITH_IMM;
 		wc.ex.imm_data = cmpl->access.user_immdt_be;
 	} else {;
 		wc.opcode = IB_WC_RECV;
@@ -430,7 +483,7 @@ void hfi1_bts_handle_verbs_cmpls(struct hfi1_bulksvc_verbs_state* state)
 					hfi1_bulksvc_verbs_cmpl_put(cmpl);
 					break;
 				case HFI1_BULKSVC_VERBS_CMD_OP_MR_DEREG:
-					bts_mr_dereg_complete(cmpl);
+					bts_mr_dereg_complete(cmpl, state);
 					hfi1_bulksvc_verbs_cmpl_put(cmpl);
 					break;
 				}
