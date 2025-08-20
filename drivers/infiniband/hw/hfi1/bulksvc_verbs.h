@@ -114,7 +114,7 @@ struct hfi1_bulksvc_verbs_state {
 int hfi1_bulksvc_verbs_state_init(struct hfi1_bulksvc_verbs_state *state, struct hfi1_dms* dms);
 int hfi1_bulksvc_verbs_state_teardown(struct hfi1_bulksvc_verbs_state *state);
 
-void hfi1_bulksvc_poll_verbs_cmds(struct hfi1_bulksvc * const svc);
+int hfi1_bulksvc_poll_verbs_cmds(struct hfi1_bulksvc * const svc);
 
 struct hfi1_bulksvc_qp_info* hfi1_bulksvc_qp_info_create(struct hfi1_bulksvc_verbs_state* verbs_state, struct hfi1_qp_priv *qp_priv);
 void hfi1_bulksvc_qp_info_get(struct hfi1_bulksvc_qp_info *qp_info);
