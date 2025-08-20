@@ -47,14 +47,16 @@ module_param(bulksvc_user_queue_size_pages_log2, uint, S_IRUGO);
 MODULE_PARM_DESC(bulksvc_user_queue_size_pages_log2,
 	"Size of user queues in pages log2 (default 3, or 8 pages)");
 
-bool bulksvc_polling = true;
-module_param(bulksvc_polling, bool, S_IRUGO);
-MODULE_PARM_DESC(bulksvc_polling, "Whether bulksvc should poll or be event driven");
+static bool bulksvc_polling_array[32];
+static int bulksvc_polling_count;
+module_param_array_named(bulksvc_polling, bulksvc_polling_array, bool, &bulksvc_polling_count, S_IRUGO);
+MODULE_PARM_DESC(bulksvc_polling, "Whether bulksvc should poll or be event driven per-hfi (default false - non polling)");
 
-int bulksvc_cpu = -1;
-module_param(bulksvc_cpu, int, S_IRUGO);
+static int bulksvc_cpu_array[32];
+static int bulksvc_cpu_count;
+module_param_array_named(bulksvc_cpu, bulksvc_cpu_array, int, &bulksvc_cpu_count, S_IRUGO);
 MODULE_PARM_DESC(bulksvc_cpu,
-	"CPU to run bulksvc work on, -1 for default behavior (bulksvc chooses CPU on device's numa)");
+	"CPU to run bulksvc work on per-hfi, -1 or unset for default behavior (bulksvc chooses CPU on device's numa).");
 
 long bulksvc_progress_interval = 1000; /* 1ms */
 module_param(bulksvc_progress_interval, long, S_IRUGO);
@@ -67,6 +69,8 @@ MODULE_PARM_DESC(bulksvc_progress_interval,
 static void bulksvc_event_work(struct work_struct *work);
 static void bulksvc_event_work_polling(struct work_struct *work);
 static enum hrtimer_restart bulksvc_progress_timer_callback(struct hrtimer *timer);
+static int get_bulksvc_cpu(struct hfi1_devdata *dd);
+static bool get_bulksvc_polling(struct hfi1_devdata *dd);
 
 
 // Defined in bulksvc_user.c - should be called from bulksvc event polling thread only
@@ -239,6 +243,7 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 	struct hfi1_bulksvc *svc = dd->bulksvc;
 	u32 last = dd->rsrcs.last_sdma_engine;
 	u32 sdma_avail = last - dd->rsrcs.first_sdma_engine;
+	bool bulksvc_polling = get_bulksvc_polling(dd);
 	u32 sdma_rm;
 	int ret = 0;
 
@@ -342,8 +347,13 @@ exit:
 
 int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 {
+	bool bulksvc_polling = get_bulksvc_polling(dd);
 	struct hfi1_bulksvc_requirements *reqs;
+	int bulksvc_cpu = get_bulksvc_cpu(dd);
+	const struct cpumask *node_mask;
+	int next_cpu;
 	int ret = 0;
+	int i;
 
 
 	dd->bulksvc = kcalloc(sizeof(*dd->bulksvc), 1, GFP_KERNEL);
@@ -381,7 +391,12 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 		}
 		dd->bulksvc->cpu = bulksvc_cpu;
 	} else {
-		dd->bulksvc->cpu = cpumask_first(cpumask_of_node(dd->node));
+		node_mask = cpumask_of_node(dd->node);
+		next_cpu = cpumask_first(node_mask);
+		for (i = 0; i < dd->unit; ++i)
+			next_cpu = cpumask_next(next_cpu, node_mask);
+
+		dd->bulksvc->cpu = next_cpu;
 	}
 	dd_dev_info(dd, "Bulksvc configured to run on CPU %d\n", dd->bulksvc->cpu);
 
@@ -503,33 +518,21 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 void bulksvc_sdma_irq(struct hfi1_devdata *dd, struct sdma_engine *sde)
 {
 	struct hfi1_bulksvc *svc = dd->bulksvc;
-	struct hfi1_bulksvc_event_entry *event_entry;
 
 	if (!svc) {
 		return;
 	}
 
-	event_entry = kzalloc(sizeof(*event_entry), GFP_ATOMIC);
-	if (!event_entry) {
-		return;
-	}
-
-	event_entry->event.type = BULKSVC_EVENT_TYPE_SDMA;
-
-	/* no need to disable irq's, we are already in one */
-	spin_lock(&svc->event_lock);
-	list_add_tail(&event_entry->list, &svc->event_queue);
-	spin_unlock(&svc->event_lock);
-
 	hfi1_bulksvc_schedule(svc);
 }
 
 /* work queue function */
-static void bulksvc_poll_event_queue(struct hfi1_bulksvc *svc)
+static int bulksvc_poll_event_queue(struct hfi1_bulksvc *svc)
 {
 	struct hfi1_bulksvc_event_entry *event_entry, *tmp;
 	struct list_head local_list;
 	unsigned long flags;
+	int processed = 0;
 
 	/* handle events */
 	if (!list_empty(&svc->event_queue)) {
@@ -544,6 +547,7 @@ static void bulksvc_poll_event_queue(struct hfi1_bulksvc *svc)
 
 		list_for_each_entry_safe(event_entry, tmp, &local_list, list) {
 			list_del(&event_entry->list);
+			processed += 1;
 
 			if (event_entry->event.type == BULKSVC_EVENT_TYPE_USER_INFO_ADD) {
 				struct hfi1_bulksvc_user_info *user_info = 
@@ -579,17 +583,25 @@ static void bulksvc_poll_event_queue(struct hfi1_bulksvc *svc)
 			kfree(event_entry);
 		}
 	}
+	return processed;
 }
 
 /* work queue function */
 static void bulksvc_event_work(struct work_struct *work)
 {
 	struct hfi1_bulksvc *svc = container_of(work, struct hfi1_bulksvc, event_work);
+	int max_iters_per_work = 100;
+	int iters = 0;
+	int processed = 0;
 
-	bulksvc_poll_event_queue(svc);
-	hfi1_dms_poll(&svc->dms);
-	hfi1_bulksvc_poll_user_cmds(svc);
-	hfi1_bulksvc_poll_verbs_cmds(svc);
+	do {
+		iters += 1;
+		processed = 0;
+		processed += bulksvc_poll_event_queue(svc);
+		processed += hfi1_dms_poll(&svc->dms);
+		processed += hfi1_bulksvc_poll_user_cmds(svc);
+		processed += hfi1_bulksvc_poll_verbs_cmds(svc);
+	} while (iters < max_iters_per_work && processed != 0);
 
 }
 
@@ -798,8 +810,8 @@ void hfi1_bulksvc_schedule(struct hfi1_bulksvc *svc)
 
 bool hfi1_bulksvc_requires_doorbell(struct hfi1_bulksvc *svc)
 {
-	(void) svc;
-	return !bulksvc_polling;
+	bool polling_mode = get_bulksvc_polling(svc->dd);
+	return !polling_mode;
 }
 
 int hfi1_bulksvc_enqueue_event(struct hfi1_bulksvc *svc, struct hfi1_bulksvc_event_entry *entry)
@@ -816,4 +828,31 @@ int hfi1_bulksvc_enqueue_event(struct hfi1_bulksvc *svc, struct hfi1_bulksvc_eve
 	spin_unlock_irqrestore(&svc->event_lock, flags);
 
 	return 0;
+}
+
+static int get_bulksvc_cpu(struct hfi1_devdata *dd)
+{
+	int start = dd->unit;
+	int cpu;
+
+	/* check if enough elements are set for this unit's port */
+	if (start >= bulksvc_cpu_count)
+		return -1;
+
+	cpu = bulksvc_cpu_array[start];
+	if (cpu >= nr_cpu_ids || cpu < -1) {
+		dd_dev_warn(dd, "bulksvc_cpu %d for unit %d invalid, ignoring value", cpu, start);
+		cpu = -1;
+	}
+	return cpu;
+}
+
+static bool get_bulksvc_polling(struct hfi1_devdata *dd)
+{
+	int start = dd->unit;
+
+	if (start >= bulksvc_polling_count)
+		return false;
+
+	return bulksvc_polling_array[start];
 }
