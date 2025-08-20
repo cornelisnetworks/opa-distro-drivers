@@ -70,7 +70,7 @@ int init_bulksvc_mmu(struct hfi1_bulksvc_user_info *uinfo)
 
 	/* this should set up an rb_tree and notifier mechanism */
 	ret = hfi1_mmu_rb_register(uinfo, &bulksvc_rb_ops,
-				   svc->event_workq, // not sure if this is what we want but reusing
+				   svc->dd->hfi1_wq,
 				   &uinfo->mmu);
 
 	return ret;
