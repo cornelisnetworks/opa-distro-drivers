@@ -75,6 +75,6 @@ void hfi1_bulksvc_user_info_get(struct hfi1_bulksvc_user_info* info);
 void hfi1_bulksvc_user_info_put(struct hfi1_bulksvc_user_info* info);
 
 struct hfi1_bulksvc;
-void hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc *const svc);
+int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc);
 
 #endif /* DEF_HFI1_BULKSVC_USER_H */
