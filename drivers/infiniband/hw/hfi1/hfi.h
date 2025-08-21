@@ -1125,6 +1125,7 @@ enum {
 struct chip_params {
 	int chip_type;
 	int num_ports;
+	u8 dma_mask_bits;
 	u32 bar0_size;
 	u32 kreg1_size;
 	u32 kreg2_offset;
