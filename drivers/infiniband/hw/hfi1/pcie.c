@@ -81,20 +81,6 @@ int hfi1_pcie_init(struct hfi1_devdata *dd)
 		goto bail;
 	}
 
-	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
-	if (ret) {
-		/*
-		 * If the 64 bit setup fails, try 32 bit.  Some systems
-		 * do not setup 64 bit maps on systems with 2GB or less
-		 * memory installed.
-		 */
-		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
-		if (ret) {
-			dd_dev_err(dd, "Unable to set DMA mask: %d\n", ret);
-			goto bail;
-		}
-	}
-
 	pci_set_master(pdev);
 	if (dd->params->chip_type == CHIP_JKR)
 		mask_aer_unsupported_request(pdev);
