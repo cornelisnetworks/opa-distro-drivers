@@ -61,6 +61,7 @@ static void destroy_workqueues(struct hfi1_devdata *dd);
 static const struct chip_params wfr_params = {
 	.chip_type = CHIP_WFR,
 	.num_ports = 1,
+	.dma_mask_bits = 48,
 
 	/* BAR0 map: rcv array splits kreg1 and kreg2 */
 	.bar0_size = TXE_PIO_SEND + TXE_PIO_SIZE,
@@ -304,6 +305,7 @@ static const struct chip_params wfr_params = {
 static const struct chip_params jkr_params = {
 	.chip_type = CHIP_JKR,
 	.num_ports = 2,
+	.dma_mask_bits = 58,
 
 	/* BAR0 map: see comments where KREG values are defined */
 	.bar0_size = JKR_BAR0_SIZE,
@@ -1998,6 +2000,26 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 	dd->pport = (struct hfi1_pportdata *)(dd + 1);
 	dd->pcidev = pdev;
 	pci_set_drvdata(pdev, dd);
+
+	/*
+	 * Must set DMA mask for device before any dma_map*() or
+	 * dma_alloc*() calls referring to pdev->dev. Otherwise
+	 * those calls may return DMA addresses that are
+	 * incompatible with the HFI.
+	 */
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(params->dma_mask_bits));
+	if (ret) {
+		dd_dev_warn(dd, "Failed to set %u-bit DMA mask ret %d; setting 32-bit DMA mask\n",
+			    params->dma_mask_bits, ret);
+		ret = dma_set_mask_and_coherent(&pdev->dev,
+						DMA_BIT_MASK(32));
+		if (ret) {
+			dd_dev_err(dd, "Unable to set DMA mask: %d\n",
+				   ret);
+			goto bail;
+		}
+	}
+
 	hfi1_snoop_init(dd);
 
 	ret = xa_alloc_irq(&hfi1_dev_table, &dd->unit, dd, xa_limit_32b,
