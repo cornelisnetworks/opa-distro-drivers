@@ -887,13 +887,8 @@ void gen_deinit_sctxt(struct hfi1_devdata *dd, u8 pidx, int si, u16 ctxt)
  */
 int gen_start_sctxt(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, struct hfi1_ctxtbufs *bufs)
 {
-	u64 reg;
-
 	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_err_mask_reg, (u64)-1);
-
-	reg = bufs->cr.dma & SEND_CTXT_CREDIT_RETURN_ADDR_ADDRESS_SMASK;
-	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_credit_return_addr_reg, reg);
-
+	write_sctxt_csr(dd, ctxt, dd->params->send_ctxt_credit_return_addr_reg, bufs->cr.dma);
 	return 0;
 }
 
