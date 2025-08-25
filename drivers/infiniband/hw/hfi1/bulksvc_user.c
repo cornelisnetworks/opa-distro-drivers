@@ -391,7 +391,7 @@ static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completio
 
 	cmpl.app_context = reg_cookie->app_context;
 	cmpl.status = 0; /* success */
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = reg_cookie->access_key;
 
 	give_completion(reg_cookie->user_info, reg_cookie->cmplq_record, &cmpl);
@@ -426,7 +426,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 
 		cmpl.app_context = cmd->app_context;
 		cmpl.status = -EFAULT;
-		cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 		cmpl.type_default.access_key = cmd->access_key;
 		give_completion(user_info, cmplq_record, &cmpl);
 		goto exit;
@@ -458,7 +458,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 
 		cmpl.status = (u32)rc;
 		cmpl.app_context = cmd->app_context;
-		cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 		cmpl.type_default.access_key = cmd->access_key;
 		give_completion(user_info, cmplq_record, &cmpl);
 		user_mr_record_put(mr_record);
@@ -489,7 +489,7 @@ static void bulksvc_on_cmd_mr_open(struct hfi1_bulksvc * const svc,
 		goto exit;
 
 	cmpl.app_context = cmd->app_context;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_MR;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_MR;
 
 	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->len, cmd->flags);
 
@@ -531,7 +531,7 @@ static void bulksvc_on_cmd_mr_close(struct hfi1_bulksvc * const svc,
 	}
 
 	cmpl.app_context = cmd->app_context;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_MR;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_MR;
 	cmpl.type_mr.mr_key = cmd->mr_key;
 
 	give_completion(user_info, cmplq_record, &cmpl);
@@ -565,7 +565,7 @@ static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie
 
 	cmpl.app_context = dma_cookie->app_context;
 	cmpl.status = 0; /* success */
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = dma_cookie->access_key;
 
 	give_completion(dma_cookie->user_info, dma_cookie->cmplq_record, &cmpl);
@@ -593,7 +593,7 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 	struct hfi1_bulksvc_user_mr_record* mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
@@ -680,7 +680,7 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 	struct hfi1_bulksvc_user_mr_record *mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
@@ -744,7 +744,7 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 	struct hfi1_bulksvc_user_mr_access_record *access_record =
@@ -767,7 +767,7 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = rc;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 exit:
@@ -797,7 +797,7 @@ static void on_mr_rdma_transact_complete(union hfi1_dms_completion_cookie *cooki
 
 	cmpl.app_context = mr_transact_cookie->app_context;
 	cmpl.status = 0; /* success */
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	give_completion(mr_transact_cookie->user_info, mr_transact_cookie->cmplq_record, &cmpl);
 
@@ -825,7 +825,7 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
 	if (!mr_record) {
@@ -890,7 +890,7 @@ static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
 	if (!mr_record || validate_mr_access(&mr_record->dms_mr, cmd->mr_offset, cmd->len_bytes) < 0) {
@@ -960,7 +960,7 @@ static void on_rdma_va_complete(
 
 	cmpl.app_context = read_cookie->app_context;
 	cmpl.status = 0; /* errors not implemented */
-	cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	give_completion(read_cookie->user_info, read_cookie->cmplq_record, &cmpl);
 
@@ -997,7 +997,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 		cmpl.app_context = cmd->app_context;
 		cmpl.status = -EFAULT;
-		cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 		give_completion(user_info, cmplq_record, &cmpl);
 		hfi1_bulksvc_user_info_put(user_info);
 		goto exit;
@@ -1022,7 +1022,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 		cmpl.status = (u32)rc;
 		cmpl.app_context = cmd->app_context;
-		cmpl.type = HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 		give_completion(user_info, cmplq_record, &cmpl);
 		user_mr_record_put(mr_record);
 		hfi1_bulksvc_user_info_put(user_info);
