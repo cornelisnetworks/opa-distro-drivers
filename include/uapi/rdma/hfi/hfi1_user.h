@@ -467,10 +467,10 @@ union hfi1_bulksvc_cmd {
 	} __attribute__((packed, aligned(4)));
 };
 
-enum hfisvc_client_cq_entry_type {
-	HFISVC_CLIENT_CQ_ENTRY_TYPE_DEFAULT,
-	HFISVC_CLIENT_CQ_ENTRY_TYPE_MR,
-	HFISVC_CLIENT_CQ_ENTRY_TYPE_NOTIFY,
+enum hfi1_bulksvc_cq_entry_type {
+	HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT,
+	HFI1_BULKSVC_CQ_ENTRY_TYPE_MR,
+	HFI1_BULKSVC_CQ_ENTRY_TYPE_NOTIFY,
 };
 
 struct hfi1_bulksvc_cmplq_entry {
