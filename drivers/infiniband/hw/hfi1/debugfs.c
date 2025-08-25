@@ -19,28 +19,6 @@
 #include <linux/delay.h>
 #include <linux/atomic.h>
 
-
-/* Helper to format debug messages with newlines escaped */
-static void format_debug_msg(char *dest, size_t dest_size,
-			     const char *src, size_t src_len)
-{
-	size_t i = 0;
-	size_t j = 0;
-
-	while (i < src_len && j < dest_size - 1) {
-		if (src[i] == '\n') {
-			if (j < dest_size - 2) {
-				dest[j++] = '\\';
-				dest[j++] = 'n';
-			}
-		} else {
-			dest[j++] = src[i];
-		}
-		i++;
-	}
-	dest[j] = '\0';
-}
-
 #include "hfi.h"
 #include "trace.h"
 #include "debugfs.h"
