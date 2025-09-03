@@ -94,7 +94,7 @@ int hfi1_acquire_user_pages(struct mm_struct *mm, unsigned long vaddr, size_t np
 	if (!current || !current->mm || current->mm != mm) {
 		mmap_read_lock(mm);
 		int locked = 1;
-		ret = pin_user_pages_remote(mm, vaddr, npages, gup_flags, pages, &locked);
+		ret = pin_user_pages_remote(mm, vaddr, npages, gup_flags, pages, NULL, &locked);
 		if (locked) {
 			mmap_read_unlock(mm);
 		}

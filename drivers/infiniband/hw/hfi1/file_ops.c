@@ -788,7 +788,7 @@ static int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type, struct
 		goto done;
 	}
 
-	vm_flags_reset(vma, flags);
+	vma->vm_flags = flags;
 	if (!vmf || memdma || mapio || memvirt) {
 		ret = -EINVAL;
 		goto done;
