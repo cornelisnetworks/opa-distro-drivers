@@ -67,6 +67,7 @@ MODULE_PARM_DESC(bulksvc_progress_interval,
 #define RSM_TYPE_BULKSVC          6
 
 static void bulksvc_event_work(struct work_struct *work);
+static void bulksvc_event_work_eventing(struct work_struct *work);
 static void bulksvc_event_work_polling(struct work_struct *work);
 static enum hrtimer_restart bulksvc_progress_timer_callback(struct hrtimer *timer);
 static int get_bulksvc_cpu(struct hfi1_devdata *dd);
@@ -322,7 +323,7 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 		INIT_WORK(&svc->event_work, bulksvc_event_work_polling);
 	} else {
 		pr_info("Bulksvc configured to be event driven\n");
-		INIT_WORK(&svc->event_work, bulksvc_event_work);
+		INIT_WORK(&svc->event_work, bulksvc_event_work_eventing);
 	}
 
 	INIT_LIST_HEAD(&svc->event_queue);
@@ -464,6 +465,7 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 		svc->event_workq = NULL;
 	}
 
+	hfi1_bulksvc_verbs_release_client_id(&dd->bulksvc->dms);
 	hfi1_dms_uninit(&dd->bulksvc->dms);
 
 	if (svc->rsrc.sde_arr)
@@ -516,7 +518,7 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 	dd->bulksvc = NULL;
 }
 
-/* interrupt handler for bulksvc sdma irqs, caller clears irqs */
+/* interrupt handler for bulksvc sdma irqs, bulksvc will clear the IRQs if/when it goes to sleep */
 void bulksvc_sdma_irq(struct hfi1_devdata *dd, struct sdma_engine *sde)
 {
 	struct hfi1_bulksvc *svc = dd->bulksvc;
@@ -597,14 +599,28 @@ static void bulksvc_event_work(struct work_struct *work)
 	int processed = 0;
 
 	do {
+		ktime_t const now = ktime_get();
+
 		iters += 1;
 		processed = 0;
 		processed += bulksvc_poll_event_queue(svc);
-		processed += hfi1_dms_poll(&svc->dms);
+		processed += hfi1_dms_poll(&svc->dms, now);
 		processed += hfi1_bulksvc_poll_user_cmds(svc);
 		processed += hfi1_bulksvc_poll_verbs_cmds(svc);
 	} while (iters < max_iters_per_work && processed != 0);
 
+}
+
+static void bulksvc_clear_interrupts(struct hfi1_bulksvc *svc)
+{
+	struct hfi1_devdata *dd = svc->dd;
+	u32 off = 8 * (dd->params->is_sdma_start / 64);
+
+	hfi1_rcd_eoi_intr(svc->dms.rctxt);
+	for (int i = 0; i < svc->dms.num_engines; ++i) {
+		struct sdma_engine *sde = svc->dms.sdma_engines[i];
+		write_csr(dd, dd->params->cce_int_clear_reg + off, sde->imask);
+	}
 }
 
 /* Polling work queue function that reschedules itself */
@@ -618,7 +634,20 @@ static void bulksvc_event_work_polling(struct work_struct *work)
 
 	if (svc->stop_scheduling) {
 		synchronize_rcu();
+		// we're shutting bulksvc down, clear interrupts for whatever takes over
+		bulksvc_clear_interrupts(svc);
 	}
+}
+
+/* Work queue function when in event-driven mode that handles clearing interrupts when done */
+static void bulksvc_event_work_eventing(struct work_struct *work)
+{
+	struct hfi1_bulksvc *svc = container_of(work, struct hfi1_bulksvc, event_work);
+
+	bulksvc_event_work(work);
+	bulksvc_clear_interrupts(svc);
+	// do one more pass to ensure we haven't missed an interrupt
+	bulksvc_event_work(work);
 }
 
 /* Guaranteed progress callback */
@@ -794,7 +823,9 @@ int hfi1_bulksvc_rx_napi(struct napi_struct *napi, int budget)
 	/* did not exceed limit, stop polling and rearm interrupts */
 	if (work_done < budget) {
 		napi_complete_done(napi, work_done);
-		hfi1_rcd_eoi_intr(rcd);
+		// bulksvc will clear this interrupt when it goes back to sleep
+		// or if in polling mode we just won't clear this interrupt
+		// hfi1_rcd_eoi_intr(rcd);
 	}
 
 	return work_done;

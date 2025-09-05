@@ -139,7 +139,7 @@ unmap_dma:
 		dma_unmap_page(&dd->pcidev->dev, dma_list[i - 1],
 			       PAGE_SIZE, DMA_BIDIRECTIONAL);
 unpin_pages:
-	hfi1_release_user_pages(current->mm, pages, pinned, false);
+	hfi1_release_user_pages(e->rb.handler->mn.mm, pages, pinned, false);
 free_dma:
 	kfree(dma_list);
 free_pages:
