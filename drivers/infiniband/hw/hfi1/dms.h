@@ -20,7 +20,23 @@
 #define HFI1_DMS_AHG_HEADER_BLOCK_SIZE (1024)
 
 #define HFI1_DMS_MAX_ACCESS_FAST (1024)
-#define HFI1_DMS_RIFT_SIZE (1024 * 8)
+
+#define HFI1_DMS_RIFT_IDX_BITS (10)
+#define HFI1_DMS_RIFT_IDX_SIZE (1ull << HFI1_DMS_RIFT_IDX_BITS)
+#define HFI1_DMS_RIFT_IDX_MASK (HFI1_DMS_RIFT_IDX_SIZE - 1)
+
+#define HFI1_DMS_RIFT_GEN_BITS (5)
+#define HFI1_DMS_RIFT_GEN_SIZE (1ull << HFI1_DMS_RIFT_GEN_BITS)
+#define HFI1_DMS_RIFT_GEN_MASK ((HFI1_DMS_RIFT_GEN_SIZE - 1) << HFI1_DMS_RIFT_IDX_BITS)
+
+#define HFI1_DMS_RIFT_ERR_BITS (1)
+#define HFI1_DMS_RIFT_ERR_MASK (1ull << (16 - HFI1_DMS_RIFT_ERR_BITS))
+
+enum hfi1_dms_rift_err {
+	HFI1_DMS_RIFT_ERR_NONE = 0,
+	HFI1_DMS_RIFT_ERR_INDEX_NOT_SET,
+	HFI1_DMS_RIFT_ERR_INDEX_DISABLED,
+};
 
 struct sdma_engine;
 
@@ -112,48 +128,83 @@ struct hfi1_dms_access {
 	u32 active_count; // number of transfers currently using this access
 };
 
- enum hfi1_dms_tx_tracker_op {
+struct hfi1_dms_tracker_hdr {
+	struct hfi1_dms_dlist_element dlist;
+	ktime_t first_activity;
+	ktime_t last_activity;
+	u16 local_rift_index;
+	u16 remote_rift_index;
+	u32 remote_lid;
+};
+
+enum hfi1_dms_tx_tracker_op {
 	HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE = 0,
 	HFI1_DMS_TX_TRACKER_OP_RDMA_READ = 1,
- };
+};
 
 struct hfi1_dms_tx_tracker {
-	struct hfi1_dms_dlist_element dlist;
-	u16 rift_index;
+	struct hfi1_dms_tracker_hdr hdr;
+
 	u32 total_payload;
 	u32 payload_remaining;
 
 	u32 xfer_start_byte_offset; // byte offset from start of first mr page to the start of the xfer buffer
-	u32 remote_lid;
-	u16 remote_rift_index;
 
 	enum hfi1_dms_tx_tracker_op op;
 	union {
 		struct {
 			struct hfi1_dms_mr *mr;
 			struct hfi1_dms_tracker_completion completion;
+			u64 dms_key;
+			u64 rx_offset;
+			u64 imm_data;
+			u16 flags;
 		} write;
 		struct {
 			struct hfi1_dms_access * access;
+			struct {
+				u8 head_misalignment;
+				u8 include_fixup_data;
+				u8 rx_id;
+				u8 unused;
+				u32 nbytes;
+				u32 tid_info;
+			} start;
 		} read;
 	};
-
-	//u64 start_offset; // offset from start of mr (page-aligned) to start of xfer buffer
 };
 
+enum hfi1_dms_sdma_type {
+	HFI1_DMS_SDMA_TYPE_START = 0,
+	HFI1_DMS_SDMA_TYPE_DATA,
 
- enum hfi1_dms_rx_tracker_op {
+	HFI1_DMS_SDMA_TYPE_COUNT
+};
+
+struct hfi1_dms_sdma_parameters {
+	struct hfi1_dms_tx_tracker *tx_tracker; // could replace with "rift_index"
+	struct hfi1_dms_mr *mr;
+	u64 page_offset;
+	u32 nbytes;
+	u32 tid_info;
+	enum hfi1_dms_sdma_type sdma_type;
+	u8 rx_id;
+	u8 include_fixup_data;
+};
+
+struct hfi1_dms_sdma_tracker {
+	struct hfi1_dms_tracker_hdr hdr;
+	struct hfi1_dms_sdma_parameters parameters;
+};
+
+enum hfi1_dms_rx_tracker_op {
 	HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE = 0,
 	HFI1_DMS_RX_TRACKER_OP_RDMA_READ = 1,
  };
 
-
-#define HFI1_DMS_RIFT_INDEX_NOT_SET (-1)
-
 struct hfi1_dms_rx_tracker {
-	struct hfi1_dms_dlist_element dlist;
+	struct hfi1_dms_tracker_hdr hdr;
 
-	u16 rift_index;
 	u32 payload_requested;
 	u32 payload_remaining;
 	u32 total_payload;
@@ -162,9 +213,6 @@ struct hfi1_dms_rx_tracker {
 	u64 rbuf_offset; // Current absolute offset into rbuf
 	u64 rbuf_start_offset; // Offset into the rbuf where the data starts
 	u64 sbuf_start_offset; // Offset into the sbuf where the data starts; interpreted on the remote as either a byte offset or a virtual address
-
-	u32 remote_lid;
-	int tx_rift_index;
 
 	// receiving buffer
 	struct hfi1_dms_mr *rbuf;
@@ -190,7 +238,11 @@ struct hfi1_dms_rx_tracker {
 		} read;
 
 	};
+};
 
+enum hfi1_dms_tidset_state {
+	HFI1_DMS_TIDSET_STATE_ENABLED = 0,
+	HFI1_DMS_TIDSET_STATE_DISABLED
 };
 
 struct hfi1_dms_read_request_state {
@@ -198,24 +250,13 @@ struct hfi1_dms_read_request_state {
 	u64 total_requested_qws;
 	struct hfi1_dms_rx_tracker *rx_tracker;
 	s32 tid_set;
-};
-
-struct hfi1_dms_rx_tracker_block {
-	struct hfi1_dms_dlist_element dlist;
-
-	struct hfi1_dms_rx_tracker tracker[100];
-};
-
-struct hfi1_dms_tx_tracker_block {
-	struct hfi1_dms_dlist_element dlist;
-
-	struct hfi1_dms_tx_tracker tracker[100];
+	enum hfi1_dms_tidset_state state;
+	ktime_t disable_ts;
 };
 
 struct hfi1_dms_tracker_mgr {
-	struct hfi1_dms_dlist active;    // i.e., hfi1_dms_rx_tracker or hfi1_dms_tx_tracker
-	struct hfi1_dms_dlist free;      // i.e., hfi1_dms_rx_tracker or hfi1_dms_tx_tracker
-	struct hfi1_dms_dlist blocklist; // i.e., hfi1_dms_rx_tracker_block or hfi1_dms_tx_tracker_block
+	struct hfi1_dms_dlist free;
+	struct hfi1_dms_dlist blocklist;
 };
 
 struct hfi1_dms;
@@ -300,15 +341,17 @@ struct hfi1_dms_client_state {
 };
 
 union hfi1_dms_tracker {
+	struct hfi1_dms_tracker_hdr hdr;
 	struct hfi1_dms_rx_tracker rx;
 	struct hfi1_dms_tx_tracker tx;
+	struct hfi1_dms_sdma_tracker sdma;
 };
 
 struct hfi1_dms_rift {
 	struct hfi1_dms_dlist waitlist;
 	u16 stack_top;
-	u16 stack[HFI1_DMS_RIFT_SIZE];
-	union hfi1_dms_tracker *arr[HFI1_DMS_RIFT_SIZE];
+	u16 stack[HFI1_DMS_RIFT_IDX_SIZE];
+	union hfi1_dms_tracker *arr[HFI1_DMS_RIFT_IDX_SIZE];
 };
 
 enum hfi1_dms_tidset_waiter_type {
@@ -321,7 +364,11 @@ enum hfi1_dms_tidset_waiter_type {
 struct hfi1_dms_tidset_waiters {
 	u64 head;
 	u64 tail;
-	u16 ring[HFI1_DMS_RIFT_SIZE*2];
+	u16 ring[HFI1_DMS_RIFT_IDX_SIZE*2];
+};
+
+struct hfi1_dms_sdma_waiters {
+	struct hfi1_dms_dlist waitlist;
 };
 
 struct hfi1_dms {
@@ -342,12 +389,12 @@ struct hfi1_dms {
 	struct hfi1_dms_read_request_state read_requests[HFI1_DMS_TID_SET_IDX_MAX];
 
 	struct hfi1_dms_tidset_waiters tidset_waiters[HFI1_DMS_TIDSET_WAITER_TYPE_COUNT];
+	struct hfi1_dms_sdma_waiters sdma_waiters;
 
 	/* Internal pointers for protocol/registered buffers */
 	union hfi1_dms_proto_cmd *protocol_cmd_templates; /* Array of protocol command templates */
 
-	struct hfi1_dms_tracker_mgr rx_trackers;
-	struct hfi1_dms_tracker_mgr tx_trackers;
+	struct hfi1_dms_tracker_mgr trackers;
 
 	struct hfi1_dms_sde_rsrc *sde_rsrcs; /* per SDMA engine resources */
 
@@ -368,6 +415,11 @@ struct hfi1_dms {
 	struct hfi1_dms_rift tx_rift;
 
 	struct hfi1_dms_work_item_mgr work_items;
+
+	struct hfi1_dms_rx_tracker disabled_rx_tracker;
+
+	ktime_t now;
+	ktime_t last_stale_check;
 
 	struct dms_counters counters;
 };
@@ -400,7 +452,7 @@ int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, u64 dms_key, u64 rem
 
 // This is only here for now to debug, this will be removed
 /* in the future when we have interrupts linked up */
-int hfi1_dms_poll(struct hfi1_dms *dms);
+int hfi1_dms_poll(struct hfi1_dms *dms, ktime_t const now);
 
 void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, u16 flags, u64 imm_data);
 void hfi1_dms_tracker_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, int status);

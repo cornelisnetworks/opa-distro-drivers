@@ -8461,8 +8461,7 @@ irqreturn_t sdma_interrupt(int irq, void *data)
 	 */
 	if (sde->this_idx >= dd->rsrcs.last_sdma_engine && dd->bulksvc) {
 		sdma_set_desc_cnt_all(sde);
-		/* just clear all 3 interrupts, no expensive status reads */
-		write_csr(dd, dd->params->cce_int_clear_reg + off, sde->imask);
+		/* bulksvc will handle clearing these interrupts */
 		bulksvc_sdma_irq(dd, sde);
 		return IRQ_HANDLED;
 	}
