@@ -133,5 +133,6 @@ void hfi1_bulksvc_verbs_cmd_put(struct hfi1_bulksvc_verbs_cmd *);
 void hfi1_bulksvc_verbs_cmpl_put(struct hfi1_bulksvc_verbs_cmpl *cmpl);
 
 int hfi1_bulksvc_verbs_dms_reg_client_id(struct hfi1_dms* dms);
+void hfi1_bulksvc_verbs_release_client_id(struct hfi1_dms* dms);
 
 #endif

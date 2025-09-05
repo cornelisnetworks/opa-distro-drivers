@@ -25,7 +25,11 @@
 #define HFI1_DMS_COUNTERS_ENABLE 0
 #define HFI1_DMS_TRACE_ENABLE 0
 #define HFI1_DMS_BUG_ENABLE 1
-#define HFI1_DMS_WORK_ITEM_MAX_RETRY_TIME_NS (5000000000) // 5s
+#define HFI1_DMS_WORK_ITEM_MAX_RETRY_TIME_NS  (5000000000) //   5 s
+#define HFI1_DMS_ACCESS_MAX_RETRY_TIME_NS      (100000000) // 100 ms
+#define HFI1_DMS_STALE_POLL_TIME_NS             (10000000) //  10 ms
+#define HFI1_DMS_STALE_THRESHOLD_TIME_NS      (1000000000) //   1 s
+#define HFI1_DMS_FABRIC_PACKET_MAX_LIFETIME_NS (500000000) // 500 ms
 
 #if HFI1_DMS_COUNTERS_ENABLE
 #define dms_rdtsc() rdtsc()
@@ -89,7 +93,6 @@ enum hfi1_dms_err_type {
 	HFI1_DMS_ERR_TYPE_ACCESS_RANGE_VIOLATION,
 	HFI1_DMS_ERR_TYPE_NO_MEMORY,
 	HFI1_DMS_ERR_TYPE_ACCESS_BUSY,
-	HFI1_DMS_ERR_TYPE_ACCESS_FAILED,
 
 	HFI1_DMS_ERR_TYPE_COUNT,
 };
@@ -611,17 +614,15 @@ int hfi1_dms_impl_work_item_block_alloc(struct hfi1_dms *dms);
 void hfi1_dms_impl_work_item_block_free(struct hfi1_dms *dms);
 struct hfi1_dms_work_item *hfi1_dms_impl_work_item_new(struct hfi1_dms *dms);
 void hfi1_dms_impl_work_item_free(struct hfi1_dms *dms, struct hfi1_dms_work_item *item);
-int hfi1_dms_impl_rx_tracker_block_alloc(struct hfi1_dms *dms);
-void hfi1_dms_impl_rx_tracker_block_free(struct hfi1_dms *dms);
-int hfi1_dms_impl_tx_tracker_block_alloc(struct hfi1_dms *dms);
-void hfi1_dms_impl_tx_tracker_block_free(struct hfi1_dms *dms);
+int hfi1_dms_impl_tracker_block_alloc(struct hfi1_dms *dms);
+void hfi1_dms_impl_tracker_block_free(struct hfi1_dms *dms);
 int hfi1_dms_impl_ahg_header_block_alloc(struct hfi1_dms *dms);
 void hfi1_dms_impl_ahg_header_block_free(struct hfi1_dms *dms);
 
 int hfi1_dms_access_block_new(struct hfi1_dms *dms);
 struct hfi1_dms_access * hfi1_dms_access_freelist_pop(struct hfi1_dms *dms);
 
-union hfi1_dms_tracker * hfi1_dms_impl_tracker_new(struct hfi1_dms_tracker_mgr *trackers);
+union hfi1_dms_tracker * hfi1_dms_impl_tracker_new(struct hfi1_dms *dms);
 struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_read_new(struct hfi1_dms *dms,
 							   u32 size,
 							   u64 starting_sbuf_offset, u64 dms_key,
@@ -635,6 +636,14 @@ struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_write_new(struct hfi1_dms *
 								 struct hfi1_dms_access * access);
 void hfi1_dms_impl_rx_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker * tracker);
 
+struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_read_new(struct hfi1_dms *dms, u32 size,
+		u64 byte_offset_from_first_page, u32 remote_lid, u16 remote_rift_index, struct hfi1_dms_access *access,
+		u8 head_misalignment, u8 include_fixup_data, u8 rx_id, u16 size_qw, u32 tid_info);
+
+struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_write_new(struct hfi1_dms *dms, u32 size,
+		u64 byte_offset_from_first_page, u32 remote_lid, struct hfi1_dms_mr *mr, u64 mr_offset,
+		u16 flags, u64 imm_data, struct hfi1_dms_tracker_completion const *completion, u64 rx_dms_key,
+		u64 rx_offset);
 void hfi1_dms_impl_tx_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker * tracker);
 
 struct hfi1_dms_ahg_header *hfi1_dms_impl_ahg_header_get(struct hfi1_dms *dms);
@@ -660,9 +669,10 @@ u32 hfi1_dms_impl_data_request_size_qw_get(union hfi1_dms_16b_header *hdr);
 int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *tracker, s32 tid_set);
 int hfi1_dms_impl_make_data_requests(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *tracker);
 void hfi1_dms_rx_tracker_handle_completion(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, int status, u32 do_ack);
+void hfi1_dms_tid_set_disable(struct hfi1_dms *dms, s32 tid_set);
 u64 hfi1_dms_tid_set_initialize(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, s32 tid_set, u32 *tid_info);
 int hfi1_dms_impl_handle_read_start_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, void *ebuf);
-int hfi1_dms_sdma_send(struct hfi1_dms *dms, const struct dms_proto_read_sdma_parameters * parameters);
+int hfi1_dms_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_sdma_parameters const * parameters);
 union hfi1_dms_proto_cmd_data_fixup hfi1_dms_proto_cmd_data_fixup_make(struct hfi1_dms *dms, u32 dlid, u16 tx_rift_index, u16 rx_rift_index, u64 head, u64 tail);
 union hfi1_dms_proto_cmd_data_small hfi1_dms_proto_cmd_data_small_make(struct hfi1_dms *dms, u32 dlid, u16 tx_rift_index, u16 rx_rift_index, u64 data0, u64 data1);
 
@@ -676,19 +686,20 @@ void hfi1_dms_impl_noop_packet(struct hfi1_packet *packet);
 
 int hfi1_dms_impl_handle_data_request_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 int hfi1_dms_impl_handle_data_request_fixup_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
-int hfi1_dms_impl_handle_ack(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
+void hfi1_dms_impl_handle_ack(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 int hfi1_dms_impl_handle_data_request_small_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 
 void hfi1_dms_impl_handle_read_response_small_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 
 void hfi1_dms_handle_data(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
-void hfi1_dms_handle_data_fixup(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, u8 *data);
+void hfi1_dms_handle_data_fixup(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 void hfi1_dms_impl_handle_data_small_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 
 int hfi1_dms_impl_handle_write_start_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, void *ebuf);
 void hfi1_dms_impl_handle_nack_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, void *ebuf);
 
-int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 page_offset, u32 nbytes, u32 dlid, u8 rx_id, u32 tid_info, u16 tx_rift_index, u64 head, u64 tail, enum hfi1_dms_msg_type msg_type);
+int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 page_offset, u32 nbytes, u32 dlid, u8 rx_id, u32 tid_info, u16 tx_rift_index,
+	u64 head_qw, u64 tail_qw, enum hfi1_dms_sdma_type sdma_type);
 
 // PIO functions - note: these should only be used in bulksvc/dms or similar.
 // the assumption here is only one thread is controlling the PIO buffers at any given time
@@ -708,8 +719,11 @@ int calculate_mr_page_offset(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 
 union hfi1_dms_proto_cmd_write_start hfi1_dms_proto_cmd_write_start_make(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker,
 		u32 dlid, u16 tx_rift_index, u32 size, u64 dms_key, u64 key_offset_or_vaddr, u16 flags, u64 imm_data);
 
-void _rift_init(struct hfi1_dms_rift * rift);
+union hfi1_dms_cmd_read_response_small hfi1_dms_cmd_read_response_small_make(struct hfi1_dms *dms,
+			struct hfi1_dms_mr * mr, u64 page_offset, u32 size, u32 dlid, u16 rx_rift_index, u16 tx_rift_index);
 
+void _rift_init(struct hfi1_dms_rift * rift);
+u16 _rift_key_create_err(enum hfi1_dms_rift_err const err);
 
 const rhf_rcv_function_ptr hfi1_dms_rhf_rcv_functions[] = {
 	[RHF_RCV_TYPE_EAGER] = hfi1_dms_impl_handle_packet,
@@ -773,14 +787,8 @@ int hfi1_dms_init(struct hfi1_dms *dms, struct hfi1_devdata *dd, struct hfi1_ctx
 	}
 	hfi1_dms_impl_fill_proto_templates(dms);
 
-	// initialize a set of rx trackers
-	if (hfi1_dms_impl_rx_tracker_block_alloc(dms)) {
-		ret = -ENOMEM;
-		goto bail;
-	}
-
-	// initialize a set of tx trackers
-	if (hfi1_dms_impl_tx_tracker_block_alloc(dms)) {
+	// initialize a set of trackers
+	if (hfi1_dms_impl_tracker_block_alloc(dms)) {
 		ret = -ENOMEM;
 		goto bail;
 	}
@@ -837,7 +845,11 @@ int hfi1_dms_init(struct hfi1_dms *dms, struct hfi1_devdata *dd, struct hfi1_ctx
 	_rift_init(&dms->rx_rift);
 	_rift_init(&dms->tx_rift);
 
-	dd_dev_warn(dd, "DMS initialized with %d SDMA engines.\n", num_engines);
+	dms->disabled_rx_tracker.hdr.local_rift_index = _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_DISABLED);
+	dms->disabled_rx_tracker.hdr.remote_rift_index = _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_DISABLED);
+	dms->last_stale_check = ktime_get();
+
+	dd_dev_warn(dms->dd, "DMS initialized with %d SDMA engines.\n", num_engines);
 
 	return 0;
 
@@ -871,8 +883,7 @@ bail:
 		dms->sde_rsrcs = NULL;
 	}
 
-	hfi1_dms_impl_rx_tracker_block_free(dms);
-	hfi1_dms_impl_tx_tracker_block_free(dms);
+	hfi1_dms_impl_tracker_block_free(dms);
 
 	if (dms->protocol_cmd_templates) {
 		kfree(dms->protocol_cmd_templates);
@@ -913,8 +924,7 @@ void hfi1_dms_uninit(struct hfi1_dms *dms)
 	dms->desc_stack = NULL;
 	kfree(dms->sde_rsrcs);
 	dms->sde_rsrcs = NULL;
-	hfi1_dms_impl_rx_tracker_block_free(dms);
-	hfi1_dms_impl_tx_tracker_block_free(dms);
+	hfi1_dms_impl_tracker_block_free(dms);
 
 	struct hfi1_dms_access *access = NULL;
 	while ((access = hfi1_dms_access_freelist_pop(dms))) {
@@ -1376,6 +1386,41 @@ void access_xfer_cancel(struct hfi1_dms *dms, struct hfi1_dms_access * access) {
 	access->active_count -= 1;
 }
 
+void hfi1_dms_tracker_timestamp_update(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker)
+{
+	DMS_BUG_ON(!tracker);
+	tracker->hdr.last_activity = dms->now;
+}
+
+u16 _rift_key_create(u16 const generation, u16 const index)
+{
+	DMS_BUG_ON(index > HFI1_DMS_RIFT_IDX_SIZE);
+	DMS_BUG_ON(generation > HFI1_DMS_RIFT_GEN_SIZE);
+	return (generation << HFI1_DMS_RIFT_IDX_BITS) | index;
+}
+
+u16 _rift_key_create_err(enum hfi1_dms_rift_err const err)
+{
+	return HFI1_DMS_RIFT_ERR_MASK | (u16)err;
+}
+
+u16 _rift_key_index(u16 const key)
+{
+	return key & HFI1_DMS_RIFT_IDX_MASK;
+}
+
+u16 _rift_key_generation(u16 const key)
+{
+	return (key & HFI1_DMS_RIFT_GEN_MASK) >> HFI1_DMS_RIFT_IDX_BITS;
+}
+
+enum hfi1_dms_rift_err _rift_key_error(u16 const key)
+{
+	if ((key & HFI1_DMS_RIFT_ERR_MASK) == 0)
+		return HFI1_DMS_RIFT_ERR_NONE;
+
+	return (enum hfi1_dms_rift_err)(key & ~HFI1_DMS_RIFT_ERR_MASK);
+}
 
 void _rift_init(struct hfi1_dms_rift * rift)
 {
@@ -1386,7 +1431,7 @@ void _rift_init(struct hfi1_dms_rift * rift)
 
 	rift->stack_top = sz;
 	for (u16 i = 0; i < sz; ++i) {
-		rift->stack[i] = i;
+		rift->stack[i] = _rift_key_create(0, i);
 		rift->arr[i] = NULL;
 	}
 }
@@ -1408,37 +1453,54 @@ int _rift_reserve(struct hfi1_dms_rift *rift, u16 *index)
 	return 0;
 }
 
-void _rift_assign(struct hfi1_dms_rift *rift, union hfi1_dms_tracker *tracker, u16 index)
+void _rift_assign(struct hfi1_dms_rift *rift, union hfi1_dms_tracker *tracker, u16 key)
 {
 	static u16 const sz = HFI1_DMS_ARRAY_SIZE(rift->arr);
+	u16 const idx = _rift_key_index(key);
 
 	DMS_BUG_ON(!rift);
 	DMS_BUG_ON(!tracker);
-	DMS_BUG_ON(sz <= index);
+	DMS_BUG_ON(sz <= idx);
 
-	rift->arr[index] = tracker;
+	rift->arr[idx] = tracker;
 }
 
-union hfi1_dms_tracker * _rift_lookup(struct hfi1_dms_rift *rift, u16 index)
+union hfi1_dms_tracker * _rift_lookup(struct hfi1_dms_rift *rift, u16 key)
 {
 	static u16 const sz = HFI1_DMS_ARRAY_SIZE(rift->arr);
+	u16 const idx = _rift_key_index(key);
 
 	DMS_BUG_ON(!rift);
-	DMS_BUG_ON(sz <= index);
+	DMS_BUG_ON(sz <= idx);
 
-	return rift->arr[index];
+	union hfi1_dms_tracker * tracker = rift->arr[idx];
+
+	if ((tracker == NULL) || (tracker->hdr.local_rift_index != key))
+		return NULL;
+
+	return rift->arr[idx];
 }
 
-void _rift_release(struct hfi1_dms_rift *rift, u16 index)
+void _rift_release(struct hfi1_dms_rift *rift, u16 key)
 {
+	DMS_BUG_ON(!rift);
+	DMS_BUG_ON(_rift_key_error(key));
+
 	static u16 const sz = HFI1_DMS_ARRAY_SIZE(rift->arr);
+	u16 const idx = _rift_key_index(key);
 
 	DMS_BUG_ON(!rift);
-	DMS_BUG_ON(sz <= index);
+	DMS_BUG_ON(sz <= idx);
 	DMS_BUG_ON(rift->stack_top == sz);
 
-	rift->arr[index] = NULL;
-	rift->stack[rift->stack_top++] = index;
+	rift->arr[idx] = NULL;
+	rift->stack[rift->stack_top++] = key;
+}
+
+void _rift_cancel(struct hfi1_dms_rift *rift, u16 key) {
+	u16 const gen = _rift_key_generation(key);
+	u16 const new_key = _rift_key_create(gen+1, _rift_key_index(key));
+	_rift_release(rift, new_key);
 }
 
 void _rift_waitlist_add(struct hfi1_dms_rift *rift, struct hfi1_dms_dlist_element * waiter)
@@ -1461,15 +1523,185 @@ struct hfi1_dms_dlist_element * _rift_waitlist_peek(struct hfi1_dms_rift *rift)
 	return rift->waitlist.head;
 }
 
+struct hfi1_dms_sdma_tracker * _sdma_waitlist_peek(struct hfi1_dms *dms)
+{
+	DMS_BUG_ON(!dms);
+	return (struct hfi1_dms_sdma_tracker *) dms->sdma_waiters.waitlist.head;
+}
+
+struct hfi1_dms_sdma_tracker * _sdma_waitlist_next(struct hfi1_dms *dms)
+{
+	DMS_BUG_ON(!dms);
+
+	struct hfi1_dms_dlist_element * waiter = hfi1_dms_impl_dlist_pop(&dms->sdma_waiters.waitlist);
+	if (waiter) {
+		hfi1_dms_impl_dlist_push(&dms->trackers.free, waiter);
+		return _sdma_waitlist_peek(dms);
+	}
+	return NULL;
+}
+
+int _sdma_waitlist_add(struct hfi1_dms *dms, struct hfi1_dms_sdma_parameters const * parameters) {
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!parameters);
+
+	struct hfi1_dms_sdma_tracker * waiter = (struct hfi1_dms_sdma_tracker *) hfi1_dms_impl_tracker_new(dms);
+	if (!waiter) {
+		return -ENOMEM;
+	}
+	waiter->parameters = *parameters;
+	
+	hfi1_dms_impl_dlist_append(&dms->sdma_waiters.waitlist, (struct hfi1_dms_dlist_element *)waiter);
+	return 0;
+}
+
+void _sdma_waitlist_poll(struct hfi1_dms *dms) {
+	DMS_BUG_ON(!dms);
+	struct hfi1_dms_sdma_tracker * waiter = _sdma_waitlist_peek(dms);
+	while (waiter) {
+		int ret = hfi1_dms_sdma_send(dms, &waiter->parameters);
+		waiter = ret == 0 ? _sdma_waitlist_next(dms) : NULL;
+	}
+}
+
+int hfi1_dms_impl_inject_read_response_small(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!tx_tracker);
+
+	union hfi1_dms_cmd_read_response_small const cmd =
+			hfi1_dms_cmd_read_response_small_make(dms, tx_tracker->read.access->mr, tx_tracker->xfer_start_byte_offset,
+				tx_tracker->total_payload, tx_tracker->hdr.remote_lid, tx_tracker->hdr.remote_rift_index, tx_tracker->hdr.local_rift_index);
+
+	return hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
+}
+
+int _dms_tx_rift_continue_read_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+{
+	int ret;
+
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!tx_tracker);
+
+	u16 const local_rift_index = tx_tracker->hdr.local_rift_index;
+	DMS_BUG_ON(_rift_key_error(local_rift_index));
+
+	if (_rift_lookup(&dms->tx_rift, local_rift_index) == NULL) {
+		dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", local_rift_index, _rift_key_generation(local_rift_index), _rift_key_index(local_rift_index));
+		return 0;
+	}
+
+	DMS_BUG_ON(_rift_lookup(&dms->tx_rift, local_rift_index) != (union hfi1_dms_tracker *)tx_tracker);
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)tx_tracker);
+
+	if (tx_tracker->total_payload <= 16) {
+		return hfi1_dms_impl_inject_read_response_small(dms, tx_tracker);
+	}
+
+	struct hfi1_dms_sdma_parameters const sdma_parameters = {
+		.tx_tracker = tx_tracker,
+		.mr = tx_tracker->read.access->mr,
+		.page_offset = tx_tracker->xfer_start_byte_offset + tx_tracker->read.start.head_misalignment,
+		.nbytes = tx_tracker->read.start.nbytes,
+		.tid_info = tx_tracker->read.start.tid_info,
+		.sdma_type = HFI1_DMS_SDMA_TYPE_START,
+		.rx_id = tx_tracker->read.start.rx_id,
+		.include_fixup_data = tx_tracker->read.start.include_fixup_data,
+	};
+
+	if (_sdma_waitlist_peek(dms)) {
+		ret = _sdma_waitlist_add(dms, &sdma_parameters);
+		_sdma_waitlist_poll(dms);
+	} else if (hfi1_dms_sdma_send(dms, &sdma_parameters) < 0) {
+		ret = _sdma_waitlist_add(dms, &sdma_parameters);
+	}
+	
+	return ret;
+}
+
+int hfi1_dms_impl_inject_write_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!tx_tracker);
+
+	union hfi1_dms_proto_cmd_write_start const cmd =
+		hfi1_dms_proto_cmd_write_start_make(dms, tx_tracker, tx_tracker->hdr.remote_lid, tx_tracker->hdr.local_rift_index,
+			tx_tracker->total_payload, tx_tracker->write.dms_key, tx_tracker->write.rx_offset,
+			tx_tracker->write.flags, tx_tracker->write.imm_data);
+
+		return hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
+}
+
+int _dms_tx_rift_continue_write_data(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!tx_tracker);
+
+	u16 const local_rift_index = tx_tracker->hdr.local_rift_index;
+	DMS_BUG_ON(_rift_key_error(local_rift_index));
+
+	if (_rift_lookup(&dms->tx_rift, local_rift_index) == NULL) {
+		dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", local_rift_index, _rift_key_generation(local_rift_index), _rift_key_index(local_rift_index));
+		return 0;
+	}
+
+	DMS_BUG_ON(_rift_lookup(&dms->tx_rift, local_rift_index) != (union hfi1_dms_tracker *)tx_tracker);
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)tx_tracker);
+
+	return hfi1_dms_impl_inject_write_start(dms, tx_tracker);
+}
+
+int _dms_tx_rift_poll(struct hfi1_dms *dms)
+{
+	int ret;
+	struct hfi1_dms_dlist_element *waiter;
+	struct hfi1_dms_tx_tracker *tx_tracker;
+
+	DMS_BUG_ON(!_rift_available(&dms->tx_rift));
+
+	waiter = _rift_waitlist_peek(&dms->tx_rift);
+	if (!waiter) {
+		return -ENOENT;
+	}
+
+	tx_tracker = container_of(waiter, struct hfi1_dms_tx_tracker, hdr.dlist);
+
+	ret = _rift_reserve(&dms->tx_rift, &tx_tracker->hdr.local_rift_index);
+	DMS_BUG_ON(ret < 0);
+
+	_rift_assign(&dms->tx_rift, (union hfi1_dms_tracker *)tx_tracker, tx_tracker->hdr.local_rift_index);
+
+	if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
+		ret = _dms_tx_rift_continue_read_start(dms, tx_tracker);
+		if (ret < 0) {
+			goto err;
+		}
+	} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
+		ret = _dms_tx_rift_continue_write_data(dms, tx_tracker);
+		if (ret < 0) {
+			goto err;
+		}
+	}
+
+	_rift_waitlist_pop(&dms->tx_rift);
+	return 0;
+
+err:
+	_rift_release(&dms->tx_rift, tx_tracker->hdr.local_rift_index);
+	tx_tracker->hdr.local_rift_index = _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_NOT_SET);
+	return ret;
+}
+
 
 int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, u64 rx_dms_key, u64 rx_offset,
 			u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data,
 			struct hfi1_dms_tracker_completion const completion)
 {
-	u64 byte_offset_from_first_page;
 	int ret;
+	u64 byte_offset_from_first_page;
 	struct hfi1_dms_tx_tracker * tx_tracker;
-	union hfi1_dms_proto_cmd_write_start cmd;
 
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(mr == NULL);
@@ -1477,37 +1709,37 @@ int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, u64 rx_dms_key, u64 
 
 	ret = calculate_mr_page_offset(dms, mr, mr_offset, size, &byte_offset_from_first_page);
 	if (ret < 0) {
-		return ret;
+		goto err;
 	}
 
-	tx_tracker = (struct hfi1_dms_tx_tracker *) hfi1_dms_impl_tracker_new(&dms->tx_trackers);
+	tx_tracker = hfi1_dms_impl_tx_tracker_write_new(dms, size, byte_offset_from_first_page, dest_lid,
+			mr, mr_offset, flags, imm_data, &completion, rx_dms_key, rx_offset);
 	if (!tx_tracker) {
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err;
 	}
-	tx_tracker->total_payload = size;
-	tx_tracker->payload_remaining = size;
-	tx_tracker->xfer_start_byte_offset = byte_offset_from_first_page;
-	tx_tracker->remote_lid = dest_lid;
 
-	tx_tracker->op = HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE;
-	tx_tracker->write.mr = mr;
-	tx_tracker->write.completion = completion;
-
-	ret = _rift_reserve(&dms->tx_rift, &tx_tracker->rift_index);
-	DMS_WARN_ON(ret < 0);	// FIXME - blocksome - add to "pending rift assignment" queue
-
-	_rift_assign(&dms->tx_rift, (union hfi1_dms_tracker *)tx_tracker, tx_tracker->rift_index);
-
-	cmd = hfi1_dms_proto_cmd_write_start_make(dms, tx_tracker, dest_lid, tx_tracker->rift_index, size, rx_dms_key, rx_offset, flags, imm_data);
-	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
+	ret = _rift_reserve(&dms->tx_rift, &tx_tracker->hdr.local_rift_index);
 	if (ret < 0) {
-		dd_dev_err(dms->dd, "Failed to send or enqueue write request\n");
-		_rift_release(&dms->tx_rift, tx_tracker->rift_index);
-		hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
-		return ret;
+		_rift_waitlist_add(&dms->tx_rift, &tx_tracker->hdr.dlist);
+		return 0; // try again later
+	}
+	_rift_assign(&dms->tx_rift, (union hfi1_dms_tracker *)tx_tracker, tx_tracker->hdr.local_rift_index);
+
+	ret = _dms_tx_rift_continue_write_data(dms, tx_tracker);
+	if (ret < 0) {
+		goto err2;
 	}
 
+	// Successfully started rdma write bulk transfer operation
 	return 0;
+
+err2:
+	_rift_release(&dms->tx_rift, tx_tracker->hdr.local_rift_index);
+	hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
+err:
+	// Unable to start rdma write bulk transfer operation
+	return ret;
 }
 
 union hfi1_dms_cmd_nack hfi1_dms_cmd_nack_make(struct hfi1_dms *dms, enum hfi1_dms_msg_type msg_type, enum hfi1_dms_err_type err_type, u32 dlid, u16 rift_index)
@@ -1559,9 +1791,9 @@ union hfi1_dms_cmd_read_start hfi1_dms_cmd_read_start_make(struct hfi1_dms *dms,
 	cmd.info.imm_data = rx_tracker->read.imm_data;
 	cmd.tail_flit = 0;
 
-	hfi1_dms_impl_lrh16bc_dlid_set(&cmd.lrh16bc, rx_tracker->remote_lid);
+	hfi1_dms_impl_lrh16bc_dlid_set(&cmd.lrh16bc, rx_tracker->hdr.remote_lid);
 	cmd.info.bth[0] = (cmd.info.bth[0] & ~(0xffu << 24)) | (dms->rctxt->ctxt << 24); // this will never change - should be part of the cmd template
-	cmd.info.bth[2] = (rx_tracker->rift_index << 16) | ((tid_set_nbytes >> 3) & 0xffff);
+	cmd.info.bth[2] = (rx_tracker->hdr.local_rift_index << 16) | ((tid_set_nbytes >> 3) & 0xffff);
 
 	return cmd;
 }
@@ -1619,7 +1851,7 @@ union hfi1_dms_proto_cmd_data_request_small hfi1_dms_proto_cmd_data_request_smal
 	for (i = 0; i < cmd_len_qws; ++i) {
 		cmd.qws[i] = tmpl->qws[i];
 	}
-	cmd.info.tx_rift_index = rx_tracker->tx_rift_index;
+	cmd.info.tx_rift_index = rx_tracker->hdr.remote_rift_index;
 	cmd.info.offset = rx_tracker->sbuf_offset;
 	cmd.info.size = (u16) rx_tracker->total_payload;
 	cmd.info.rx_rift_index = rx_rift_index;
@@ -1698,7 +1930,7 @@ int hfi1_dms_impl_inject_data_request_small(struct hfi1_dms *dms, struct hfi1_dm
 	union hfi1_dms_proto_cmd_data_request_small small_cmd;
 	int ret;
 
-	small_cmd = hfi1_dms_proto_cmd_data_request_small_make(dms, rx_tracker, rx_tracker->remote_lid, rx_tracker->rift_index);
+	small_cmd = hfi1_dms_proto_cmd_data_request_small_make(dms, rx_tracker, rx_tracker->hdr.remote_lid, rx_tracker->hdr.local_rift_index);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&small_cmd);
 	if (ret == 0) {
 		rx_tracker->payload_requested += rx_tracker->total_payload;
@@ -1717,7 +1949,7 @@ int hfi1_dms_impl_inject_data_request_fixup(struct hfi1_dms *dms, struct hfi1_dm
 	union hfi1_dms_proto_cmd_data_request_fixup cmd;
 	int ret;
 
-	cmd = hfi1_dms_proto_cmd_data_request_fixup_make(dms, rx_tracker, rx_tracker->remote_lid, rx_tracker->tx_rift_index, rx_tracker->rift_index);
+	cmd = hfi1_dms_proto_cmd_data_request_fixup_make(dms, rx_tracker, rx_tracker->hdr.remote_lid, rx_tracker->hdr.remote_rift_index, rx_tracker->hdr.local_rift_index);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 	if (ret == 0) {
 		rx_tracker->payload_requested += rx_tracker->head_misalignment;	
@@ -1771,8 +2003,6 @@ int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 		cmd.info.tid_info = tid_info;
 		ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 		if (ret == 0) {
-			rx_tracker->payload_requested += rx_tracker->head_misalignment;
-			rx_tracker->payload_requested += rx_tracker->tail_misalignment;
 			rx_tracker->payload_requested += tid_set_nbytes;
 			rx_tracker->sbuf_offset += tid_set_nbytes;
 			rx_tracker->rbuf_offset += tid_set_nbytes;
@@ -1783,7 +2013,6 @@ int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 		}
 		return ret;
 	}
-
 
 	tid_set_nbytes = hfi1_dms_tid_set_initialize(dms, rx_tracker, tid_set, &tid_info);
 
@@ -1803,11 +2032,11 @@ void _dms_tidset_waiter_add(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_ty
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
 	DMS_BUG_ON(type >= HFI1_DMS_TIDSET_WAITER_TYPE_COUNT);
-	DMS_BUG_ON(rx_tracker->rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+	DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.local_rift_index));
 
 	static u64 const mask = HFI1_DMS_ARRAY_SIZE(dms->tidset_waiters[type].ring) - 1;
 	u64 const idx = dms->tidset_waiters[type].tail & mask;
-	dms->tidset_waiters[type].ring[idx] = rx_tracker->rift_index;
+	dms->tidset_waiters[type].ring[idx] = rx_tracker->hdr.local_rift_index;
 	dms->tidset_waiters[type].tail += 1;
 }
 
@@ -1899,8 +2128,18 @@ int _dms_rx_rift_continue_read_data(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
-	DMS_BUG_ON(rx_tracker->rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
-	DMS_BUG_ON(dms->rx_rift.arr[rx_tracker->rift_index] != (union hfi1_dms_tracker *)rx_tracker);
+
+	u16 const local_rift_index = rx_tracker->hdr.local_rift_index;
+	DMS_BUG_ON(_rift_key_error(local_rift_index));
+
+	if (_rift_lookup(&dms->rx_rift, local_rift_index) == NULL) {
+		dd_dev_warn(dms->dd, "Ignore invalid rx rift key 0x%04hx (%hu %hu)\n", local_rift_index, _rift_key_generation(local_rift_index), _rift_key_index(local_rift_index));
+		return 0;
+	}
+
+	DMS_BUG_ON(_rift_lookup(&dms->rx_rift, local_rift_index) != (union hfi1_dms_tracker *)rx_tracker);
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)rx_tracker);
 
 	if (rx_tracker->total_payload <= 16) {
 		return hfi1_dms_impl_inject_read_start_small(dms, rx_tracker);
@@ -1918,9 +2157,19 @@ int _dms_rx_rift_continue_write_start(struct hfi1_dms *dms, struct hfi1_dms_rx_t
 
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
-	DMS_BUG_ON(rx_tracker->rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
-	DMS_BUG_ON(dms->rx_rift.arr[rx_tracker->rift_index] != (union hfi1_dms_tracker *)rx_tracker);
-	DMS_BUG_ON(rx_tracker->tx_rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+
+	u16 const local_rift_index = rx_tracker->hdr.local_rift_index;
+	DMS_BUG_ON(_rift_key_error(local_rift_index));
+
+	if (_rift_lookup(&dms->rx_rift, local_rift_index) == NULL) {
+		dd_dev_warn(dms->dd, "Ignore invalid rx rift key 0x%04hx (%hu %hu)\n", local_rift_index, _rift_key_generation(local_rift_index), _rift_key_index(local_rift_index));
+		return 0;
+	}
+
+	DMS_BUG_ON(_rift_lookup(&dms->rx_rift, local_rift_index) != (union hfi1_dms_tracker *)rx_tracker);
+	DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.remote_rift_index));
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)rx_tracker);
 
 	if (rx_tracker->total_payload <= 16) {
 		return hfi1_dms_impl_inject_data_request_small(dms, rx_tracker);
@@ -1955,12 +2204,12 @@ int _dms_rx_rift_poll(struct hfi1_dms *dms)
 		return -ENOENT;
 	}
 
-	rx_tracker = container_of(waiter, struct hfi1_dms_rx_tracker, dlist);
+	rx_tracker = container_of(waiter, struct hfi1_dms_rx_tracker, hdr.dlist);
 
-	ret = _rift_reserve(&dms->rx_rift, &rx_tracker->rift_index);
+	ret = _rift_reserve(&dms->rx_rift, &rx_tracker->hdr.local_rift_index);
 	DMS_BUG_ON(ret < 0);
 
-	_rift_assign(&dms->rx_rift, (union hfi1_dms_tracker *)rx_tracker, rx_tracker->rift_index);
+	_rift_assign(&dms->rx_rift, (union hfi1_dms_tracker *)rx_tracker, rx_tracker->hdr.local_rift_index);
 
 	if (rx_tracker->op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
 		ret = _dms_rx_rift_continue_read_data(dms, rx_tracker);
@@ -1978,8 +2227,8 @@ int _dms_rx_rift_poll(struct hfi1_dms *dms)
 	return 0;
 
 err:
-	_rift_release(&dms->rx_rift, rx_tracker->rift_index);
-	rx_tracker->rift_index = HFI1_DMS_RIFT_INDEX_NOT_SET;
+	_rift_release(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
+	rx_tracker->hdr.local_rift_index = _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_NOT_SET);
 	return ret;
 }
 
@@ -2011,11 +2260,11 @@ int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, u64 dms_key, u64 key_o
 		goto err;
 	}
 
-	ret = _rift_reserve(&dms->rx_rift, &rx_tracker->rift_index);
+	ret = _rift_reserve(&dms->rx_rift, &rx_tracker->hdr.local_rift_index);
 	if (ret < 0) {
-		_rift_waitlist_add(&dms->rx_rift, &rx_tracker->dlist);
+		_rift_waitlist_add(&dms->rx_rift, &rx_tracker->hdr.dlist);
 	} else {
-		_rift_assign(&dms->rx_rift, (union hfi1_dms_tracker *)rx_tracker, rx_tracker->rift_index);
+		_rift_assign(&dms->rx_rift, (union hfi1_dms_tracker *)rx_tracker, rx_tracker->hdr.local_rift_index);
 
 		ret = _dms_rx_rift_continue_read_data(dms, rx_tracker);
 		if (ret < 0) {
@@ -2030,7 +2279,7 @@ int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, u64 dms_key, u64 key_o
 	return 0;
 
 err2:
-	_rift_release(&dms->rx_rift, rx_tracker->rift_index);
+	_rift_release(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
 	hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
 err:
 	// Unable to start rdma read bulk transfer operation
@@ -2042,11 +2291,20 @@ void hfi1_dms_impl_handle_read_response_small_packet(struct hfi1_dms *dms, union
 	union hfi1_dms_pkt_read_response_small *pkt = (union hfi1_dms_pkt_read_response_small *)hdr;
 	struct hfi1_dms_rx_tracker *rx_tracker;
 
-	rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, pkt->info.rx_rift_index);
-	DMS_BUG_ON(rx_tracker == NULL);
+	u16 const rx_rift_index = pkt->info.rx_rift_index;
+	DMS_BUG_ON(_rift_key_error(rx_rift_index));
+
+	rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, rx_rift_index);
+	if (!rx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid rx rift key 0x%04hx (%hu %hu)\n", rx_rift_index, _rift_key_generation(rx_rift_index), _rift_key_index(rx_rift_index));
+		return;
+	}
+
 	DMS_BUG_ON(rx_tracker->op != HFI1_DMS_RX_TRACKER_OP_RDMA_READ);
 
-	rx_tracker->tx_rift_index = pkt->info.tx_rift_index;
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)rx_tracker);
+
+	rx_tracker->hdr.remote_rift_index = pkt->info.tx_rift_index;
 
 	if (rx_tracker->total_payload <= 8) {
 		hfi1_dms_impl_slow_write_to_user(rx_tracker->rbuf, rx_tracker->rbuf_start_offset, &pkt->info.data[0], rx_tracker->total_payload);
@@ -2063,8 +2321,10 @@ void hfi1_dms_impl_handle_read_response_small_packet(struct hfi1_dms *dms, union
 
 void hfi1_dms_rx_tracker_handle_completion(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, int status, u32 do_ack)
 {
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!rx_tracker);
 	DMS_BUG_ON(rx_tracker->payload_remaining != 0);
-	DMS_BUG_ON(rx_tracker->rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+	DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.local_rift_index));
 
 	enum hfi1_dms_rx_tracker_op const op = rx_tracker->op;
 
@@ -2072,12 +2332,12 @@ void hfi1_dms_rx_tracker_handle_completion(struct hfi1_dms *dms, struct hfi1_dms
 		union hfi1_dms_proto_cmd_ack cmd;
 		int ret;
 
-		DMS_BUG_ON(rx_tracker->tx_rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+		DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.remote_rift_index));
 
 		if (op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
-			cmd = hfi1_dms_proto_cmd_ack_make(dms, rx_tracker, rx_tracker->remote_lid, rx_tracker->tx_rift_index, rx_tracker->read.flags, rx_tracker->read.imm_data);
+			cmd = hfi1_dms_proto_cmd_ack_make(dms, rx_tracker, rx_tracker->hdr.remote_lid, rx_tracker->hdr.remote_rift_index, rx_tracker->read.flags, rx_tracker->read.imm_data);
 		} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
-			cmd = hfi1_dms_proto_cmd_ack_make(dms, rx_tracker, rx_tracker->remote_lid, rx_tracker->tx_rift_index, 0, 0);
+			cmd = hfi1_dms_proto_cmd_ack_make(dms, rx_tracker, rx_tracker->hdr.remote_lid, rx_tracker->hdr.remote_rift_index, 0, 0);
 		}
 
 		ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
@@ -2091,9 +2351,8 @@ void hfi1_dms_rx_tracker_handle_completion(struct hfi1_dms *dms, struct hfi1_dms
 		access_xfer_end(dms, rx_tracker->write.access, rx_tracker->write.flags, rx_tracker->write.imm_data);
 	}
 
-	_rift_release(&dms->rx_rift, rx_tracker->rift_index);
+	_rift_release(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
 	_dms_rx_rift_poll(dms);
-
 	hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
 }
 
@@ -2121,11 +2380,13 @@ void hfi1_dms_handle_data_start(struct hfi1_dms *dms, union hfi1_dms_16b_header 
 	rx_tracker = read_request->rx_tracker;
 	DMS_BUG_ON(!rx_tracker);
 
-	if (rx_tracker->tx_rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET) {
-		data = (union hfi1_dms_proto_pkt_data *)hdr;
-		DMS_BUG_ON(data->info.tx_rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)rx_tracker);
 
-		rx_tracker->tx_rift_index = data->info.tx_rift_index;
+	if (_rift_key_error(rx_tracker->hdr.remote_rift_index) == HFI1_DMS_RIFT_ERR_INDEX_NOT_SET) {
+		data = (union hfi1_dms_proto_pkt_data *)hdr;
+		DMS_BUG_ON(_rift_key_error(data->info.tx_rift_index));
+
+		rx_tracker->hdr.remote_rift_index = data->info.tx_rift_index;
 
 		u64 const bytes_requested = rx_tracker->payload_requested;
 
@@ -2148,7 +2409,7 @@ void hfi1_dms_handle_data_start(struct hfi1_dms *dms, union hfi1_dms_16b_header 
 	if (read_request->remaining_qws == 0) {
 		rx_tracker->payload_remaining -= (read_request->total_requested_qws << 3);
 		if (rx_tracker->payload_remaining == 0) {
-			DMS_BUG_ON(rx_tracker->tx_rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+			DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.remote_rift_index));
 			hfi1_dms_rx_tracker_handle_completion(dms, rx_tracker, 0, 1);
 		}
 
@@ -2183,13 +2444,15 @@ void hfi1_dms_handle_data(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
 	rx_tracker = read_request->rx_tracker;
 	DMS_BUG_ON(!rx_tracker);
 
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)rx_tracker);
+
 	DMS_WARN_ON(read_request->remaining_qws < payload_qws);
 	read_request->remaining_qws -= payload_qws;
 
 	if (read_request->remaining_qws == 0) {
 		rx_tracker->payload_remaining -= (read_request->total_requested_qws << 3);
 		if (rx_tracker->payload_remaining == 0) {
-			DMS_BUG_ON(rx_tracker->tx_rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+			DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.remote_rift_index));
 			hfi1_dms_rx_tracker_handle_completion(dms, rx_tracker, 0, 1);
 		}
 
@@ -2201,7 +2464,7 @@ void hfi1_dms_handle_data(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
 	dms->counters.handle_data += end - start;
 }
 
-void hfi1_dms_handle_data_fixup(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, u8 *data)
+void hfi1_dms_handle_data_fixup(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
 {
 	union hfi1_dms_proto_pkt_data_fixup * fixup;
 	struct hfi1_dms_rx_tracker *rx_tracker;
@@ -2215,10 +2478,19 @@ void hfi1_dms_handle_data_fixup(struct hfi1_dms *dms, union hfi1_dms_16b_header 
 	head = fixup->info.head;
 	tail = fixup->info.tail;
 
-	rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, fixup->info.rx_rift_index);
-	DMS_BUG_ON(rx_tracker == NULL);
+	u16 const rx_rift_index = fixup->info.rx_rift_index;
+	DMS_BUG_ON(_rift_key_error(rx_rift_index));
+
+	rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, rx_rift_index);
+	if (!rx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid rx rift key 0x%04hx (%hu %hu)\n", rx_rift_index, _rift_key_generation(rx_rift_index), _rift_key_index(rx_rift_index));
+		return;
+	}
+
 	DMS_BUG_ON(rx_tracker->total_payload <= 16);
 	DMS_BUG_ON((rx_tracker->head_misalignment == 0) && (rx_tracker->tail_misalignment == 0));
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)rx_tracker);
 
 	hfi1_dms_impl_slow_write_to_user(rx_tracker->rbuf, rx_tracker->rbuf_start_offset, &head, sizeof(head));
 	hfi1_dms_impl_slow_write_to_user(rx_tracker->rbuf, rx_tracker->rbuf_start_offset + rx_tracker->total_payload - sizeof(u64), &tail, sizeof(tail));
@@ -2242,9 +2514,18 @@ void hfi1_dms_impl_handle_data_small_packet(struct hfi1_dms *dms, union hfi1_dms
 
 	small = (union hfi1_dms_proto_pkt_data_small *)hdr;
 
-	rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, small->info.rx_rift_index);
-	DMS_BUG_ON(rx_tracker == NULL);
+	u16 const rx_rift_index = small->info.rx_rift_index;
+	DMS_BUG_ON(_rift_key_error(rx_rift_index));
+
+	rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, rx_rift_index);
+	if (!rx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid rx rift key 0x%04hx (%hu %hu)\n", rx_rift_index, _rift_key_generation(rx_rift_index), _rift_key_index(rx_rift_index));
+		return;
+	}
+
 	DMS_BUG_ON(rx_tracker->op != HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE);
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)rx_tracker);
 
 	DMS_BUG_ON(rx_tracker->total_payload > 16);
 	if (rx_tracker->total_payload <= 8) {
@@ -2505,8 +2786,8 @@ void hfi1_dms_impl_handle_packet(struct hfi1_packet *packet)
 		hfi1_dms_impl_handle_data_small_packet(dms, hdr);
 		break;
 
-	case HFI1_DMS_MSG_TYPE_DATA_FIXUP: { // requires some data from eager buffer
-		hfi1_dms_handle_data_fixup(dms, hdr, packet->ebuf);
+	case HFI1_DMS_MSG_TYPE_DATA_FIXUP: {
+		hfi1_dms_handle_data_fixup(dms, hdr);
 		break;
 	}
 
@@ -2576,13 +2857,168 @@ void hfi1_dms_impl_reclaim_ahg(struct hfi1_dms *dms, struct sdma_engine *sde, st
 	}
 }
 
-int hfi1_dms_poll(struct hfi1_dms *dms)
+u32 hfi1_dms_tracker_stale(union hfi1_dms_tracker *tracker, ktime_t const now, u64 const max_elapsed_ns)
+{
+	return ktime_to_ns(ktime_sub(now, tracker->hdr.last_activity)) > max_elapsed_ns;
+}
+
+void hfi1_dms_poll_stale(struct hfi1_dms *dms, u64 const max_elapsed_ns)
+{
+	DMS_BUG_ON(!dms);
+
+	ktime_t const now = dms->now;
+	u32 cancel_count = 0;
+
+	// remove any stale rx rift waiters
+	struct hfi1_dms_rx_tracker *rx_tracker = (struct hfi1_dms_rx_tracker *) dms->rx_rift.waitlist.head;
+	while (rx_tracker) {
+		struct hfi1_dms_rx_tracker *next = (struct hfi1_dms_rx_tracker *) rx_tracker->hdr.dlist.next;
+
+		if (!hfi1_dms_tracker_stale((union hfi1_dms_tracker *)rx_tracker, now, max_elapsed_ns)) {
+			break;
+		}
+
+		dd_dev_warn(dms->dd, "Removed stale rx rift waiter\n");
+
+		hfi1_dms_impl_dlist_remove(&dms->rx_rift.waitlist, (struct hfi1_dms_dlist_element *)rx_tracker);
+		if (rx_tracker->op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
+			rx_tracker->read.completion.fn(&rx_tracker->read.completion.cookie, -ETIMEDOUT);
+		} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
+			access_xfer_cancel(dms, rx_tracker->write.access);
+		}
+
+		hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
+		rx_tracker = next;
+	}
+
+	// remove any disabled tidsets
+	s32 const sz = (s32) HFI1_DMS_ARRAY_SIZE(dms->read_requests);
+	for (s32 tid_set = 0; tid_set < sz; ++tid_set) {
+
+		if (dms->read_requests[tid_set].state == HFI1_DMS_TIDSET_STATE_DISABLED) {
+			if (ktime_to_ns(ktime_sub(dms->now, dms->read_requests[tid_set].disable_ts)) > HFI1_DMS_FABRIC_PACKET_MAX_LIFETIME_NS) {
+				dd_dev_warn(dms->dd, "Removed disabled tidset read request\n");
+				dms->read_requests[tid_set] = (struct hfi1_dms_read_request_state){0};
+				hfi1_dms_impl_tid_set_put(dms, tid_set);
+				++cancel_count;
+			}
+		} else {
+			union hfi1_dms_tracker * tracker = (union hfi1_dms_tracker *) dms->read_requests[tid_set].rx_tracker;
+			if (tracker && hfi1_dms_tracker_stale(tracker, now, max_elapsed_ns)) {
+				dd_dev_warn(dms->dd, "Disabled stale tidset read request\n");
+				hfi1_dms_tid_set_disable(dms, tid_set);
+			}
+		}
+	}
+
+	// remove any stale tidset waiters
+	for (enum hfi1_dms_tidset_waiter_type type = HFI1_DMS_TIDSET_WAITER_TYPE_READ; type < HFI1_DMS_TIDSET_WAITER_TYPE_COUNT; ++type) {
+		u64 discard_count = 0;
+		u64 const head =  dms->tidset_waiters[type].head;
+		u64 const count = dms->tidset_waiters[type].tail - head;
+		u64 const mask = HFI1_DMS_ARRAY_SIZE(dms->tidset_waiters[type].ring) - 1;
+		for (u64 i = 0; i < count; ++i) {
+			u64 const idx = (head + i) & mask;
+			struct hfi1_dms_rx_tracker * rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, dms->tidset_waiters[type].ring[idx]);
+
+			if (!rx_tracker || hfi1_dms_tracker_stale((union hfi1_dms_tracker *)rx_tracker, now, max_elapsed_ns)) {
+				dd_dev_warn(dms->dd, "Removed stale tidset waiter\n");
+				discard_count += 1;
+			} else {
+				u64 const new_idx = (head + i - discard_count) & mask;
+				dms->tidset_waiters[type].ring[new_idx] = dms->tidset_waiters[type].ring[idx];
+			}
+		}
+		u64 const new_tail = head + count - discard_count;
+		dms->tidset_waiters[type].tail = new_tail;
+	}
+
+	// remove any stale active rx trackers
+	for (u64 i = 0; i < HFI1_DMS_ARRAY_SIZE(dms->rx_rift.arr); ++i) {
+		if ((dms->rx_rift.arr[i] == NULL) || (!hfi1_dms_tracker_stale((union hfi1_dms_tracker *)dms->rx_rift.arr[i], now, max_elapsed_ns))) {
+			continue;
+		}
+		dd_dev_warn(dms->dd, "Removed stale rx rift entry\n");
+
+		struct hfi1_dms_rx_tracker * rx_tracker = (struct hfi1_dms_rx_tracker *)dms->rx_rift.arr[i];
+		if (rx_tracker->op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
+			rx_tracker->read.completion.fn(&rx_tracker->read.completion.cookie, -ETIMEDOUT);
+		} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
+			access_xfer_cancel(dms, rx_tracker->write.access);
+		}
+
+		_rift_cancel(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
+		hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
+		++cancel_count;
+	}
+
+	// remove any stale tx rift waiters
+	struct hfi1_dms_tx_tracker *tx_tracker = (struct hfi1_dms_tx_tracker *) dms->tx_rift.waitlist.head;
+	while (tx_tracker) {
+		struct hfi1_dms_tx_tracker *next = (struct hfi1_dms_tx_tracker *) tx_tracker->hdr.dlist.next;
+
+		if (!hfi1_dms_tracker_stale((union hfi1_dms_tracker *)tx_tracker, now, max_elapsed_ns)) {
+			break;
+		}
+
+		dd_dev_warn(dms->dd, "Removed stale tx rift waiter\n");
+
+		hfi1_dms_impl_dlist_remove(&dms->tx_rift.waitlist, (struct hfi1_dms_dlist_element *)tx_tracker);
+		if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
+			access_xfer_cancel(dms, tx_tracker->read.access);
+		} else if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) {
+			tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, -ETIMEDOUT);
+		}
+
+		hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
+		tx_tracker = next;
+	}
+
+	// remove any stale sdma waiters
+	struct hfi1_dms_sdma_tracker *sdma_waiter = (struct hfi1_dms_sdma_tracker *) dms->sdma_waiters.waitlist.head;
+	while (sdma_waiter) {
+		struct hfi1_dms_sdma_tracker *next = (struct hfi1_dms_sdma_tracker *) sdma_waiter->hdr.dlist.next;
+ 		if (hfi1_dms_tracker_stale((union hfi1_dms_tracker *)sdma_waiter, now, max_elapsed_ns)) {
+			dd_dev_warn(dms->dd, "Removed stale tx sdma waiter\n");
+			hfi1_dms_impl_dlist_remove(&dms->sdma_waiters.waitlist, (struct hfi1_dms_dlist_element *)sdma_waiter);
+			hfi1_dms_impl_dlist_push(&dms->trackers.free, (struct hfi1_dms_dlist_element *)sdma_waiter);
+		}
+		sdma_waiter = next;
+	}
+
+	// remove any stale active tx trackers
+	for (u64 i = 0; i < HFI1_DMS_ARRAY_SIZE(dms->tx_rift.arr); ++i) {
+		if ((dms->tx_rift.arr[i] == NULL) || (!hfi1_dms_tracker_stale((union hfi1_dms_tracker *)dms->tx_rift.arr[i], now, max_elapsed_ns))) {
+			continue;
+		}
+
+		dd_dev_warn(dms->dd, "Removed stale tx rift entry\n");
+		struct hfi1_dms_tx_tracker * tx_tracker = (struct hfi1_dms_tx_tracker *)dms->tx_rift.arr[i];
+		if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
+			access_xfer_cancel(dms, tx_tracker->read.access);
+		} else if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) {
+			tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, -ETIMEDOUT);
+		}
+
+		_rift_cancel(&dms->tx_rift, tx_tracker->hdr.local_rift_index);
+		hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
+		++cancel_count;
+	}
+
+	if (cancel_count > 0) {
+		_dms_tidset_waiters_poll(dms);
+		_dms_rx_rift_poll(dms);
+		_sdma_waitlist_poll(dms);
+		_dms_tx_rift_poll(dms);
+	}
+}
+
+int hfi1_dms_poll(struct hfi1_dms *dms, ktime_t const now)
 {
 	u64 start;
 	int i;
 	u64 const MAX_PACKETS_PER_POLL = dms->rctxt->rcvhdrq_cnt;
 	struct hfi1_packet packet = {0};
-	ktime_t now = ktime_get();
 	int last = RCV_PKT_OK;
 	u64 actual_packet_start;
 	u64 actual_packet_end;
@@ -2591,6 +3027,8 @@ int hfi1_dms_poll(struct hfi1_dms *dms)
 	start = dms_rdtsc();
 
 	dms_trace(dms_poll, dms);
+
+	dms->now = now;
 
 	for (i = 0; i < dms->num_engines; ++i) {
 		sdma_gethead_dma(dms->sdma_engines[i]);
@@ -2615,6 +3053,11 @@ int hfi1_dms_poll(struct hfi1_dms *dms)
 			}
 			item = next_item;
 		}
+	}
+
+	if (ktime_to_ns(ktime_sub(now, dms->last_stale_check)) > HFI1_DMS_STALE_POLL_TIME_NS) {
+		dms->last_stale_check = now;
+		hfi1_dms_poll_stale(dms, HFI1_DMS_STALE_THRESHOLD_TIME_NS);
 	}
 
 	init_packet(dms->rctxt, &packet);
@@ -2647,9 +3090,15 @@ bail:
 void hfi1_dms_handle_tx_tracker_completion(struct hfi1_dms *dms, u16 tx_rift_index, u16 flags, u64 imm_data)
 {
 	DMS_BUG_ON(dms == NULL);
+	DMS_BUG_ON(_rift_key_error(tx_rift_index));
 
 	struct hfi1_dms_tx_tracker *tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, tx_rift_index);
-	DMS_BUG_ON(tx_tracker == NULL);
+	if (!tx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", tx_rift_index, _rift_key_generation(tx_rift_index), _rift_key_index(tx_rift_index));
+		return;
+	}
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)tx_tracker);
 
 	// invoke callback for the completed tx tracker
 	if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
@@ -2659,7 +3108,9 @@ void hfi1_dms_handle_tx_tracker_completion(struct hfi1_dms *dms, u16 tx_rift_ind
 		tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, 0);
 	}
 
-	_rift_release(&dms->tx_rift, tx_tracker->rift_index);
+	_rift_release(&dms->tx_rift, tx_tracker->hdr.local_rift_index);
+	_dms_tx_rift_poll(dms);
+	_sdma_waitlist_poll(dms);
 	hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
 }
 
@@ -2800,7 +3251,7 @@ int hfi1_dms_impl_map_tid_entries(struct hfi1_dms *dms, struct hfi1_dms_mr * mr,
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(mr == NULL);
 	DMS_BUG_ON(tid_set < HFI1_DMS_TID_SET_IDX_MIN || tid_set > HFI1_DMS_TID_SET_IDX_MAX);
-	DMS_BUG_ON(npages <= 0);
+	DMS_BUG_ON(npages == 0);
 	DMS_BUG_ON(npages > (HFI1_DMS_TID_SET_SIZE*2));
 	start = dms_rdtsc();
 
@@ -2855,6 +3306,35 @@ union hfi1_dms_proto_cmd_data_request_fixup hfi1_dms_proto_cmd_data_request_fixu
 	hfi1_dms_impl_lrh16bc_dlid_set(&cmd.lrh16bc, dlid);
 
 	return cmd;
+}
+
+void hfi1_dms_tid_set_disable(struct hfi1_dms *dms, s32 tid_set)
+{
+	u64 const npages = HFI1_DMS_TID_SET_SIZE*2;
+	u64 const npages_twos = (npages + 1) & ~1ull;
+	u64 const tid_start = tid_set * HFI1_DMS_TID_SET_SIZE;
+	u64 const tid_entry_start = tid_start * 2;
+
+	u64 csr_offset;
+	u64 tid_entries[HFI1_DMS_TID_SET_SIZE * 2] = {0};
+
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(tid_set < HFI1_DMS_TID_SET_IDX_MIN || tid_set > HFI1_DMS_TID_SET_IDX_MAX);
+
+	dms->read_requests[tid_set].disable_ts = dms->now;
+	dms->read_requests[tid_set].state = HFI1_DMS_TIDSET_STATE_DISABLED;
+	dms->read_requests[tid_set].total_requested_qws = (u64)(-1);
+	dms->read_requests[tid_set].remaining_qws = (u64)(-1);
+	dms->read_requests[tid_set].rx_tracker = &dms->disabled_rx_tracker;
+
+	for (u64 i = 0; i < npages; ++i) {
+		tid_entries[i] = (u64) (dms->zero_page.phys_addr >> 12) | (1ull << 46) | BIT(63);
+	}
+
+	csr_offset = rcvarray_offset(dms->rctxt->ctxt, tid_entry_start, PT_EXPECTED);
+	for (u64 i = 0; i < npages_twos; ++i) {
+		writeq(tid_entries[i], dms->dd->bar_maps[ctxt_bar_idx(dms->rctxt->ctxt)].rcvarray_wc + csr_offset + (i * sizeof(u64)));
+	}
 }
 
 // pre: pages must be pinned and mapped
@@ -2912,6 +3392,7 @@ u64 hfi1_dms_tid_set_initialize(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker
 		.remaining_qws = read_size_qw,
 		.rx_tracker = rx_tracker,
 		.tid_set = tid_set,
+		.state = HFI1_DMS_TIDSET_STATE_ENABLED,
 	};
 
 	*tid_info = hfi1_dms_tid_info_make(tid_set * HFI1_DMS_TID_SET_SIZE, recv_offset_dws);
@@ -2957,7 +3438,7 @@ int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 	nbytes_to_request = hfi1_dms_tid_set_initialize(dms, rx_tracker, tid_set, &tid_info);
 	read_size_qw = nbytes_to_request >> 3;
 
-	cmd = hfi1_dms_cmd_data_request_make(dms, tid_info, rx_tracker->sbuf_offset, rx_tracker->tx_rift_index, rx_tracker->remote_lid, read_size_qw);
+	cmd = hfi1_dms_cmd_data_request_make(dms, tid_info, rx_tracker->sbuf_offset, rx_tracker->hdr.remote_rift_index, rx_tracker->hdr.remote_lid, read_size_qw);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 	if (ret < 0) {
 		pr_debug("Unable to send data request.\n");
@@ -2979,9 +3460,9 @@ int hfi1_dms_impl_make_data_requests(struct hfi1_dms *dms, struct hfi1_dms_rx_tr
 	s32 tid_set;
 	int rc = 0;
 
-	DMS_BUG_ON(dms == NULL);
-	DMS_BUG_ON(rx_tracker == NULL);
-	DMS_BUG_ON(rx_tracker->tx_rift_index == HFI1_DMS_RIFT_INDEX_NOT_SET);
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!rx_tracker);
+	DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.remote_rift_index));
 
 	tid_set = hfi1_dms_impl_tid_set_peek(dms);
 
@@ -3064,33 +3545,6 @@ int calculate_mr_page_offset(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 
 	return 0;
 }
 
-int hfi1_dms_read_start_sdma_work(struct hfi1_dms *dms, struct hfi1_dms_work_item *item)
-{
-	int ret;
-	DMS_BUG_ON(!dms);
-	DMS_BUG_ON(!item);
-	static_assert(sizeof(struct dms_proto_read_sdma_parameters) <= sizeof(item->data));
-
-	struct dms_proto_read_sdma_parameters * sdma_parameters = (struct dms_proto_read_sdma_parameters *)item->data;
-
-	// sdma send the "data" responses
-	struct hfi1_dms_tx_tracker *tx_tracker = sdma_parameters->tx_tracker;
-	ret = hfi1_dms_sdma_send(dms, sdma_parameters);
-	if (ret < 0) {
-		if (ret != -EAGAIN) {
-			// whoa. something bad happened. now what?
-		}
-		return ret;
-	}
-
-	tx_tracker->payload_remaining -= sdma_parameters->nbytes; // TODO: decrement payload_remaining on sdma completion not send
-	if (tx_tracker->payload_remaining == 0 && dms->counters.last_sdma_sent == 0) {
-		dms->counters.last_sdma_sent = ktime_get();
-	}
-
-	return 0;
-}
-
 int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_handle_read_start_parameters const parameters)
 {
 	u64 start;
@@ -3115,10 +3569,7 @@ int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_handle
 	}
 
 	if (!access) {
-		//pr_debug("Access not found for key %llu.\n", parameters.dms_key);
-		//reason = HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND;				// this might be wrong because of the race condition???
-		//goto nack;
-		return -ENOMSG;
+		return -ENOMSG;	// retry
 	}
 
 	ret = calculate_access_mr_page_offset(dms, access, parameters.offset, parameters.tbytes, &page_offset);
@@ -3133,86 +3584,39 @@ int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_handle
 		if (ret == -EBUSY) {
 			pr_info("Unable to begin transfer on ephemeral access %llu (0x%016llx) because another transfer is already active.\n", parameters.dms_key, parameters.dms_key);
 			reason = HFI1_DMS_ERR_TYPE_ACCESS_BUSY;
-		} else {
-			pr_info("Unable to begin transfer on access %llu (0x%016llx); ret = %d\n", parameters.dms_key, parameters.dms_key, ret);
-			reason = HFI1_DMS_ERR_TYPE_ACCESS_FAILED;
 		}
 		goto nack;
 	}
 
-	tx_tracker = (struct hfi1_dms_tx_tracker *) hfi1_dms_impl_tracker_new(&dms->tx_trackers);
-	DMS_WARN_ON(!tx_tracker);
+	tx_tracker = hfi1_dms_impl_tx_tracker_read_new(dms, parameters.tbytes, page_offset, parameters.slid,
+			parameters.rx_rift_index, access, parameters.head_misalignment, parameters.include_fixup_data, parameters.rx_id,
+			parameters.size_qw, parameters.tid_info);
+	if (!tx_tracker) {
+		access_xfer_cancel(dms, access);
+		reason = HFI1_DMS_ERR_TYPE_NO_MEMORY;
+		goto nack;
+	}
 
-	tx_tracker->xfer_start_byte_offset = page_offset;
-	tx_tracker->read.access = access;
-	tx_tracker->total_payload = parameters.tbytes;
-	tx_tracker->payload_remaining = parameters.tbytes;
-	tx_tracker->op = HFI1_DMS_TX_TRACKER_OP_RDMA_READ;
-	tx_tracker->remote_lid = parameters.slid;
-	tx_tracker->remote_rift_index = parameters.rx_rift_index;
-
-	ret = _rift_reserve(&dms->tx_rift, &tx_tracker->rift_index);
+	ret = _rift_reserve(&dms->tx_rift, &tx_tracker->hdr.local_rift_index);
 	if (ret < 0) {
-		//
-		// TODO 007 - add to "tx rift waiters" queue .. access_xfer_cancel(dms, access);
-		//
-		return 0;
+		_rift_waitlist_add(&dms->tx_rift, &tx_tracker->hdr.dlist);
+		return 0; // try again later
 	}
-	_rift_assign(&dms->tx_rift, (union hfi1_dms_tracker *)tx_tracker, tx_tracker->rift_index);
+	_rift_assign(&dms->tx_rift, (union hfi1_dms_tracker *)tx_tracker, tx_tracker->hdr.local_rift_index);
 
-	if (parameters.tbytes <= 16) {
-		union hfi1_dms_cmd_read_response_small small_cmd =
-			hfi1_dms_cmd_read_response_small_make(dms, access->mr, tx_tracker->xfer_start_byte_offset, parameters.tbytes, parameters.slid, parameters.rx_rift_index, tx_tracker->rift_index);
-		ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&small_cmd);
-		if (ret < 0) {
-			pr_err("Unable to send read response small.\n");
-			_rift_release(&dms->tx_rift, tx_tracker->rift_index);
-			access_xfer_cancel(dms, tx_tracker->read.access);
-			hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
-			return 0; // do not attempt again?
-		}
-		return 0;
-	}
-
-	struct dms_proto_read_sdma_parameters sdma_parameters = {
-		.tx_tracker = tx_tracker,
-		.mr = mr,
-		.page_offset = page_offset + parameters.head_misalignment,
-		.nbytes = parameters.size_qw << 3,
-		.tid_info = parameters.tid_info,
-		.rx_id = parameters.rx_id,
-		.head = 0,
-		.tail = 0,
-		.msg_type = HFI1_DMS_MSG_TYPE_DATA_START
-	};
-
-	if (parameters.include_fixup_data) {
-		struct hfi1_dms_mr * mr = tx_tracker->read.access->mr;
-		u64 xfer_start_byte_offset = tx_tracker->xfer_start_byte_offset;
-		u64 total_payload = tx_tracker->total_payload;
-		sdma_parameters.head = hfi1_dms_impl_slow_read_from_user(mr, xfer_start_byte_offset, sizeof(u64));
-		sdma_parameters.tail = hfi1_dms_impl_slow_read_from_user(mr, xfer_start_byte_offset + total_payload - sizeof(u64), sizeof(u64));
-	}
-
-	// sdma send the "data" responses
-	ret = hfi1_dms_sdma_send(dms, &sdma_parameters);
-	if (ret == 0) {
-		tx_tracker->payload_remaining -= sdma_parameters.nbytes; // TODO: decrement payload_remaining on sdma completion not send
-		if (tx_tracker->payload_remaining == 0 && dms->counters.last_sdma_sent == 0) {
-			dms->counters.last_sdma_sent = ktime_get();
-		}
-	} else if (ret == -EAGAIN) {
-			pr_debug("Failed to sdma the 'read data' packet(s) because all engines are busy; add to work queue and try again later\n");
-			hfi1_dms_impl_queue_work_item(dms, (void*)&sdma_parameters, sizeof(sdma_parameters), hfi1_dms_read_start_sdma_work);
-	} else {
-		// whoa. something bad happened.
-		return ret;  // TODO 009 - blocksome - we can't just ignore this because the other side is waiting for a response. must RESPOND with an ERROR
+	ret = _dms_tx_rift_continue_read_start(dms, tx_tracker);
+	if (ret < 0) {
+		_rift_release(&dms->tx_rift, tx_tracker->hdr.local_rift_index);
+		access_xfer_cancel(dms, access);
+		hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
+		reason = HFI1_DMS_ERR_TYPE_NO_MEMORY;
+		goto nack;
 	}
 
 	end = dms_rdtsc();
 	dms->counters.handle_data_request += end - start;
 
-	return ret;
+	return 0; // Success
 
 nack:
 	union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, HFI1_DMS_MSG_TYPE_READ_START, reason, parameters.slid, parameters.rx_rift_index);
@@ -3229,8 +3633,19 @@ int hfi1_dms_impl_handle_read_start_work(struct hfi1_dms *dms, struct hfi1_dms_w
 	struct hfi1_dms_handle_read_start_parameters const parameters = *((struct hfi1_dms_handle_read_start_parameters *)item->data);
 	int ret = hfi1_dms_impl_handle_read_start(dms, parameters);
 
-	if (ret == -ENOMSG)
-		ret = -EAGAIN;
+	if (ret == -ENOMSG) {
+		if (ktime_to_ns(ktime_sub(dms->now, item->enqueue_time)) > HFI1_DMS_ACCESS_MAX_RETRY_TIME_NS) {
+			// "Access not found for key" parameters.dms_key
+			union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, HFI1_DMS_MSG_TYPE_READ_START, HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND, parameters.slid, parameters.rx_rift_index);
+			ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&nack_cmd);
+			if (ret < 0) {
+				pr_err("Failed to send or enqueue nack packet! ret = %d\n", ret);
+			}
+			return 0;
+		} else {
+			ret = -EAGAIN;
+		}
+	}
 
 	return ret;
 }
@@ -3267,72 +3682,49 @@ int hfi1_dms_impl_handle_read_start_packet(struct hfi1_dms *dms, union hfi1_dms_
 
 int hfi1_dms_impl_handle_data_request(struct hfi1_dms *dms, struct dms_handle_data_request_parameters const *parameters)
 {
-	u64 start;
+	u64 start, end;
 	struct hfi1_dms_tx_tracker *tx_tracker;
 	int ret = 0;
-	u64 end;
-	struct hfi1_dms_mr * mr;
 
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(parameters == NULL);
 
 	start = dms_rdtsc();
-	if (dms->counters.rcv_first_rr == 0) {
-		dms->counters.rcv_first_rr = ktime_get();
+
+	u16 const tx_rift_index = parameters->tx_rift_index;
+	DMS_BUG_ON(_rift_key_error(tx_rift_index));
+
+	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, tx_rift_index);
+	if (!tx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", tx_rift_index, _rift_key_generation(tx_rift_index), _rift_key_index(tx_rift_index));
+		return 0;
 	}
-	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, parameters->tx_rift_index);
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)tx_tracker);
 
 	DMS_BUG_ON(tx_tracker == NULL);
 	DMS_BUG_ON((tx_tracker->op != HFI1_DMS_TX_TRACKER_OP_RDMA_READ) && (tx_tracker->op != HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE));
 
-	if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) {
-		mr = tx_tracker->write.mr;
-	} else { // HFI1_DMS_TX_TRACKER_OP_RDMA_READ
-		mr = tx_tracker->read.access->mr;
-	}
-
-	struct dms_proto_read_sdma_parameters const sdma_parameters = {
+	struct hfi1_dms_sdma_parameters const sdma_parameters = {
 		.tx_tracker = tx_tracker,
-		.mr = mr,
+		.mr = (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) ? tx_tracker->write.mr : tx_tracker->read.access->mr,
 		.page_offset = tx_tracker->xfer_start_byte_offset + parameters->sbuf_offset,
 		.nbytes = parameters->size_qw << 3,
 		.tid_info = parameters->tid_info,
+		.sdma_type = HFI1_DMS_SDMA_TYPE_DATA,
 		.rx_id = parameters->rx_id,
-		.head = 0,
-		.tail = 0,
-		.msg_type = HFI1_DMS_MSG_TYPE_DATA
+		.include_fixup_data = 0,
 	};
 
-	// sdma send the "data" responses
-	ret = hfi1_dms_sdma_send(dms, &sdma_parameters);
-	if (ret < 0) {
-		if (ret == -EAGAIN) {
-			// Failed to sdma the 'read data' packet(s) because all engines are busy; add to work queue and try again later
-			return -EAGAIN;
-		}
-		// whoa. something bad happened.
-		return ret;  // FIXME - blocksome - we can't just ignore this because the other side is waiting for a response. must RESPOND with an ERROR
-	}
-
-	tx_tracker->payload_remaining -= sdma_parameters.nbytes; // TODO: decrement payload_remaining on sdma completion not send
-	if (tx_tracker->payload_remaining == 0 && dms->counters.last_sdma_sent == 0) {
-		dms->counters.last_sdma_sent = ktime_get();
+	if (_sdma_waitlist_peek(dms)) {
+		ret = _sdma_waitlist_add(dms, &sdma_parameters);
+		_sdma_waitlist_poll(dms);
+	} else if (hfi1_dms_sdma_send(dms, &sdma_parameters) < 0) {
+		ret = _sdma_waitlist_add(dms, &sdma_parameters);
 	}
 
 	end = dms_rdtsc();
 	dms->counters.handle_data_request += end - start;
-
-	return ret;
-}
-
-int hfi1_dms_impl_handle_data_request_work(struct hfi1_dms *dms, struct hfi1_dms_work_item *item)
-{
-	static_assert(sizeof(struct dms_handle_data_request_parameters) <= sizeof(item->data));
-	struct dms_handle_data_request_parameters const * parameters = (struct dms_handle_data_request_parameters const *)item->data;
-	int ret = hfi1_dms_impl_handle_data_request(dms, parameters);
-
-	if (ret == -ENOMSG)
-		ret = -EAGAIN;
 
 	return ret;
 }
@@ -3348,10 +3740,7 @@ int hfi1_dms_impl_handle_data_request_packet(struct hfi1_dms *dms, union hfi1_dm
 		.tx_rift_index = pkt->info.tx_rift_index,
 		.rx_id = hdr->bth[0] >> 24,
 	};
-	int ret = hfi1_dms_impl_handle_data_request(dms, &parameters);
-	if (ret < 0) {
-		return hfi1_dms_impl_queue_work_item(dms, (void*)&parameters, sizeof(parameters), hfi1_dms_impl_handle_data_request_work);
-	}
+	hfi1_dms_impl_handle_data_request(dms, &parameters);
 
 	return 0;
 }
@@ -3405,9 +3794,18 @@ int hfi1_dms_impl_handle_data_request_small(struct hfi1_dms *dms, union hfi1_dms
 	size = drs->info.size;
 	rx_rift_index = drs->info.rx_rift_index;
 
-	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, drs->info.tx_rift_index);
-	DMS_BUG_ON(tx_tracker == NULL);
+	u16 const tx_rift_index = drs->info.tx_rift_index;
+	DMS_BUG_ON(_rift_key_error(tx_rift_index));
+
+	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, tx_rift_index);
+	if (!tx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", tx_rift_index, _rift_key_generation(tx_rift_index), _rift_key_index(tx_rift_index));
+		return 0;
+	}
+
 	DMS_BUG_ON(tx_tracker->op != HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE);
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)tx_tracker);
 
 	mr = tx_tracker->write.mr;
 	page_offset = tx_tracker->xfer_start_byte_offset;
@@ -3422,7 +3820,7 @@ int hfi1_dms_impl_handle_data_request_small(struct hfi1_dms *dms, union hfi1_dms
 	}
 
 	dlid = hfi1_dms_lrh16B_slid_get((u32 *) &hdr->lrh[0]);
-	cmd = hfi1_dms_proto_cmd_data_small_make(dms, dlid, tx_tracker->rift_index, rx_rift_index, data[0], data[1]);
+	cmd = hfi1_dms_proto_cmd_data_small_make(dms, dlid, tx_tracker->hdr.local_rift_index, rx_rift_index, data[0], data[1]);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 	if (ret < 0) {
 		pr_err("Failed to pio send small data request response.\n");
@@ -3496,13 +3894,23 @@ void hfi1_dms_impl_handle_data_request_fixup(struct hfi1_dms *dms, struct hfi1_d
 	DMS_BUG_ON(!parameters);
 	DMS_BUG_ON(parameters->size <= 16); // must use "small" instead
 
-	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, parameters->tx_rift_index);
+	u16 const tx_rift_index = parameters->tx_rift_index;
+	DMS_BUG_ON(_rift_key_error(tx_rift_index));
+
+	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, tx_rift_index);
+	if (!tx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", tx_rift_index, _rift_key_generation(tx_rift_index), _rift_key_index(tx_rift_index));
+		return;
+	}
+
 	DMS_BUG_ON(tx_tracker->op != HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE);
+
+	hfi1_dms_tracker_timestamp_update(dms, (union hfi1_dms_tracker *)tx_tracker);
 
 	head = hfi1_dms_impl_slow_read_from_user(tx_tracker->write.mr, tx_tracker->xfer_start_byte_offset, sizeof(u64));
 	tail = hfi1_dms_impl_slow_read_from_user(tx_tracker->write.mr, tx_tracker->xfer_start_byte_offset + parameters->size - sizeof(u64), sizeof(u64));
 
-	cmd = hfi1_dms_proto_cmd_data_fixup_make(dms, tx_tracker->remote_lid, parameters->tx_rift_index, parameters->rx_rift_index, head, tail);
+	cmd = hfi1_dms_proto_cmd_data_fixup_make(dms, tx_tracker->hdr.remote_lid, parameters->tx_rift_index, parameters->rx_rift_index, head, tail);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 	if (ret < 0) {
 		pr_err("Failed to pio send data fixup.\n");
@@ -3524,7 +3932,7 @@ int hfi1_dms_impl_handle_data_request_fixup_packet(struct hfi1_dms *dms, union h
 	return 0;
 }
 
-int hfi1_dms_impl_handle_ack(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
+void hfi1_dms_impl_handle_ack(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
 {
 	union hfi1_dms_proto_pkt_ack * ack;
 	struct hfi1_dms_tx_tracker *tx_tracker;
@@ -3535,12 +3943,16 @@ int hfi1_dms_impl_handle_ack(struct hfi1_dms *dms, union hfi1_dms_16b_header *hd
 
 	ack = (union hfi1_dms_proto_pkt_ack *)hdr;
 
-	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, ack->info.tx_rift_index);
-	DMS_WARN_ON(tx_tracker == NULL);
+	u16 const tx_rift_index = ack->info.tx_rift_index;
+	DMS_BUG_ON(_rift_key_error(tx_rift_index));
+
+	tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, tx_rift_index);
+	if (!tx_tracker) {
+		dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", tx_rift_index, _rift_key_generation(tx_rift_index), _rift_key_index(tx_rift_index));
+		return;
+	}
 
 	hfi1_dms_handle_tx_tracker_completion(dms, ack->info.tx_rift_index, ack->info.flags, ack->info.imm_data);
-
-	return 0; // Success
 }
 
 int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct dms_pkt_write_start_parameters const parameters)
@@ -3564,10 +3976,7 @@ int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct dms_pkt_write_
 	}
 	
 	if (!access) {
-		//pr_info("Access not found for key %llu.\n", parameters.dms_key);
-		//reason = HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND; // this might be wrong because of the race condition???
-		//goto nack;
-		return -ENOMSG;
+		return -ENOMSG; // retry
 	}
 
 	ret = calculate_access_mr_page_offset(dms, access, parameters.offset, parameters.size, &byte_offset_from_first_mr_page);
@@ -3577,7 +3986,7 @@ int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct dms_pkt_write_
 	}
 
 	rx_tracker = hfi1_dms_impl_rx_tracker_write_new(dms, parameters.size, parameters.slid, access->mr, byte_offset_from_first_mr_page, parameters.flags, parameters.imm_data, parameters.tx_rift_index, access);
-	if (rx_tracker == NULL) {
+	if (!rx_tracker) {
 		reason = HFI1_DMS_ERR_TYPE_NO_MEMORY;
 		goto nack;
 	}
@@ -3587,24 +3996,21 @@ int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct dms_pkt_write_
 		if (ret == -EBUSY) {
 			pr_info("Unable to begin transfer on ephemeral access %llu (0x%016llx) because another transfer is already active.\n", parameters.dms_key, parameters.dms_key);
 			reason = HFI1_DMS_ERR_TYPE_ACCESS_BUSY;
-		} else {
-			pr_info("Unable to begin transfer on access %llu (0x%016llx); ret = %d\n", parameters.dms_key, parameters.dms_key, ret);
-			reason = HFI1_DMS_ERR_TYPE_ACCESS_FAILED;
 		}
 		hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
 		goto nack;
 	}
 
-	ret = _rift_reserve(&dms->rx_rift, &rx_tracker->rift_index);
+	ret = _rift_reserve(&dms->rx_rift, &rx_tracker->hdr.local_rift_index);
 	if (ret < 0) {
-		_rift_waitlist_add(&dms->rx_rift, &rx_tracker->dlist);
+		_rift_waitlist_add(&dms->rx_rift, &rx_tracker->hdr.dlist);
 		return 0; // try again later
 	}
+	_rift_assign(&dms->rx_rift, (union hfi1_dms_tracker *)rx_tracker, rx_tracker->hdr.local_rift_index);
 
-	_rift_assign(&dms->rx_rift, (union hfi1_dms_tracker *)rx_tracker, rx_tracker->rift_index);
 	ret = _dms_rx_rift_continue_write_start(dms, rx_tracker);
 	if (ret < 0) {
-		_rift_release(&dms->rx_rift, rx_tracker->rift_index);
+		_rift_release(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
 		access_xfer_cancel(dms, access);
 		hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
 		reason = HFI1_DMS_ERR_TYPE_NO_MEMORY;
@@ -3628,8 +4034,19 @@ int hfi1_dms_impl_handle_write_start_work(struct hfi1_dms *dms, struct hfi1_dms_
 	struct dms_pkt_write_start_parameters const parameters = *((struct dms_pkt_write_start_parameters *)item->data);
 	int ret = hfi1_dms_impl_handle_write_start(dms, parameters);
 
-	if (ret == -ENOMSG)
-		ret = -EAGAIN;
+	if (ret == -ENOMSG) {
+		if (ktime_to_ns(ktime_sub(dms->now, item->enqueue_time)) > HFI1_DMS_ACCESS_MAX_RETRY_TIME_NS) {
+			// "Access not found for key" parameters.dms_key
+			union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, HFI1_DMS_MSG_TYPE_WRITE_START, HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND, parameters.slid, parameters.tx_rift_index);
+			ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&nack_cmd);
+			if (ret < 0) {
+				pr_err("Failed to send or enqueue nack packet! ret = %d\n", ret);
+			}
+			return 0;
+		} else {
+			ret = -EAGAIN;
+		}
+	}
 
 	return ret;
 }
@@ -3656,6 +4073,120 @@ int hfi1_dms_impl_handle_write_start_packet(struct hfi1_dms *dms, union hfi1_dms
 	return 0;
 }
 
+void hfi1_dms_tx_tracker_cancel(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker, int err)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!tx_tracker);
+
+	u16 const key = tx_tracker->hdr.local_rift_index;
+	enum hfi1_dms_rift_err const status = _rift_key_error(key);
+
+	DMS_BUG_ON(status == HFI1_DMS_RIFT_ERR_INDEX_DISABLED);
+
+	if (status != HFI1_DMS_RIFT_ERR_INDEX_NOT_SET) {
+		// must check the "sdma waiter" list; potentially multiple
+		struct hfi1_dms_sdma_tracker *sdma_waiter = (struct hfi1_dms_sdma_tracker *) dms->sdma_waiters.waitlist.head;
+		while (sdma_waiter) {
+			struct hfi1_dms_sdma_tracker *next = (struct hfi1_dms_sdma_tracker *) sdma_waiter->hdr.dlist.next;
+			if (sdma_waiter->parameters.tx_tracker == tx_tracker) {
+				hfi1_dms_impl_dlist_remove(&dms->sdma_waiters.waitlist, (struct hfi1_dms_dlist_element *)sdma_waiter);
+				hfi1_dms_impl_dlist_push(&dms->trackers.free, (struct hfi1_dms_dlist_element *)sdma_waiter);
+			}
+			sdma_waiter = next;
+		}
+		_rift_release(&dms->tx_rift, key);
+
+	} else {
+		// must only be in the "tx rift waiter" list; and, therefore, NOT in the "sdma waiter" list
+		hfi1_dms_impl_dlist_remove(&dms->tx_rift.waitlist, (struct hfi1_dms_dlist_element *)tx_tracker);
+	}
+
+	if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
+		access_xfer_cancel(dms, tx_tracker->read.access);
+	} else if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) {
+		tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, err);
+	}
+	hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
+}
+
+void hfi1_dms_rx_tracker_cancel(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, int err)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!rx_tracker);
+
+	u16 const key = rx_tracker->hdr.local_rift_index;
+	enum hfi1_dms_rift_err const status = _rift_key_error(key);
+
+	DMS_BUG_ON(status == HFI1_DMS_RIFT_ERR_INDEX_DISABLED);
+
+	if (status != HFI1_DMS_RIFT_ERR_INDEX_NOT_SET) {
+
+		// remove from tidset waiter rings
+		u64 cancel = 0;
+		for (enum hfi1_dms_tidset_waiter_type type = HFI1_DMS_TIDSET_WAITER_TYPE_READ; type < HFI1_DMS_TIDSET_WAITER_TYPE_COUNT; ++type) {
+			u64 const head =  dms->tidset_waiters[type].head;
+			u64 const tail =  dms->tidset_waiters[type].tail;
+			u64 const count = tail - head;
+			u64 const mask = HFI1_DMS_ARRAY_SIZE(dms->tidset_waiters[type].ring) - 1;
+			
+			if ((struct hfi1_dms_rx_tracker *)_rift_lookup(&dms->rx_rift, dms->tidset_waiters[type].ring[head & mask]) == rx_tracker) {
+				// special case: remove from head;
+				dms->tidset_waiters[type].head += 1;
+				break;				
+			} else if ((struct hfi1_dms_rx_tracker *)_rift_lookup(&dms->rx_rift, dms->tidset_waiters[type].ring[tail & mask]) == rx_tracker) {
+				// special case: remove from tail;
+				dms->tidset_waiters[type].tail -= 1;
+				break;				
+			} else {
+				// general case: remove from middle; must iterate entire ring in order to "compact" the ring after
+				// potentially removing a middle entry.
+
+				for (u64 i = 0; i < count; ++i) {
+					u64 const idx = (head + i) & mask;
+					union hfi1_dms_tracker * tracker = _rift_lookup(&dms->rx_rift, dms->tidset_waiters[type].ring[idx]);
+					if ((struct hfi1_dms_rx_tracker *)tracker == rx_tracker) {
+						cancel += 1;
+					} else {
+						u64 const new_idx = (head + i - cancel) & mask;
+						dms->tidset_waiters[type].ring[new_idx] = dms->tidset_waiters[type].ring[idx];
+					}
+				}
+				if (cancel) {
+					u64 const new_tail = head + count - cancel;
+					dms->tidset_waiters[type].tail = new_tail;
+					break;
+				}
+			}
+		}
+
+		// even with/without tidset waiter(s) there might be one or more active tidsets that must be disabled.
+		s32 const sz = (s32) HFI1_DMS_ARRAY_SIZE(dms->read_requests);
+		for (s32 tid_set = 0; tid_set < sz; ++tid_set) {
+			union hfi1_dms_tracker * tracker = (union hfi1_dms_tracker *) dms->read_requests[tid_set].rx_tracker;
+			if ((struct hfi1_dms_rx_tracker *)tracker == rx_tracker) {
+				hfi1_dms_tid_set_disable(dms, tid_set);
+			}
+		}		
+
+		// last, cancel the rx rift entry
+		_rift_cancel(&dms->rx_rift, key);
+
+	} else {
+		// must only be in the "rx rift waiter" list; and, therefore, NOT in "tidset waiter"
+		hfi1_dms_impl_dlist_remove(&dms->rx_rift.waitlist, (struct hfi1_dms_dlist_element *)rx_tracker);
+	}
+
+	if (rx_tracker->op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
+		rx_tracker->read.completion.fn(&rx_tracker->read.completion.cookie, err);
+	} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
+		access_xfer_cancel(dms, rx_tracker->write.access);
+	}
+	hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
+
+	_dms_tidset_waiters_poll(dms);
+	_dms_rx_rift_poll(dms);
+}
+
 void hfi1_dms_impl_handle_nack_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, void *ebuf)
 {
 	union hfi1_dms_pkt_nack *nack;
@@ -3669,28 +4200,48 @@ void hfi1_dms_impl_handle_nack_packet(struct hfi1_dms *dms, union hfi1_dms_16b_h
 	nack = (union hfi1_dms_pkt_nack *)hdr;
 	DMS_WARN_ON(nack->info.err_type == HFI1_DMS_ERR_TYPE_NONE);
 
+	u16 const nack_rift_index = nack->info.rift_index;
+	DMS_BUG_ON(_rift_key_error(nack_rift_index));
+
+	int err = 0;
+	switch (nack->info.err_type) {
+		case HFI1_DMS_ERR_TYPE_CLIENT_NOT_FOUND:
+			err = -EINVAL;
+			break;
+		case HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND:
+			err = -EINVAL;
+			break;
+		case HFI1_DMS_ERR_TYPE_ACCESS_RANGE_VIOLATION:
+			err = -EACCES;
+			break;
+		case HFI1_DMS_ERR_TYPE_NO_MEMORY:
+			err = -ENOMEM;
+			break;
+		case HFI1_DMS_ERR_TYPE_ACCESS_BUSY:
+			err = -EBUSY;
+			break;
+		default:
+			err = -EPROTO;
+			break;
+	}
+
 	switch (nack->info.msg_type) {
 		case HFI1_DMS_MSG_TYPE_WRITE_START:
-			tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, nack->info.rift_index);
-			DMS_BUG_ON(!tx_tracker);
-
-			tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, -EINVAL);
-
-			_rift_release(&dms->tx_rift, nack->info.rift_index);
-			hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
+			tx_tracker = (struct hfi1_dms_tx_tracker *) _rift_lookup(&dms->tx_rift, nack_rift_index);
+			if (!tx_tracker) {
+				dd_dev_warn(dms->dd, "Ignore invalid tx rift key 0x%04hx (%hu %hu)\n", nack_rift_index, _rift_key_generation(nack_rift_index), _rift_key_index(nack_rift_index));
+				return;
+			}
+			hfi1_dms_tx_tracker_cancel(dms, tx_tracker, err);
 			break;
 
 		case HFI1_DMS_MSG_TYPE_READ_START:
-			rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, nack->info.rift_index);
-			DMS_BUG_ON(!rx_tracker);
-			// TODO implement rx cancel
-			//
-			// 1. CANCEL the rx tracker transfer
-			// 2. THEN set payload_remaining to zero
-			// 3. THEN complete the rx tracker with error status.
-			//
-			rx_tracker->payload_remaining = 0; // temporary until rx cancel is implemented
-			hfi1_dms_rx_tracker_handle_completion(dms, rx_tracker, -EINVAL, 0);
+			rx_tracker = (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, nack_rift_index);
+			if (!rx_tracker) {
+				dd_dev_warn(dms->dd, "Ignore invalid rx rift key 0x%04hx (%hu %hu)\n", nack_rift_index, _rift_key_generation(nack_rift_index), _rift_key_index(nack_rift_index));
+				return;
+			}
+			hfi1_dms_rx_tracker_cancel(dms, rx_tracker, err);
 			break;
 
 		default:
@@ -3698,6 +4249,7 @@ void hfi1_dms_impl_handle_nack_packet(struct hfi1_dms *dms, union hfi1_dms_16b_h
 			break;
 	}
 }
+
 
 u32 hfi1_dms_impl_data_request_size_qw_get(union hfi1_dms_16b_header *hdr)
 {
@@ -3764,7 +4316,7 @@ static u32 hfi1_dms_impl_data_pktlen_dws_from_payload_dws(u32 payload_dws)
 }
 
 void hfi1_dms_impl_data_packet_header_make(struct hfi1_dms *dms, union hfi1_dms_proto_cmd *cmd, u32 nbytes, u32 dlid, u8 rx, u32 tid_info, u16 tx_rift_index,
-		u64 head, u64 tail, enum hfi1_dms_msg_type msg_type)
+		u64 head, u64 tail, enum hfi1_dms_sdma_type sdma_type)
 {
 	u32 payload_dws;
 	u32 pbc_pktlen_dws;
@@ -3776,12 +4328,15 @@ void hfi1_dms_impl_data_packet_header_make(struct hfi1_dms *dms, union hfi1_dms_
 
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(cmd == NULL);
-	DMS_BUG_ON((msg_type != HFI1_DMS_MSG_TYPE_DATA) && (msg_type != HFI1_DMS_MSG_TYPE_DATA_START));
 
 	payload_dws = (nbytes + 3) >> 2;
 	pbc_pktlen_dws = hfi1_dms_impl_data_pktlen_dws_from_payload_dws(payload_dws);
 	pktlen_qws = pbc_pktlen_dws >> 1;
 
+	enum hfi1_dms_msg_type const msg_type =
+		sdma_type == HFI1_DMS_SDMA_TYPE_DATA ?
+			HFI1_DMS_MSG_TYPE_DATA :
+			HFI1_DMS_MSG_TYPE_DATA_START;
 	data_template = (union hfi1_dms_proto_cmd_data *) &dms->protocol_cmd_templates[msg_type];
 	cmd_data_qw_size = sizeof(union hfi1_dms_proto_cmd_data) >> 3;
 	for (i = 0; i < cmd_data_qw_size; ++i) {
@@ -3931,7 +4486,7 @@ struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_payload(struct sdma_desc *sta
  * 
  */
 struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_first_packet_descriptors(struct hfi1_dms *dms, struct hfi1_dms_impl_fill_state initial_fill_state, u16 tx_rift_index, u32 nbytes, u32 dlid, u8 rx, u32 tid_info, u8 ahg_idx, struct hfi1_dms_ahg_header **out_ahg_mem,
-		u64 head_qw, u64 tail_qw, enum hfi1_dms_msg_type msg_type)
+		u64 head_qw, u64 tail_qw, enum hfi1_dms_sdma_type sdma_type)
 {
 	u64 start;
 	struct sdma_desc *desc;
@@ -3960,7 +4515,7 @@ struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_first_packet_descriptors(stru
 	}
 
 	data_header = (union hfi1_dms_proto_cmd *) ahg_mem->mem_coh.kvaddr;
-	hfi1_dms_impl_data_packet_header_make(dms, data_header, nbytes, dlid, rx, tid_info, tx_rift_index, head_qw, tail_qw, msg_type);
+	hfi1_dms_impl_data_packet_header_make(dms, data_header, nbytes, dlid, rx, tid_info, tx_rift_index, head_qw, tail_qw, sdma_type);
 
 	*desc = (struct sdma_desc){0};
 	phys_addr = ahg_mem->mem_coh.phys_addr;
@@ -3987,7 +4542,7 @@ struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_first_packet_descriptors(stru
 }
 
 int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 page_offset, u32 nbytes, u32 dlid, u8 rx_id, u32 tid_info, u16 tx_rift_index,
-		u64 head_qw, u64 tail_qw, enum hfi1_dms_msg_type msg_type)
+		u64 head_qw, u64 tail_qw, enum hfi1_dms_sdma_type sdma_type)
 {
 	u64 start;
 	u32 tid_offset;
@@ -4037,7 +4592,7 @@ int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 p
 		.page_offset = page_offset,
 	};
 
-	current_fill_state = hfi1_dms_impl_fill_first_packet_descriptors(dms, current_fill_state, tx_rift_index, bytes_first_packet, dlid, rx_id, tid_info, ahg_idx, &dms->ahg_header_stack[nahg_mem], head_qw, tail_qw, msg_type);
+	current_fill_state = hfi1_dms_impl_fill_first_packet_descriptors(dms, current_fill_state, tx_rift_index, bytes_first_packet, dlid, rx_id, tid_info, ahg_idx, &dms->ahg_header_stack[nahg_mem], head_qw, tail_qw, sdma_type);
 	tid += 1;
 	nahg_mem += 1;
 	tid_info = hfi1_dms_tid_info_update_tid(tid_info, tid);
@@ -4047,14 +4602,14 @@ int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 p
 	for (i = 0; i < num_full_mtu_packets; ++i) {
 		// Fill the next MTU packet
 		u64 bytes_to_fill = HFI1_DMS_MAX_PAYLOAD_SIZE;
-		current_fill_state = hfi1_dms_impl_fill_first_packet_descriptors(dms, current_fill_state, tx_rift_index, bytes_to_fill, dlid, rx_id, tid_info, ahg_idx, &dms->ahg_header_stack[nahg_mem], head_qw, tail_qw, msg_type);
+		current_fill_state = hfi1_dms_impl_fill_first_packet_descriptors(dms, current_fill_state, tx_rift_index, bytes_to_fill, dlid, rx_id, tid_info, ahg_idx, &dms->ahg_header_stack[nahg_mem], head_qw, tail_qw, sdma_type);
 		nahg_mem += 1;
 		tid += 1;
 		tid_info = hfi1_dms_tid_info_update_tid(tid_info, tid);
 	}
 
 	if (bytes_last_packet > 0) {
-		current_fill_state = hfi1_dms_impl_fill_first_packet_descriptors(dms, current_fill_state, tx_rift_index, bytes_last_packet, dlid, rx_id, tid_info, ahg_idx, &dms->ahg_header_stack[nahg_mem], head_qw, tail_qw, msg_type);
+		current_fill_state = hfi1_dms_impl_fill_first_packet_descriptors(dms, current_fill_state, tx_rift_index, bytes_last_packet, dlid, rx_id, tid_info, ahg_idx, &dms->ahg_header_stack[nahg_mem], head_qw, tail_qw, sdma_type);
 		nahg_mem += 1;
 		tid += 1;
 		tid_info = hfi1_dms_tid_info_update_tid(tid_info, tid);
@@ -4146,11 +4701,24 @@ int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 p
 	return 0;
 }
 
-int hfi1_dms_sdma_send(struct hfi1_dms *dms, const struct dms_proto_read_sdma_parameters * parameters)
+int hfi1_dms_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_sdma_parameters const * parameters)
 {
+	u64 head, tail;
+
 	struct hfi1_dms_tx_tracker *tx_tracker = parameters->tx_tracker;
-	return hfi1_dms_impl_sdma_send(dms, parameters->mr, parameters->page_offset, parameters->nbytes, tx_tracker->remote_lid, parameters->rx_id, parameters->tid_info, tx_tracker->rift_index,
-		parameters->head, parameters->tail, parameters->msg_type);
+
+	if (parameters->include_fixup_data) {
+		u64 xfer_start_byte_offset = tx_tracker->xfer_start_byte_offset;
+		u64 total_payload = tx_tracker->total_payload;
+		head = hfi1_dms_impl_slow_read_from_user(parameters->mr, xfer_start_byte_offset, sizeof(u64));
+		tail = hfi1_dms_impl_slow_read_from_user(parameters->mr, xfer_start_byte_offset + total_payload - sizeof(u64), sizeof(u64));
+	} else {
+		head = 0;
+		tail = 0;
+	}
+	
+	return hfi1_dms_impl_sdma_send(dms, parameters->mr, parameters->page_offset, parameters->nbytes, tx_tracker->hdr.remote_lid, parameters->rx_id, parameters->tid_info, tx_tracker->hdr.local_rift_index,
+		head, tail, parameters->sdma_type);
 }
 
 int hfi1_dms_impl_work_item_block_alloc(struct hfi1_dms *dms)
@@ -4176,9 +4744,9 @@ int hfi1_dms_impl_work_item_block_alloc(struct hfi1_dms *dms)
 	return 0;
 }
 
-int hfi1_dms_impl_tracker_block_alloc(size_t elemsz, struct hfi1_dms_tracker_mgr *trackers)
+int hfi1_dms_impl_tracker_block_alloc(struct hfi1_dms *dms)
 {
-	size_t sz = sizeof(struct hfi1_dms_dlist_element) + 100 * elemsz;
+	static size_t const sz = sizeof(struct hfi1_dms_dlist_element) + 100 * sizeof(union hfi1_dms_tracker);
 	struct hfi1_dms_dlist_element * block;
 	struct hfi1_dms_dlist_element * tracker;
 	size_t i;
@@ -4188,30 +4756,17 @@ int hfi1_dms_impl_tracker_block_alloc(size_t elemsz, struct hfi1_dms_tracker_mgr
 		return -ENOMEM;
 	}
 
-	hfi1_dms_impl_dlist_push(&trackers->blocklist, block);
+	hfi1_dms_impl_dlist_push(&dms->trackers.blocklist, block);
 
 	tracker = block + 1;
 	for (i = 0; i < 100; ++i) {
-		hfi1_dms_impl_dlist_push(&trackers->free, tracker);
-		tracker = (struct hfi1_dms_dlist_element *)((u64) tracker + elemsz);
+		hfi1_dms_impl_dlist_push(&dms->trackers.free, tracker);
+		tracker = (struct hfi1_dms_dlist_element *)((u64) tracker + sizeof(union hfi1_dms_tracker));
 	}
 
 	return 0;
 }
-int hfi1_dms_impl_rx_tracker_block_alloc(struct hfi1_dms *dms)
-{
-	int ret;
 
-	ret = hfi1_dms_impl_tracker_block_alloc(sizeof(struct hfi1_dms_rx_tracker), &dms->rx_trackers);
-	return ret;
-}
-int hfi1_dms_impl_tx_tracker_block_alloc(struct hfi1_dms *dms)
-{
-	int ret;
-
-	ret = hfi1_dms_impl_tracker_block_alloc(sizeof(struct hfi1_dms_tx_tracker), &dms->tx_trackers);
-	return ret;
-}
 int hfi1_dms_impl_ahg_header_block_alloc(struct hfi1_dms *dms)
 {
 	u64 const AHG_BACKING_ALLOC_SIZE = HFI1_DMS_AHG_HEADER_BLOCK_SIZE * sizeof(union hfi1_dms_proto_cmd);
@@ -4268,34 +4823,25 @@ void hfi1_dms_impl_work_item_block_free(struct hfi1_dms *dms)
 	dms->work_items.free.tail = NULL;
 }
 
-void hfi1_dms_impl_tracker_block_free(struct hfi1_dms *dms, struct hfi1_dms_tracker_mgr *trackers)
+void hfi1_dms_impl_tracker_block_free(struct hfi1_dms *dms)
 {
 	struct hfi1_dms_dlist_element * block;
 
 	DMS_BUG_ON(dms == NULL);
-	DMS_BUG_ON(trackers == NULL);
-	DMS_WARN_ON(trackers->active.head != NULL || trackers->active.tail != NULL);
 
-	block = hfi1_dms_impl_dlist_pop(&trackers->blocklist);
+	block = hfi1_dms_impl_dlist_pop(&dms->trackers.blocklist);
 	while (block) {
 		kfree(block);
-		block = hfi1_dms_impl_dlist_pop(&trackers->blocklist);
+		block = hfi1_dms_impl_dlist_pop(&dms->trackers.blocklist);
 	}
 
-	DMS_BUG_ON(trackers->blocklist.head != NULL);
-	DMS_BUG_ON(trackers->blocklist.tail != NULL);
+	DMS_BUG_ON(dms->trackers.blocklist.head != NULL);
+	DMS_BUG_ON(dms->trackers.blocklist.tail != NULL);
 
-	trackers->free.head = NULL;
-	trackers->free.tail = NULL;
+	dms->trackers.free.head = NULL;
+	dms->trackers.free.tail = NULL;
 }
-void hfi1_dms_impl_rx_tracker_block_free(struct hfi1_dms *dms)
-{
-	hfi1_dms_impl_tracker_block_free(dms, &dms->rx_trackers);
-}
-void hfi1_dms_impl_tx_tracker_block_free(struct hfi1_dms *dms)
-{
-	hfi1_dms_impl_tracker_block_free(dms, &dms->tx_trackers);
-}
+
 void hfi1_dms_impl_ahg_header_block_free(struct hfi1_dms *dms)
 {
 	struct hfi1_dms_ahg_header_block *block;
@@ -4337,24 +4883,96 @@ void hfi1_dms_impl_work_item_free(struct hfi1_dms *dms, struct hfi1_dms_work_ite
 	hfi1_dms_impl_dlist_push(&dms->work_items.free, &item->dlist);
 }
 
-union hfi1_dms_tracker * hfi1_dms_impl_tracker_new(struct hfi1_dms_tracker_mgr *trackers)
+union hfi1_dms_tracker * hfi1_dms_impl_tracker_new(struct hfi1_dms *dms)
 {
 	int ret;
 	struct hfi1_dms_dlist_element * dlist_element;
+	union hfi1_dms_tracker * tracker;
 
-	DMS_BUG_ON(!trackers);
+	DMS_BUG_ON(!dms);
 
-	dlist_element = hfi1_dms_impl_dlist_pop(&trackers->free);
+	dlist_element = hfi1_dms_impl_dlist_pop(&dms->trackers.free);
 	if (dlist_element == NULL) {
-		ret = hfi1_dms_impl_tracker_block_alloc(sizeof(union hfi1_dms_tracker), trackers);
+		ret = hfi1_dms_impl_tracker_block_alloc(dms);
 		if (ret < 0) {
 			return NULL;
 		}
-		dlist_element = hfi1_dms_impl_dlist_pop(&trackers->free);
+		dlist_element = hfi1_dms_impl_dlist_pop(&dms->trackers.free);
 		DMS_BUG_ON(!dlist_element);
 	}
+	tracker = container_of(dlist_element, union hfi1_dms_tracker, hdr.dlist);
 
-	return (union hfi1_dms_tracker *)dlist_element;
+	tracker->hdr.first_activity = dms->now;
+	tracker->hdr.last_activity = dms->now;
+	return tracker;
+}
+
+struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_new(struct hfi1_dms *dms, u32 size,
+		u64 byte_offset_from_first_page, u32 remote_lid, u16 remote_rift_index)
+{
+	struct hfi1_dms_tx_tracker * tx_tracker;
+
+	DMS_BUG_ON(!dms);
+
+	tx_tracker = (struct hfi1_dms_tx_tracker *) hfi1_dms_impl_tracker_new(dms);
+	if (!tx_tracker) {
+		return NULL;
+	}
+
+	tx_tracker->hdr.local_rift_index = _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_NOT_SET);
+	tx_tracker->total_payload = size;
+	tx_tracker->payload_remaining = size;
+	tx_tracker->xfer_start_byte_offset = byte_offset_from_first_page;
+	tx_tracker->hdr.remote_lid = remote_lid;
+	tx_tracker->hdr.remote_rift_index = remote_rift_index;
+
+	return tx_tracker;
+}
+
+struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_write_new(struct hfi1_dms *dms, u32 size,
+		u64 byte_offset_from_first_page, u32 remote_lid, struct hfi1_dms_mr *mr, u64 mr_offset,
+		u16 flags, u64 imm_data, struct hfi1_dms_tracker_completion const *completion, u64 rx_dms_key,
+		u64 rx_offset)
+{
+	struct hfi1_dms_tx_tracker * tx_tracker;
+
+	DMS_BUG_ON(!dms);
+
+	tx_tracker = hfi1_dms_impl_tx_tracker_new(dms, size, byte_offset_from_first_page, remote_lid, _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_NOT_SET));
+	if (tx_tracker) {
+		tx_tracker->op = HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE;
+		tx_tracker->write.mr = mr;
+		tx_tracker->write.completion = *completion;
+		tx_tracker->write.dms_key = rx_dms_key;
+		tx_tracker->write.rx_offset = rx_offset;
+		tx_tracker->write.flags = flags;
+		tx_tracker->write.imm_data = imm_data;
+	}
+
+	return tx_tracker;
+}
+
+struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_read_new(struct hfi1_dms *dms, u32 size,
+		u64 byte_offset_from_first_page, u32 remote_lid, u16 remote_rift_index, struct hfi1_dms_access *access,
+		u8 head_misalignment, u8 include_fixup_data, u8 rx_id, u16 size_qw, u32 tid_info)
+{
+	struct hfi1_dms_tx_tracker * tx_tracker;
+
+	DMS_BUG_ON(!dms);
+
+	tx_tracker = hfi1_dms_impl_tx_tracker_new(dms, size, byte_offset_from_first_page, remote_lid, remote_rift_index);
+	if (tx_tracker) {
+		tx_tracker->op = HFI1_DMS_TX_TRACKER_OP_RDMA_READ;
+		tx_tracker->read.access = access;
+
+		tx_tracker->read.start.head_misalignment = head_misalignment;
+		tx_tracker->read.start.include_fixup_data = include_fixup_data;
+		tx_tracker->read.start.rx_id = rx_id;
+		tx_tracker->read.start.nbytes = size_qw << 3;
+		tx_tracker->read.start.tid_info = tid_info;
+	}
+
+	return tx_tracker;
 }
 
 struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_new(struct hfi1_dms *dms,
@@ -4363,9 +4981,12 @@ struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_new(struct hfi1_dms *dms,
 {
 	struct hfi1_dms_rx_tracker * rx_tracker;
 
-	DMS_BUG_ON(dms == NULL);
+	DMS_BUG_ON(!dms);
 
-	rx_tracker = (struct hfi1_dms_rx_tracker *) hfi1_dms_impl_tracker_new(&dms->rx_trackers);
+	rx_tracker = (struct hfi1_dms_rx_tracker *) hfi1_dms_impl_tracker_new(dms);
+	if (!rx_tracker) {
+		return NULL;
+	}
 
 	// initialize tracker state
 	rx_tracker->total_payload = size;
@@ -4374,10 +4995,9 @@ struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_new(struct hfi1_dms *dms,
 	rx_tracker->sbuf_offset = 0;
 	rx_tracker->rbuf_offset = rbuf_offset;
 	rx_tracker->rbuf_start_offset = rbuf_offset;
-	rx_tracker->remote_lid = remote_lid;
-
-	rx_tracker->rift_index = (u16)HFI1_DMS_RIFT_INDEX_NOT_SET;
-	rx_tracker->tx_rift_index = HFI1_DMS_RIFT_INDEX_NOT_SET;
+	rx_tracker->hdr.remote_lid = remote_lid;
+	rx_tracker->hdr.local_rift_index = _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_NOT_SET);
+	rx_tracker->hdr.remote_rift_index = _rift_key_create_err(HFI1_DMS_RIFT_ERR_INDEX_NOT_SET);
 	rx_tracker->sbuf_start_offset = 0;
 
 	rx_tracker->rbuf = rbuf;
@@ -4427,7 +5047,7 @@ struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_write_new(struct hfi1_dms *
 	DMS_BUG_ON(dms == NULL);
 
 	rx_tracker = hfi1_dms_impl_rx_tracker_new(dms, size, remote_lid, rbuf, rbuf_offset);
-	rx_tracker->tx_rift_index = tx_rift_index;
+	rx_tracker->hdr.remote_rift_index = tx_rift_index;
 
 	rx_tracker->op = HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE;
 	rx_tracker->write.access = access;
@@ -4446,7 +5066,7 @@ struct hfi1_dms_ahg_header *hfi1_dms_impl_ahg_header_get(struct hfi1_dms *dms)
 
 	header = hfi1_dms_impl_dlist_pop(&dms->ahg_headers.free);
 	if (header == NULL) {
-		dd_dev_info(dms->dd, "dms: No free AHG header available, allocating a new block.\n");
+		dd_dev_dbg(dms->dd, "dms: No free AHG header available, allocating a new block.\n");
 		hfi1_dms_impl_ahg_header_block_alloc(dms);
 		header = hfi1_dms_impl_dlist_pop(&dms->ahg_headers.free);
 		DMS_WARN_ON(header == NULL);
@@ -4458,15 +5078,15 @@ struct hfi1_dms_ahg_header *hfi1_dms_impl_ahg_header_get(struct hfi1_dms *dms)
 
 void hfi1_dms_impl_rx_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker * rx_tracker)
 {
-	DMS_BUG_ON(rx_tracker->dlist.prev != NULL);
-	DMS_BUG_ON(rx_tracker->dlist.next != NULL);
-	hfi1_dms_impl_dlist_push(&dms->rx_trackers.free, (struct hfi1_dms_dlist_element *)rx_tracker);
+	DMS_BUG_ON(rx_tracker->hdr.dlist.prev != NULL);
+	DMS_BUG_ON(rx_tracker->hdr.dlist.next != NULL);
+	hfi1_dms_impl_dlist_push(&dms->trackers.free, (struct hfi1_dms_dlist_element *)rx_tracker);
 }
 void hfi1_dms_impl_tx_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker * tx_tracker)
 {
-	DMS_BUG_ON(tx_tracker->dlist.prev != NULL);
-	DMS_BUG_ON(tx_tracker->dlist.next != NULL);
-	hfi1_dms_impl_dlist_push(&dms->tx_trackers.free, (struct hfi1_dms_dlist_element *)tx_tracker);
+	DMS_BUG_ON(tx_tracker->hdr.dlist.prev != NULL);
+	DMS_BUG_ON(tx_tracker->hdr.dlist.next != NULL);
+	hfi1_dms_impl_dlist_push(&dms->trackers.free, (struct hfi1_dms_dlist_element *)tx_tracker);
 }
 
 struct hfi1_dms_dlist_element * hfi1_dms_impl_dlist_pop(struct hfi1_dms_dlist * dlist)
@@ -4590,12 +5210,9 @@ void hfi1_dms_impl_tid_set_put(struct hfi1_dms *dms, s32 tid_set)
 {
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(tid_set < HFI1_DMS_TID_SET_IDX_MIN || tid_set > HFI1_DMS_TID_SET_IDX_MAX);
+	DMS_BUG_ON(dms->free_tid_sets_stack_top >= HFI1_DMS_TID_SET_IDX_MAX);
 
-	if (dms->free_tid_sets_stack_top >= HFI1_DMS_TID_SET_IDX_MAX) {
-		dd_dev_err(dms->dd, "Tried to put TID set %d but stack is full.\n", tid_set);
-		return; // Stack is full, cannot put TID set
-	}
-
+	dms->read_requests[tid_set] = (struct hfi1_dms_read_request_state){0};
 	dms->free_tid_sets_stack[dms->free_tid_sets_stack_top++] = tid_set;
 }
 
@@ -4706,7 +5323,7 @@ int hfi1_dms_impl_pio_send(struct hfi1_dms *dms, u64 pbc, void *data, u64 size_q
 	u32 avail = (u32) sc->credits - (sc->fill - sc->alloc_free);
 	// only retry once because we've got our work queue anyway
 	if (blocks > avail) {
-		pr_warn("PIO Not enough space, trying again");
+		pr_debug("PIO Not enough space, trying again");
 		u64 hw_free = le64_to_cpu(*sc->hw_free);
 		sc->free = hw_free & CR_COUNTER_SMASK;
 		sc->alloc_free = sc->free;
