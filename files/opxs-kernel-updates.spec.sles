@@ -4,7 +4,7 @@
 
 Name:           RPMNAME
 Group:		System Environment/Kernel
-Summary:        Extra kernel modules for IFS
+Summary:        Extra kernel modules for OmniPath
 Version:        %(echo %{kver}|sed -e 's/-/_/g')
 Release:        RPMRELEASE
 License:        GPLv2
@@ -44,7 +44,7 @@ fi
 %define kmod_moddir %kernel_module_package_moddir
 
 %description
-Updated kernel modules for OPA IFS
+Updated kernel modules for OPA
 
 %package devel
 Summary: Development headers for Cornelis HFI1 driver interface

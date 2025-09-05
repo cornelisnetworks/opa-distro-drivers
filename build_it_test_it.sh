@@ -30,7 +30,7 @@ done
 sdir=$PWD
 tmpdir="/tmp/tmpbuild"
 
-export MVERSION="dev-build"
+#export MVERSION="dev-build"
 
 if [[ $build_arg != "nobuild" ]]; then
 	rm -rf $tmpdir
@@ -82,7 +82,7 @@ if [[ $test_arg == "test" ]]; then
 		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/kmod-internal-kernel-updates*.rpm`
 		echo "Using RHEL RPM: $rpmname"
 	else #assume sles
-		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/ifs-kernel-updates-kmp-default*.rpm`
+		rpmname=`ls $tmpdir/rpmbuild/RPMS/x86_64/internal-kernel-updates-kmp-default*.rpm`
 		echo "Using SLES RPM: $rpmname"
 	fi
 
