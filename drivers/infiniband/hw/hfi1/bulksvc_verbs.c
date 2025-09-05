@@ -806,6 +806,11 @@ int hfi1_bulksvc_verbs_dms_reg_client_id(struct hfi1_dms* dms)
 	return 0;
 }
 
+void hfi1_bulksvc_verbs_release_client_id(struct hfi1_dms* dms)
+{
+	hfi1_dms_release_client_key(dms, VERBS_CLIENT_ID_START);
+}
+
 static int bts_verbs_pinned_check(struct hfi1_dms_mr * const dms_mr, unsigned int start_page_index, unsigned int npages_to_request)
 {
 	struct bts_verbs_mr_record * const mr_record = container_of(dms_mr, struct bts_verbs_mr_record, dms_mr);
