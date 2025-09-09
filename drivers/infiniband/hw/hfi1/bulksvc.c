@@ -242,6 +242,7 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 	u32 last = dd->rsrcs.last_sdma_engine;
 	u32 sdma_avail = last - dd->rsrcs.first_sdma_engine;
 	bool bulksvc_polling = get_bulksvc_polling(dd);
+	unsigned int wq_flags;
 	u32 sdma_rm;
 	int ret = 0;
 
@@ -306,8 +307,12 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 	 * so we'll just keep it as a bounded queue, which means we
 	 * should respect bulksvc_cpu even when we are in interrupt mode
 	 */
+	wq_flags = WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE;
+	if (!bulksvc_polling) {
+		wq_flags |= WQ_UNBOUND | WQ_SYSFS | WQ_HIGHPRI;
+	}
 	svc->event_workq = alloc_workqueue("hfi%d-bulksvc-event",
-					WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE,
+					wq_flags,
 					1, // not sure if this is desired
 					dd->unit);
 	if (!svc->event_workq) {
