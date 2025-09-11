@@ -1406,6 +1406,7 @@ struct hfi1_cport {
 	struct task_struct *ping_th;	/* kthread currently running ping */
 	struct xarray trap_xa;		/* handlers for MCTXT TRAPs */
 	struct hfi1_psc psc;		/* used only by TRAP128 */
+	struct timer_list lost_int_timer;
 	cport_handler handlers[256];
 };
 

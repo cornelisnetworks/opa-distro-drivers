@@ -21,6 +21,39 @@ static void cport_send_rsp_fn(struct work_struct *work);
 #undef CPORT_RCV_DEBUG	/* every message (header) received, and outbox empty */
 #undef CPORT_SND_DEBUG	/* every message (header) sent */
 #undef CPORT_INT_DEBUG	/* every interrupt processed, and status in timeouts */
+#define LOST_INT_DEBUG	/* print if lost intr detected */
+
+static int lost_int_set(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	unsigned int *arg = kp->arg;
+	unsigned int old = *arg;
+	unsigned long index;
+	struct hfi1_devdata *dd;
+
+	ret = param_set_uint(val, kp);
+	if (ret)
+		return ret;
+
+	if (!old && *arg) {
+		xa_for_each(&hfi1_dev_table, index, dd) {
+			if (!dd->cport)
+				continue;
+			mod_timer(&dd->cport->lost_int_timer, jiffies + *arg);
+		}
+	}
+	return 0;
+}
+
+static const struct kernel_param_ops lost_int_ops = {
+	.set = lost_int_set,
+	.get = param_get_uint,
+};
+
+static unsigned int cport_lost_int = 1 * HZ;
+module_param_cb(cport_lost_int, &lost_int_ops, &cport_lost_int, 0644);
+MODULE_PARM_DESC(cport_lost_int, "Time period for MCTXT lost int check, jiffies");
+
 /*
  * This limit needs to balance memory consuption against
  * the need to ensure tids don't repeat during periods of
@@ -112,9 +145,23 @@ static void lost_mctxt_intr(struct hfi1_devdata *dd)
 	spin_lock(&dd->irq_src_lock); /* a compatible use of the lock */
 	ints = read_csr(dd, JKR_MCTXT_PF0_INT_STATUS_ENABLED);
 	/* if bits set, assume lost interrupt and attempt recovery. */
-	if (ints)
+	if (ints) {
+#ifdef LOST_INT_DEBUG
+		dd_dev_info(dd, "%s forcing int for %llx\n", __func__, ints);
+#endif
 		force_intr(dd, JKR_MCTXT_CPORT_TO_PCIE_INT);
+	}
 	spin_unlock(&dd->irq_src_lock);
+}
+
+static void cport_lost_int_chk(struct timer_list *t)
+{
+	struct hfi1_cport *cport = from_timer(cport, t, lost_int_timer);
+
+	if (cport_lost_int) {
+		lost_mctxt_intr(cport->dd);
+		mod_timer(&cport->lost_int_timer, jiffies + cport_lost_int);
+	}
 }
 
 /*
@@ -752,6 +799,9 @@ int cport_init(struct hfi1_devdata *dd)
 	write_csr(dd, JKR_MCTXT_PF0_INT_ENABLE,
 		  JKR_MCTXT_INT_INBOX_FULL | JKR_MCTXT_INT_OUTBOX_EMPTY);
 	set_intr_bits(dd, JKR_MCTXT_CPORT_TO_PCIE_INT, JKR_MCTXT_CPORT_TO_PCIE_INT, true);
+	timer_setup(&cport->lost_int_timer, cport_lost_int_chk, 0);
+	if (cport_lost_int)
+		mod_timer(&cport->lost_int_timer, jiffies + cport_lost_int);
 #endif
 
 	/*
@@ -773,6 +823,7 @@ int cport_exit(struct hfi1_devdata *dd)
 	if (!dd->cport)
 		return 0;
 
+	del_timer_sync(&dd->cport->lost_int_timer);
 	/* flush all cport queued tasks (plus anything else on this queue) */
 	flush_workqueue(dd->hfi1_wq);
 
