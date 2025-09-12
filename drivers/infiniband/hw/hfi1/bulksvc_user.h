@@ -13,8 +13,8 @@ struct hfi1_bulksvc_queue_record {
 	bool active;
 	struct hfi1_bulksvc_queue_info queue_info;
 	struct hfi1_bulksvc_queue_ctrl *ctrl;
-	atomic_t *head;
-	atomic_t *tail;
+	atomic64_t *head;
+	atomic64_t *tail;
 	u32 idx_mask;
 	u8 *queue_buf;
 };
