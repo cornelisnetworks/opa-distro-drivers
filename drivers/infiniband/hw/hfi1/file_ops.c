@@ -294,15 +294,15 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 		ret = get_pinning_stats(fd, arg, _IOC_SIZE(cmd));
 		break;
 	case HFI1_IOCTL_BULKSVC_GET_CMPLQ:
-		pr_warn("getting bulksvc cmplq\n");
+		pr_debug("getting bulksvc cmplq\n");
 		ret = create_bulksvc_cmplq(fd, arg, _IOC_SIZE(cmd));
 		break;
 	case HFI1_IOCTL_BULKSVC_GET_CMDQ:
-		pr_warn("getting bulksvc cmdq\n");
+		pr_debug("getting bulksvc cmdq\n");
 		ret = create_bulksvc_cmdq(fd, arg, _IOC_SIZE(cmd));
 		break;
 	case HFI1_IOCTL_BULKSVC_CLIENT_INIT:
-		pr_warn("initializing bulksvc client\n");
+		pr_debug("initializing bulksvc client\n");
 		ret = init_bulksvc_client(fd, arg, _IOC_SIZE(cmd));
 		break;
 	case HFI1_IOCTL_BULKSVC_DOORBELL:
@@ -2230,7 +2230,7 @@ static int create_bulksvc_queue(struct hfi1_bulksvc_user_info* const bulksvc_use
 	}
 	WARN_ON(!IS_ALIGNED((unsigned long)queue_rec->queue_buf, PAGE_SIZE));
 
-	pr_info("created bulksvc %s queue with id %d\n",
+	pr_debug("created bulksvc %s queue with id %d\n",
 		is_cmplq ? "completion" : "command", queue_rec->queue_info.queue_id);
 	rc = copy_to_user(output_info, &queue_rec->queue_info, sizeof(*output_info));
 
@@ -2244,8 +2244,8 @@ static int create_bulksvc_queue(struct hfi1_bulksvc_user_info* const bulksvc_use
 	u32 const entry_size = is_cmplq ? sizeof(union hfi1_bulksvc_upd) : sizeof(union hfi1_bulksvc_cmd);
 	BUG_ON(queue_rec->queue_info.queue_buffer_mmap_size % entry_size != 0);
 	queue_rec->idx_mask = (queue_rec->queue_info.queue_buffer_mmap_size / entry_size) - 1;
-	queue_rec->head = (atomic_t *) &queue_rec->ctrl->head;
-	queue_rec->tail = (atomic_t *) &queue_rec->ctrl->tail;
+	queue_rec->head = (atomic64_t *) &queue_rec->ctrl->head;
+	queue_rec->tail = (atomic64_t *) &queue_rec->ctrl->tail;
 	queue_rec->active = true;
 	/* update count last when everything is setup*/
 	wmb();
