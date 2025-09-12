@@ -355,9 +355,8 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 	struct hfi1_bulksvc_requirements *reqs;
 	int bulksvc_cpu = get_bulksvc_cpu(dd);
 	const struct cpumask *node_mask;
-	int next_cpu;
+	unsigned int n_numa_cpus, nth_last_cpu_idx, nth_last_cpu_in_numa;
 	int ret = 0;
-	int i;
 
 
 	dd->bulksvc = kcalloc(sizeof(*dd->bulksvc), 1, GFP_KERNEL);
@@ -395,12 +394,13 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 		}
 		dd->bulksvc->cpu = bulksvc_cpu;
 	} else {
+		/* assign this units bts to the last cpu available in numa */
 		node_mask = cpumask_of_node(dd->node);
-		next_cpu = cpumask_first(node_mask);
-		for (i = 0; i < dd->unit; ++i)
-			next_cpu = cpumask_next(next_cpu, node_mask);
+		n_numa_cpus = cpumask_weight(node_mask);
+		nth_last_cpu_idx = n_numa_cpus - (dd->unit % n_numa_cpus) - 1;
+		nth_last_cpu_in_numa = cpumask_nth(nth_last_cpu_idx, node_mask);
 
-		dd->bulksvc->cpu = next_cpu;
+		dd->bulksvc->cpu = nth_last_cpu_in_numa;
 	}
 	dd_dev_info(dd, "Bulksvc configured to run on CPU %d\n", dd->bulksvc->cpu);
 

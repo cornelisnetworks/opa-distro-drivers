@@ -1377,9 +1377,8 @@ static void hfi1_dms_tracker_timestamp_update(struct hfi1_dms *dms, union hfi1_d
 
 static u16 _rift_key_create(u16 const generation, u16 const index)
 {
-	DMS_BUG_ON(index > HFI1_DMS_RIFT_IDX_SIZE);
-	DMS_BUG_ON(generation > HFI1_DMS_RIFT_GEN_SIZE);
-	return (generation << HFI1_DMS_RIFT_IDX_BITS) | index;
+	DMS_BUG_ON(index >= HFI1_DMS_RIFT_IDX_SIZE);
+	return ((generation << HFI1_DMS_RIFT_IDX_BITS) & HFI1_DMS_RIFT_GEN_MASK) | index;
 }
 
 u16 _rift_key_create_err(enum hfi1_dms_rift_err const err)
@@ -3244,6 +3243,7 @@ static int hfi1_dms_impl_map_tid_entries(struct hfi1_dms *dms, struct hfi1_dms_m
 	for (i = 0; i < npages_twos; ++i) {
 		writeq(tid_entries[i], dms->dd->bar_maps[ctxt_bar_idx(dms->rctxt->ctxt)].rcvarray_wc + csr_offset + (i * sizeof(u64)));
 	}
+	flush_wc();
 	end = dms_rdtsc();
 	dms->counters.map_tids += end - start;
 	return 0;
