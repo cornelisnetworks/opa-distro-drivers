@@ -11,7 +11,7 @@ void user_mr_access_record_destroy_and_remove(struct hfi1_bulksvc_user_mr_access
 extern uint bulksvc_user_queue_size_pages_log2;
 struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedata *fd)
 {
-	pr_info("hfi1: bulksvc enabled, creating user info\n");
+	pr_debug("hfi1: bulksvc enabled, creating user info\n");
 
 	struct hfi1_bulksvc_user_info *bulksvc_user_info = kzalloc(sizeof(*bulksvc_user_info), GFP_KERNEL);
 	if (!bulksvc_user_info)
@@ -54,7 +54,7 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 	bulksvc_user_info->max_inflight = num_overflow;
 
 	bulksvc_user_info->client_key = atomic_inc_return(&fd->dd->bulksvc->last_client_key) - 1;
-	pr_info("assigned client key %u\n", bulksvc_user_info->client_key);
+	pr_debug("assigned client key %u\n", bulksvc_user_info->client_key);
 
 	mmgrab(current->mm);
 	bulksvc_user_info->user_mm = current->mm;
@@ -89,7 +89,7 @@ void bulksvc_user_info_event_release(struct kref *ref)
 
 void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info)
 {
-	pr_info("destroying user info\n");
+	pr_debug("destroying user info\n");
 
 
 /** TODO: this will be fixed in a follow up patch, but for now 
@@ -145,7 +145,7 @@ void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info)
 	info->user_mm = NULL;
 
 
-	dd_dev_info(info->svc->dd, "%s:%d:%s() bulksvc: Destroyed user info %u\n",
+	dd_dev_dbg(info->svc->dd, "%s:%d:%s() bulksvc: Destroyed user info %u\n",
 			   __FILENAME__, __LINE__, __func__, info->client_key);
 
 	kfree(info);
@@ -212,8 +212,8 @@ static int try_give_completion(struct hfi1_bulksvc_user_info *user_info, struct 
 	}
 
 	mask = cmplq_record->idx_mask;
-	cmplq_head = atomic_read(cmplq_record->head);
-	cmplq_tail = atomic_read(cmplq_record->tail);
+	cmplq_head = atomic64_read(cmplq_record->head);
+	cmplq_tail = atomic64_read(cmplq_record->tail);
 	if (cmplq_tail - cmplq_head >= mask) {
 		pr_debug("%s:%d:%s() cmplq full\n",
 		       __FILENAME__, __LINE__, __func__);
@@ -225,7 +225,7 @@ static int try_give_completion(struct hfi1_bulksvc_user_info *user_info, struct 
 
 	*entry = *cmpl;
 
-	atomic_set_release(cmplq_record->tail, cmplq_tail + 1);
+	atomic64_set_release(cmplq_record->tail, cmplq_tail + 1);
 	user_info->num_inflight--;
 	return 0;
 }
@@ -1102,25 +1102,25 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 		// only calculate this once per user_info so that even if we get
 		// error completions, or things complete immediately, we don't
 		// just indefinitely drain these queues
-		u32 remaining_inflight = user_info->max_inflight - user_info->num_inflight;
+		u64 remaining_inflight = user_info->max_inflight - user_info->num_inflight;
 		for (int i = 0; i < user_info->num_cmdqs; ++i) {
 			struct hfi1_bulksvc_queue_record *rec =
 				&user_info->cmdq_records[i];
 			if (!rec->active)
 				continue;
-			u32 tail = atomic_read_acquire(rec->tail);
-			u32 head = atomic_read(rec->head);
-			u32 total_entries = tail - head;
-			u32 to_process = min(total_entries, remaining_inflight);
-			u32 end_tail = head + to_process;
+			u64 tail = atomic64_read_acquire(rec->tail);
+			u64 head = atomic64_read(rec->head);
+			u64 total_entries = tail - head;
+			u64 to_process = min(total_entries, remaining_inflight);
+			u64 end_tail = head + to_process;
 			user_info->num_inflight += to_process;
 			remaining_inflight -= to_process;
-			for (u32 j = head; j < end_tail; ++j) {
+			for (u64 j = head; j < end_tail; ++j) {
 				bulksvc_on_user_cmd(svc, user_info,
 					&((union hfi1_bulksvc_cmd const *)
 					rec->queue_buf)[j & rec->idx_mask]);
 			}
-			atomic_set_release(rec->head, end_tail);
+			atomic64_set_release(rec->head, end_tail);
 			processed += to_process;
 		}
 	}

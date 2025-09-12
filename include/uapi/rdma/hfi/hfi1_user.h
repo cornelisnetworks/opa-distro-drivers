@@ -326,12 +326,12 @@ enum hfi1_ureg {
 
 struct hfi1_bulksvc_queue_ctrl {
 	union {
-		__u32 head;
+		__u64 head;
 		/* TODO use proper alignment utils */
 		__u8 padding1[64];
 	};
 	union {
-		__u32 tail;
+		__u64 tail;
 		/* TODO use proper alignment utils */
 		__u8 padding2[64];
 	};
