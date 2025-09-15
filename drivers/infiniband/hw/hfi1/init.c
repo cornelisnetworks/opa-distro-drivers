@@ -587,7 +587,7 @@ module_param_named(work_around_ASIC_6032, work_around_ASIC_6032, int, 0444);
 MODULE_PARM_DESC(work_around_ASIC_6032, "DO NOT UPSTREAM: Increase wait for packet egress time for emulation (time in ms)");
 
 /* use and give resources to rdmavt bulk service */
-bool use_bulksvc = true;
+bool use_bulksvc = false;
 module_param(use_bulksvc, bool, S_IRUGO);
 MODULE_PARM_DESC(use_bulksvc, "Use and give resources to rdmavt bulk service");
 
