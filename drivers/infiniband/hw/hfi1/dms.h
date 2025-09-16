@@ -14,8 +14,7 @@
 #define HFI1_DMS_JKEY (0xACDC)
 #define HFI1_DMS_MAX_TID_VALUE (1024)
 #define HFI1_DMS_TID_SET_SIZE (16)
-#define HFI1_DMS_TID_SET_IDX_MIN (0)
-#define HFI1_DMS_TID_SET_IDX_MAX (HFI1_DMS_MAX_TID_VALUE / HFI1_DMS_TID_SET_SIZE)
+#define HFI1_DMS_TID_SET_IDX_COUNT (HFI1_DMS_MAX_TID_VALUE / HFI1_DMS_TID_SET_SIZE)
 // 32 ahg indices per engine * 16 engines * 2
 #define HFI1_DMS_AHG_HEADER_BLOCK_SIZE (1024)
 
@@ -108,7 +107,7 @@ enum hfi1_dms_access_type {
 	HFI1_DMS_ACCESS_TYPE_EPHEMERAL = 1,
 };
 
-typedef void (*hfi1_dms_access_completion_fn)(union hfi1_dms_completion_cookie *, u16, u64);
+typedef void (*hfi1_dms_access_completion_fn)(union hfi1_dms_completion_cookie *, u16, u64, int);
 
 struct hfi1_dms_access_completion {
 	hfi1_dms_access_completion_fn fn;
@@ -170,6 +169,8 @@ struct hfi1_dms_tx_tracker {
 				u32 nbytes;
 				u32 tid_info;
 			} start;
+			u64 imm_data;
+			u16 flags;
 		} read;
 	};
 };
@@ -241,7 +242,8 @@ struct hfi1_dms_rx_tracker {
 };
 
 enum hfi1_dms_tidset_state {
-	HFI1_DMS_TIDSET_STATE_ENABLED = 0,
+	HFI1_DMS_TIDSET_STATE_FREE = 0,
+	HFI1_DMS_TIDSET_STATE_ENABLED,
 	HFI1_DMS_TIDSET_STATE_DISABLED
 };
 
@@ -249,7 +251,7 @@ struct hfi1_dms_read_request_state {
 	u64 remaining_qws;
 	u64 total_requested_qws;
 	struct hfi1_dms_rx_tracker *rx_tracker;
-	s32 tid_set;
+	u32 tid_set;
 	enum hfi1_dms_tidset_state state;
 	ktime_t disable_ts;
 };
@@ -382,11 +384,11 @@ struct hfi1_dms {
 	/* Read Request State - shared across messages */
 	// free list of TID sets available
 	// 1:1 with active read requests in-flight
-	s32 free_tid_sets_stack[HFI1_DMS_TID_SET_IDX_MAX]; /* Stack of free TID sets */
-	s32 free_tid_sets_stack_top;
+	u32 free_tid_sets_stack[HFI1_DMS_TID_SET_IDX_COUNT]; /* Stack of free TID sets */
+	u32 free_tid_sets_stack_top;
 
 	// these are implicitly indexed by the associated TID set index
-	struct hfi1_dms_read_request_state read_requests[HFI1_DMS_TID_SET_IDX_MAX];
+	struct hfi1_dms_read_request_state read_requests[HFI1_DMS_TID_SET_IDX_COUNT];
 
 	struct hfi1_dms_tidset_waiters tidset_waiters[HFI1_DMS_TIDSET_WAITER_TYPE_COUNT];
 	struct hfi1_dms_sdma_waiters sdma_waiters;
@@ -454,7 +456,7 @@ int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, u64 dms_key, u64 rem
 /* in the future when we have interrupts linked up */
 int hfi1_dms_poll(struct hfi1_dms *dms, ktime_t const now);
 
-void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, u16 flags, u64 imm_data);
+void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, u16 flags, u64 imm_data, int status);
 void hfi1_dms_tracker_completion_fn_noop(union hfi1_dms_completion_cookie * cookie, int status);
 
 /* called when user info is being freed */
