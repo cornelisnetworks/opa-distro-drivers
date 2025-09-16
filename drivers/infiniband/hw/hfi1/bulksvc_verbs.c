@@ -387,8 +387,9 @@ struct verbs_mr_accessed_cookie {
 };
 
 static void bulksvc_on_verbs_mr_accessed (
-	union hfi1_dms_completion_cookie * const cookie, u16 flags, u64 imm_data)
+	union hfi1_dms_completion_cookie * const cookie, u16 flags, u64 imm_data, int status)
 {
+	(void) status;
 
 	if (WARN_ON(!cookie)) {
 		pr_err("%s:%d:%s() invalid cookie\n",

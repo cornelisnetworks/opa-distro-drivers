@@ -638,7 +638,7 @@ void hfi1_dms_impl_rx_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_rx_trac
 
 struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_read_new(struct hfi1_dms *dms, u32 size,
 		u64 byte_offset_from_first_page, u32 remote_lid, u16 remote_rift_index, struct hfi1_dms_access *access,
-		u8 head_misalignment, u8 include_fixup_data, u8 rx_id, u16 size_qw, u32 tid_info);
+		u8 head_misalignment, u8 include_fixup_data, u8 rx_id, u16 size_qw, u32 tid_info, u16 flags, u64 imm_data);
 
 struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_write_new(struct hfi1_dms *dms, u32 size,
 		u64 byte_offset_from_first_page, u32 remote_lid, struct hfi1_dms_mr *mr, u64 mr_offset,
@@ -653,9 +653,13 @@ void hfi1_dms_impl_dlist_push(struct hfi1_dms_dlist * dlist, struct hfi1_dms_dli
 void hfi1_dms_impl_dlist_append(struct hfi1_dms_dlist * dlist, struct hfi1_dms_dlist_element * element);
 void hfi1_dms_impl_dlist_remove(struct hfi1_dms_dlist * dlist, struct hfi1_dms_dlist_element * element);
 
-s32 hfi1_dms_impl_tid_set_peek(struct hfi1_dms *dms);
-s32 hfi1_dms_impl_tid_set_get(struct hfi1_dms *dms);
-void hfi1_dms_impl_tid_set_put(struct hfi1_dms *dms, s32 tid_set);
+int _tidset_idx_peek(struct hfi1_dms *dms, u32 *tid_set);
+void _tidset_idx_reserve(struct hfi1_dms *dms, u32 tid_set);
+void _tidset_idx_release(struct hfi1_dms *dms, u32 tid_set);
+
+void _tidset_reset(struct hfi1_dms *dms, u32 tid_set, enum hfi1_dms_tidset_state new_state);
+void _tidset_disable(struct hfi1_dms *dms, u32 tid_set);
+void _tidset_enable(struct hfi1_dms *dms, u32 tid_set, struct hfi1_dms_rx_tracker *rx_tracker, u32 *tid_info, u64 *tidset_nbytes);
 
 void hfi1_dms_impl_lrh16bc_dlid_set(u64 *lrh16bc, u32 dlid);
 
@@ -666,11 +670,9 @@ int hfi1_dms_impl_16bc_state_set(struct hfi1_dms *dms);
 u32 hfi1_dms_impl_data_request_size_qw_get(union hfi1_dms_16b_header *hdr);
 
 // protocol functions
-int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *tracker, s32 tid_set);
+int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *tracker, u32 tid_set);
 int hfi1_dms_impl_make_data_requests(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *tracker);
 void hfi1_dms_rx_tracker_handle_completion(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, int status, u32 do_ack);
-void hfi1_dms_tid_set_disable(struct hfi1_dms *dms, s32 tid_set);
-u64 hfi1_dms_tid_set_initialize(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, s32 tid_set, u32 *tid_info);
 int hfi1_dms_impl_handle_read_start_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, void *ebuf);
 int hfi1_dms_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_sdma_parameters const * parameters);
 union hfi1_dms_proto_cmd_data_fixup hfi1_dms_proto_cmd_data_fixup_make(struct hfi1_dms *dms, u32 dlid, u16 tx_rift_index, u16 rx_rift_index, u64 head, u64 tail);
@@ -777,6 +779,7 @@ int hfi1_dms_init(struct hfi1_dms *dms, struct hfi1_devdata *dd, struct hfi1_ctx
 	
 	for (i = 0; i < max_tid_set_idx; ++i) {
 		dms->free_tid_sets_stack[i] = i;
+		dms->read_requests[i].tid_set = i;
 	}
 	dms->free_tid_sets_stack_top = max_tid_set_idx;
 
@@ -1216,7 +1219,6 @@ struct hfi1_dms_access * hfi1_dms_access_lookup(struct hfi1_dms *dms, u64 dms_ke
 	}
 
 	if (!access) {
-		dd_dev_dbg(dms->dd, "Access not found error. id = %llu\n", access_key);
 		return NULL;
 	}
 	return access;
@@ -1228,11 +1230,12 @@ void hfi1_dms_tracker_completion_fn_noop(union hfi1_dms_completion_cookie *cooki
 	(void) status;
 }
 
-void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data)
+void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data, int status)
 {
 	(void) cookie;
 	(void) imm_data;
 	(void) flags;
+	(void) status;
 }
 
 void hfi1_dms_impl_access_initialize(struct hfi1_dms_access *access, enum hfi1_dms_access_type access_type, struct hfi1_dms_mr *mr, u64 offset, u32 size, u64 dms_key, struct hfi1_dms_access_completion const *completion)
@@ -1358,7 +1361,7 @@ int access_xfer_begin(struct hfi1_dms *dms, struct hfi1_dms_access * access)
 	return 0;
 }
 
-void access_xfer_end(struct hfi1_dms *dms, struct hfi1_dms_access * access, u16 flags, u64 imm_data)
+void access_xfer_end(struct hfi1_dms *dms, struct hfi1_dms_access * access, u16 flags, u64 imm_data, int status)
 {
 	int ret;
 
@@ -1371,10 +1374,10 @@ void access_xfer_end(struct hfi1_dms *dms, struct hfi1_dms_access * access, u16 
 	if (access->type == HFI1_DMS_ACCESS_TYPE_EPHEMERAL && access->active_count == 0) {
 		ret = hfi1_dms_access_remove(dms, access);
 		DMS_BUG_ON(ret < 0);
-		access->completion.fn(&access->completion.cookie, flags, imm_data);
+		access->completion.fn(&access->completion.cookie, flags, imm_data, status);
 		hfi1_dms_access_freelist_push(dms, access);
 	} else {
-		access->completion.fn(&access->completion.cookie, flags, imm_data);
+		access->completion.fn(&access->completion.cookie, flags, imm_data, status);
 	}
 }
 
@@ -1761,7 +1764,6 @@ union hfi1_dms_cmd_nack hfi1_dms_cmd_nack_make(struct hfi1_dms *dms, enum hfi1_d
 	// remaining 'scb padding' qws can remain uninitialized because they do not go over the wire
 
 	hfi1_dms_impl_lrh16bc_dlid_set(&cmd.lrh16bc, dlid);
-	pr_debug("%s:%d:%s() EXIT\n", __FILENAME__, __LINE__, __func__);
 	return cmd;
 }
 
@@ -1978,7 +1980,7 @@ int hfi1_dms_impl_inject_read_start_small(struct hfi1_dms *dms, struct hfi1_dms_
 	return ret;
 }
 
-int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, s32 tid_set)
+int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, u32 tid_set)
 {
 	u32 tid_info;
 	union hfi1_dms_cmd_read_start cmd;
@@ -1988,7 +1990,7 @@ int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 	DMS_BUG_ON(rx_tracker->payload_requested > 0);
 
 	if (rx_tracker->head_misalignment || rx_tracker->tail_misalignment) {
-		// have to adjust _first_ otherwise our tid_set_initialize will fail if we are unaligned
+		// have to adjust _first_ otherwise our _tidset_enable() will fail if we are unaligned
 		rx_tracker->sbuf_offset += rx_tracker->head_misalignment;
 		rx_tracker->rbuf_offset += rx_tracker->head_misalignment;
 
@@ -1996,7 +1998,7 @@ int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 		// we have requested these misaligned bytes by setting "include_fixup_data" in the packet
 		rx_tracker->payload_requested = rx_tracker->head_misalignment + rx_tracker->tail_misalignment;
 
-		tid_set_nbytes = hfi1_dms_tid_set_initialize(dms, rx_tracker, tid_set, &tid_info);
+		_tidset_enable(dms, tid_set, rx_tracker, &tid_info, &tid_set_nbytes);
 
 		cmd = hfi1_dms_cmd_read_start_make(dms, rx_tracker, tid_set, tid_set_nbytes);
 		cmd.info.tid_info = tid_info;
@@ -2009,11 +2011,12 @@ int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 			rx_tracker->sbuf_offset -= rx_tracker->head_misalignment;
 			rx_tracker->rbuf_offset -= rx_tracker->head_misalignment;
 			rx_tracker->payload_requested = 0;
+			_tidset_reset(dms, tid_set, HFI1_DMS_TIDSET_STATE_FREE);
 		}
 		return ret;
 	}
 
-	tid_set_nbytes = hfi1_dms_tid_set_initialize(dms, rx_tracker, tid_set, &tid_info);
+	_tidset_enable(dms, tid_set, rx_tracker, &tid_info, &tid_set_nbytes);
 
 	cmd = hfi1_dms_cmd_read_start_make(dms, rx_tracker, tid_set, tid_set_nbytes);
 	cmd.info.tid_info = tid_info;
@@ -2022,6 +2025,8 @@ int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 		rx_tracker->payload_requested += tid_set_nbytes;
 		rx_tracker->sbuf_offset += tid_set_nbytes;
 		rx_tracker->rbuf_offset += tid_set_nbytes;
+	} else {
+		_tidset_reset(dms, tid_set, HFI1_DMS_TIDSET_STATE_FREE);
 	}
 	return ret;
 }
@@ -2083,6 +2088,7 @@ struct hfi1_dms_rx_tracker * _dms_tidset_waiter_tail(struct hfi1_dms *dms, enum 
 void _dms_tidset_waiters_poll(struct hfi1_dms *dms)
 {
 	struct hfi1_dms_rx_tracker *rx_tracker;
+	u32 tid_set;
 	int ret;
 
 	DMS_BUG_ON(!dms);
@@ -2103,13 +2109,12 @@ void _dms_tidset_waiters_poll(struct hfi1_dms *dms)
 	
 	rx_tracker = _dms_tidset_waiter_peek(dms, HFI1_DMS_TIDSET_WAITER_TYPE_DATA);
 	while (rx_tracker) {
-		s32 tid_set = hfi1_dms_impl_tid_set_peek(dms);
-		if (tid_set < 0) break;
+		if (_tidset_idx_peek(dms, &tid_set) < 0) break;
 
 		ret = hfi1_dms_impl_make_data_request(dms, rx_tracker, tid_set);
 		if (ret != 0) break;
 
-		hfi1_dms_impl_tid_set_get(dms);
+		_tidset_idx_reserve(dms, tid_set);
 
 		if (rx_tracker->payload_requested == rx_tracker->total_payload) {
 			rx_tracker = _dms_tidset_waiter_next(dms, HFI1_DMS_TIDSET_WAITER_TYPE_DATA);
@@ -2118,15 +2123,34 @@ void _dms_tidset_waiters_poll(struct hfi1_dms *dms)
 
 	rx_tracker = _dms_tidset_waiter_peek(dms, HFI1_DMS_TIDSET_WAITER_TYPE_READ);
 	while (rx_tracker) {
-		s32 tid_set = hfi1_dms_impl_tid_set_peek(dms);
-		if (tid_set < 0) break;
+		if (_tidset_idx_peek(dms, &tid_set) < 0) break;
 
 		ret = hfi1_dms_impl_inject_read_start(dms, rx_tracker, tid_set);
 		if (ret != 0) break;
 
-		hfi1_dms_impl_tid_set_get(dms);
+		_tidset_idx_reserve(dms, tid_set);
 
 		rx_tracker = _dms_tidset_waiter_next(dms, HFI1_DMS_TIDSET_WAITER_TYPE_READ);
+	}
+}
+
+void _tidset_free_then_poll_waiters(struct hfi1_dms *dms, u32 tid_set)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(tid_set >= HFI1_DMS_TID_SET_IDX_COUNT);
+
+	// release the tidset index to the free stack
+	_tidset_idx_release(dms, tid_set);
+
+	// set the tidset state to 'free' - but do not clear the tid hardware
+	dms->read_requests[tid_set].state = HFI1_DMS_TIDSET_STATE_FREE;
+
+	// allow any tidset waiters to use this tidset
+	_dms_tidset_waiters_poll(dms);
+
+	if (dms->read_requests[tid_set].state == HFI1_DMS_TIDSET_STATE_FREE) {
+		// no tidset waiter acquired this tidset; reset the tid hardware
+		_tidset_reset(dms, tid_set, HFI1_DMS_TIDSET_STATE_FREE);
 	}
 }
 
@@ -2182,10 +2206,10 @@ int _dms_rx_rift_continue_write_start(struct hfi1_dms *dms, struct hfi1_dms_rx_t
 	}
 
 	if (rx_tracker->head_misalignment || rx_tracker->tail_misalignment) {
-		pr_debug("rx tracker has head misalignment %u and tail misalignment %u.\n", rx_tracker->head_misalignment, rx_tracker->tail_misalignment);
+		dd_dev_dbg(dms->dd, "rx tracker has head misalignment %u and tail misalignment %u.\n", rx_tracker->head_misalignment, rx_tracker->tail_misalignment);
 		ret = hfi1_dms_impl_inject_data_request_fixup(dms, rx_tracker);
 		if (ret < 0) {
-			pr_err("Failed to send or enqueue data request fixup\n");
+			dd_dev_err(dms->dd, "Failed to send or enqueue data request fixup\n");
 			return ret;
 		}
 	}
@@ -2354,7 +2378,7 @@ void hfi1_dms_rx_tracker_handle_completion(struct hfi1_dms *dms, struct hfi1_dms
 	if (op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
 		rx_tracker->read.completion.fn(&rx_tracker->read.completion.cookie, status);
 	} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
-		access_xfer_end(dms, rx_tracker->write.access, rx_tracker->write.flags, rx_tracker->write.imm_data);
+		access_xfer_end(dms, rx_tracker->write.access, rx_tracker->write.flags, rx_tracker->write.imm_data, 0);
 	}
 
 	_rift_release(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
@@ -2381,7 +2405,14 @@ void hfi1_dms_handle_data_start(struct hfi1_dms *dms, union hfi1_dms_16b_header 
 	payload_qws = hfi1_dms_16b_data_payload_qws_get(hdr);
 
 	read_request = &dms->read_requests[tid_set];
-	DMS_BUG_ON(tid_set != read_request->tid_set);
+	if (read_request->state != HFI1_DMS_TIDSET_STATE_ENABLED) {
+		dd_dev_dbg(dms->dd, "Stale data_start packet for not-enabled tid_set %u, dropping\n", tid_set);
+		dms->read_requests[tid_set].disable_ts = dms->now; // reset disable timer?
+		return;
+	} else if (read_request->tid_set != tid_set) {
+		dd_dev_warn(dms->dd, "Mismatched data_start packet for enabled tid_set %u, dropping\n", tid_set);
+		return;
+	}
 
 	rx_tracker = read_request->rx_tracker;
 	DMS_BUG_ON(!rx_tracker);
@@ -2419,8 +2450,7 @@ void hfi1_dms_handle_data_start(struct hfi1_dms *dms, union hfi1_dms_16b_header 
 			hfi1_dms_rx_tracker_handle_completion(dms, rx_tracker, 0, 1);
 		}
 
-		hfi1_dms_impl_tid_set_put(dms, read_request->tid_set);
-		_dms_tidset_waiters_poll(dms);
+		_tidset_free_then_poll_waiters(dms, read_request->tid_set);
 	}
 }
 
@@ -2445,7 +2475,14 @@ void hfi1_dms_handle_data(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
 	payload_qws = hfi1_dms_16b_data_payload_qws_get(hdr);
 
 	read_request = &dms->read_requests[tid_set];
-	DMS_BUG_ON(tid_set != read_request->tid_set);
+	if (read_request->state != HFI1_DMS_TIDSET_STATE_ENABLED) {
+		dd_dev_dbg(dms->dd, "Stale data packet for not-enabled tid_set %u, dropping\n", tid_set);
+		dms->read_requests[tid_set].disable_ts = dms->now; // reset disable timer?
+		return;
+	} else if (read_request->tid_set != tid_set) {
+		dd_dev_err(dms->dd, "Mismatched data packet for enabled tid_set %u, dropping\n", tid_set);
+		return;
+	}
 
 	rx_tracker = read_request->rx_tracker;
 	DMS_BUG_ON(!rx_tracker);
@@ -2461,9 +2498,7 @@ void hfi1_dms_handle_data(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
 			DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.remote_rift_index));
 			hfi1_dms_rx_tracker_handle_completion(dms, rx_tracker, 0, 1);
 		}
-
-		hfi1_dms_impl_tid_set_put(dms, read_request->tid_set);
-		_dms_tidset_waiters_poll(dms);
+		_tidset_free_then_poll_waiters(dms, read_request->tid_set);
 	}
 
 	end = dms_rdtsc();
@@ -2870,6 +2905,8 @@ u32 hfi1_dms_tracker_stale(union hfi1_dms_tracker *tracker, ktime_t const now, u
 
 void hfi1_dms_poll_stale(struct hfi1_dms *dms, u64 const max_elapsed_ns)
 {
+	static int const err = -ETIMEDOUT;
+	
 	DMS_BUG_ON(!dms);
 
 	ktime_t const now = dms->now;
@@ -2898,21 +2935,20 @@ void hfi1_dms_poll_stale(struct hfi1_dms *dms, u64 const max_elapsed_ns)
 	}
 
 	// remove any disabled tidsets
-	s32 const sz = (s32) HFI1_DMS_ARRAY_SIZE(dms->read_requests);
-	for (s32 tid_set = 0; tid_set < sz; ++tid_set) {
+	u32 const sz = HFI1_DMS_ARRAY_SIZE(dms->read_requests);
+	for (u32 tid_set = 0; tid_set < sz; ++tid_set) {
+		enum hfi1_dms_tidset_state const state = dms->read_requests[tid_set].state;
 
-		if (dms->read_requests[tid_set].state == HFI1_DMS_TIDSET_STATE_DISABLED) {
+		if (state == HFI1_DMS_TIDSET_STATE_DISABLED) {
 			if (ktime_to_ns(ktime_sub(dms->now, dms->read_requests[tid_set].disable_ts)) > HFI1_DMS_FABRIC_PACKET_MAX_LIFETIME_NS) {
 				dd_dev_warn(dms->dd, "Removed disabled tidset read request\n");
-				dms->read_requests[tid_set] = (struct hfi1_dms_read_request_state){0};
-				hfi1_dms_impl_tid_set_put(dms, tid_set);
-				++cancel_count;
+				_tidset_free_then_poll_waiters(dms, tid_set);
 			}
-		} else {
+		} else if (state == HFI1_DMS_TIDSET_STATE_ENABLED) {
 			union hfi1_dms_tracker * tracker = (union hfi1_dms_tracker *) dms->read_requests[tid_set].rx_tracker;
 			if (tracker && hfi1_dms_tracker_stale(tracker, now, max_elapsed_ns)) {
 				dd_dev_warn(dms->dd, "Disabled stale tidset read request\n");
-				hfi1_dms_tid_set_disable(dms, tid_set);
+				_tidset_disable(dms, tid_set);
 			}
 		}
 	}
@@ -2944,13 +2980,14 @@ void hfi1_dms_poll_stale(struct hfi1_dms *dms, u64 const max_elapsed_ns)
 		if ((dms->rx_rift.arr[i] == NULL) || (!hfi1_dms_tracker_stale((union hfi1_dms_tracker *)dms->rx_rift.arr[i], now, max_elapsed_ns))) {
 			continue;
 		}
-		dd_dev_warn(dms->dd, "Removed stale rx rift entry\n");
 
 		struct hfi1_dms_rx_tracker * rx_tracker = (struct hfi1_dms_rx_tracker *)dms->rx_rift.arr[i];
 		if (rx_tracker->op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
-			rx_tracker->read.completion.fn(&rx_tracker->read.completion.cookie, -ETIMEDOUT);
+			dd_dev_warn(dms->dd, "Removed stale rx rift entry - timeout rdma read operation\n");
+			rx_tracker->read.completion.fn(&rx_tracker->read.completion.cookie, err);
 		} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
-			access_xfer_cancel(dms, rx_tracker->write.access);
+			dd_dev_warn(dms->dd, "Removed stale rx rift entry - cancel rdma write access\n");
+			access_xfer_end(dms, rx_tracker->write.access, rx_tracker->write.flags, rx_tracker->write.imm_data, err);
 		}
 
 		_rift_cancel(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
@@ -2998,12 +3035,13 @@ void hfi1_dms_poll_stale(struct hfi1_dms *dms, u64 const max_elapsed_ns)
 			continue;
 		}
 
-		dd_dev_warn(dms->dd, "Removed stale tx rift entry\n");
 		struct hfi1_dms_tx_tracker * tx_tracker = (struct hfi1_dms_tx_tracker *)dms->tx_rift.arr[i];
 		if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
-			access_xfer_cancel(dms, tx_tracker->read.access);
+			dd_dev_warn(dms->dd, "Removed stale tx rift entry - cancel rdma read access\n");
+			access_xfer_end(dms, tx_tracker->read.access, tx_tracker->read.flags, tx_tracker->read.imm_data, err);
 		} else if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) {
-			tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, -ETIMEDOUT);
+			dd_dev_warn(dms->dd, "Removed stale tx rift entry - timeout rdma write operation\n");
+			tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, err);
 		}
 
 		_rift_cancel(&dms->tx_rift, tx_tracker->hdr.local_rift_index);
@@ -3012,7 +3050,6 @@ void hfi1_dms_poll_stale(struct hfi1_dms *dms, u64 const max_elapsed_ns)
 	}
 
 	if (cancel_count > 0) {
-		_dms_tidset_waiters_poll(dms);
 		_dms_rx_rift_poll(dms);
 		_sdma_waitlist_poll(dms);
 		_dms_tx_rift_poll(dms);
@@ -3108,7 +3145,7 @@ void hfi1_dms_handle_tx_tracker_completion(struct hfi1_dms *dms, u16 tx_rift_ind
 
 	// invoke callback for the completed tx tracker
 	if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
-		access_xfer_end(dms, tx_tracker->read.access, flags, imm_data);
+		access_xfer_end(dms, tx_tracker->read.access, flags, imm_data, 0);
 
 	} else if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) {
 		tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, 0);
@@ -3240,7 +3277,7 @@ static inline u32 rcvarray_offset(u32 ctxt, u32 index, u32 type)
 	return ret;
 }
 
-int hfi1_dms_impl_map_tid_entries(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 start_page_index, u64 npages, s32 tid_set)
+int hfi1_dms_impl_map_tid_entries(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 start_page_index, u64 npages, u32 tid_set)
 {
 	u64 start;
 	u64 tid_entries[HFI1_DMS_TID_SET_SIZE * 2] = {0};
@@ -3256,7 +3293,7 @@ int hfi1_dms_impl_map_tid_entries(struct hfi1_dms *dms, struct hfi1_dms_mr * mr,
 
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(mr == NULL);
-	DMS_BUG_ON(tid_set < HFI1_DMS_TID_SET_IDX_MIN || tid_set > HFI1_DMS_TID_SET_IDX_MAX);
+	DMS_BUG_ON(tid_set >= HFI1_DMS_TID_SET_IDX_COUNT);
 	DMS_BUG_ON(npages == 0);
 	DMS_BUG_ON(npages > (HFI1_DMS_TID_SET_SIZE*2));
 	start = dms_rdtsc();
@@ -3315,7 +3352,7 @@ union hfi1_dms_proto_cmd_data_request_fixup hfi1_dms_proto_cmd_data_request_fixu
 	return cmd;
 }
 
-void hfi1_dms_tid_set_disable(struct hfi1_dms *dms, s32 tid_set)
+void _tidset_reset(struct hfi1_dms *dms, u32 tid_set, enum hfi1_dms_tidset_state new_state)
 {
 	u64 const npages = HFI1_DMS_TID_SET_SIZE*2;
 	u64 const npages_twos = (npages + 1) & ~1ull;
@@ -3326,10 +3363,10 @@ void hfi1_dms_tid_set_disable(struct hfi1_dms *dms, s32 tid_set)
 	u64 tid_entries[HFI1_DMS_TID_SET_SIZE * 2] = {0};
 
 	DMS_BUG_ON(!dms);
-	DMS_BUG_ON(tid_set < HFI1_DMS_TID_SET_IDX_MIN || tid_set > HFI1_DMS_TID_SET_IDX_MAX);
+	DMS_BUG_ON(tid_set >= HFI1_DMS_TID_SET_IDX_COUNT);
 
 	dms->read_requests[tid_set].disable_ts = dms->now;
-	dms->read_requests[tid_set].state = HFI1_DMS_TIDSET_STATE_DISABLED;
+	dms->read_requests[tid_set].state = new_state;
 	dms->read_requests[tid_set].total_requested_qws = (u64)(-1);
 	dms->read_requests[tid_set].remaining_qws = (u64)(-1);
 	dms->read_requests[tid_set].rx_tracker = &dms->disabled_rx_tracker;
@@ -3344,8 +3381,13 @@ void hfi1_dms_tid_set_disable(struct hfi1_dms *dms, s32 tid_set)
 	}
 }
 
+void _tidset_disable(struct hfi1_dms *dms, u32 tid_set)
+{
+	_tidset_reset(dms, tid_set, HFI1_DMS_TIDSET_STATE_DISABLED);
+}
+
 // pre: pages must be pinned and mapped
-u64 hfi1_dms_tid_set_initialize(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, s32 tid_set, u32 *tid_info)
+void _tidset_enable(struct hfi1_dms *dms, u32 tid_set, struct hfi1_dms_rx_tracker *rx_tracker, u32 *tid_info, u64 *tidset_nbytes)
 {
 	u64 payload_start;
 	u64 recv_offset_bytes;
@@ -3361,8 +3403,11 @@ u64 hfi1_dms_tid_set_initialize(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker
 	u32 read_size_qw;
 
 	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(tid_set >= HFI1_DMS_TID_SET_IDX_COUNT);
+	DMS_BUG_ON(dms->read_requests[tid_set].tid_set != tid_set);
 	DMS_BUG_ON(!rx_tracker);
 	DMS_BUG_ON(!tid_info);
+	DMS_BUG_ON(!tidset_nbytes);
 	DMS_BUG_ON(rx_tracker->total_payload == 0);
 	DMS_BUG_ON(rx_tracker->total_payload == rx_tracker->payload_requested);
 
@@ -3404,7 +3449,7 @@ u64 hfi1_dms_tid_set_initialize(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker
 
 	*tid_info = hfi1_dms_tid_info_make(tid_set * HFI1_DMS_TID_SET_SIZE, recv_offset_dws);
 
-	return nbytes_to_request;
+	*tidset_nbytes = nbytes_to_request;
 }
 
 union hfi1_dms_cmd_data_request hfi1_dms_cmd_data_request_make(struct hfi1_dms *dms, u32 tid_info, u32 sbuf_offset,
@@ -3425,7 +3470,7 @@ union hfi1_dms_cmd_data_request hfi1_dms_cmd_data_request_make(struct hfi1_dms *
 	return cmd;
 }
 
-int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, s32 tid_set)
+int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, u32 tid_set)
 {
 	u64 start;
 	u64 nbytes_to_request;
@@ -3442,13 +3487,14 @@ int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 
 	start = dms_rdtsc();
 
-	nbytes_to_request = hfi1_dms_tid_set_initialize(dms, rx_tracker, tid_set, &tid_info);
+	_tidset_enable(dms, tid_set, rx_tracker, &tid_info, &nbytes_to_request);
 	read_size_qw = nbytes_to_request >> 3;
 
 	cmd = hfi1_dms_cmd_data_request_make(dms, tid_info, rx_tracker->sbuf_offset, rx_tracker->hdr.remote_rift_index, rx_tracker->hdr.remote_lid, read_size_qw);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 	if (ret < 0) {
-		pr_debug("Unable to send data request.\n");
+		dd_dev_dbg(dms->dd, "Unable to send data request.\n");
+		_tidset_reset(dms, tid_set, HFI1_DMS_TIDSET_STATE_FREE);
 		return ret;
 	}
 
@@ -3464,20 +3510,20 @@ int hfi1_dms_impl_make_data_request(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 
 int hfi1_dms_impl_make_data_requests(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker)
 {
-	s32 tid_set;
+	u32 tid_set;
 	int rc = 0;
 
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
 	DMS_BUG_ON(_rift_key_error(rx_tracker->hdr.remote_rift_index));
 
-	tid_set = hfi1_dms_impl_tid_set_peek(dms);
+	rc = _tidset_idx_peek(dms, &tid_set);
 
-	while (rc == 0 && tid_set >= 0 && (rx_tracker->payload_requested < rx_tracker->total_payload)) {
+	while (rc == 0 && (rx_tracker->payload_requested < rx_tracker->total_payload)) {
 		rc = hfi1_dms_impl_make_data_request(dms, rx_tracker, tid_set);
 		if (rc == 0) {
-			hfi1_dms_impl_tid_set_get(dms);
-			tid_set = hfi1_dms_impl_tid_set_peek(dms);
+			_tidset_idx_reserve(dms, tid_set);
+			rc = _tidset_idx_peek(dms, &tid_set);
 		}
 	}
 
@@ -3511,7 +3557,7 @@ int calculate_access_mr_page_offset(struct hfi1_dms *dms, struct hfi1_dms_access
 	if (access->mr->mode == HFI1_DMS_MR_MODE_VADDR) {
 		// offset is interpreted as a user virtual address
 		if (offset < access->mr->user.addr) {
-			pr_info("Invalid virtual address offset.\n");
+			dd_dev_info(dms->dd, "Invalid virtual address offset.\n");
 			return -EINVAL;
 		}
 		*page_offset = access->mr->region_offset + offset - access->mr->user.addr;
@@ -3520,7 +3566,7 @@ int calculate_access_mr_page_offset(struct hfi1_dms *dms, struct hfi1_dms_access
 	}
 
 	if ((*page_offset + size) > access->mr->extended_vaddr.len) {
-		pr_info("Invalid length from offset.\n");
+		dd_dev_info(dms->dd, "Invalid length from offset.\n");
 		return -EINVAL;
 	}
 
@@ -3536,7 +3582,7 @@ int calculate_mr_page_offset(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 
 	if (mr->mode == HFI1_DMS_MR_MODE_VADDR) {
 		// offset is interpreted as a user virtual address
 		if (offset < mr->user.addr) {
-			pr_info("Invalid virtual address offset.\n");
+			dd_dev_info(dms->dd, "Invalid virtual address offset.\n");
 			return -EINVAL;
 		}
 		*page_offset = mr->region_offset + offset - mr->user.addr;
@@ -3545,7 +3591,7 @@ int calculate_mr_page_offset(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 
 	}
 
 	if ((*page_offset + size) > mr->extended_vaddr.len) {
-		pr_info("Invalid length from offset.\n");
+		dd_dev_info(dms->dd, "Invalid length from offset.\n");
 		return -EINVAL;
 	}
 
@@ -3570,7 +3616,7 @@ int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_handle
 
 	access = hfi1_dms_access_lookup(dms, parameters.dms_key, &client);
 	if (!client) {
-		pr_info("Client not found for dms_key %llu.\n", parameters.dms_key);
+		dd_dev_info(dms->dd, "Client not found for dms_key %llu.\n", parameters.dms_key);
 		reason = HFI1_DMS_ERR_TYPE_CLIENT_NOT_FOUND;
 		goto nack;
 	}
@@ -3589,7 +3635,7 @@ int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_handle
 	ret = access_xfer_begin(dms, access);
 	if (ret < 0) {
 		if (ret == -EBUSY) {
-			pr_info("Unable to begin transfer on ephemeral access %llu (0x%016llx) because another transfer is already active.\n", parameters.dms_key, parameters.dms_key);
+			dd_dev_info(dms->dd, "Unable to begin transfer on ephemeral access %llu (0x%016llx) because another transfer is already active.\n", parameters.dms_key, parameters.dms_key);
 			reason = HFI1_DMS_ERR_TYPE_ACCESS_BUSY;
 		}
 		goto nack;
@@ -3597,9 +3643,9 @@ int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_handle
 
 	tx_tracker = hfi1_dms_impl_tx_tracker_read_new(dms, parameters.tbytes, page_offset, parameters.slid,
 			parameters.rx_rift_index, access, parameters.head_misalignment, parameters.include_fixup_data, parameters.rx_id,
-			parameters.size_qw, parameters.tid_info);
+			parameters.size_qw, parameters.tid_info, parameters.flags, parameters.imm_data);
 	if (!tx_tracker) {
-		access_xfer_cancel(dms, access);
+		access_xfer_end(dms, access, parameters.flags, parameters.imm_data, -ENOMEM);
 		reason = HFI1_DMS_ERR_TYPE_NO_MEMORY;
 		goto nack;
 	}
@@ -3614,7 +3660,7 @@ int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_handle
 	ret = _dms_tx_rift_continue_read_start(dms, tx_tracker);
 	if (ret < 0) {
 		_rift_release(&dms->tx_rift, tx_tracker->hdr.local_rift_index);
-		access_xfer_cancel(dms, access);
+		access_xfer_end(dms, access, parameters.flags, parameters.imm_data, -ENOMEM);
 		hfi1_dms_impl_tx_tracker_free(dms, tx_tracker);
 		reason = HFI1_DMS_ERR_TYPE_NO_MEMORY;
 		goto nack;
@@ -3630,7 +3676,7 @@ nack:
 	union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, HFI1_DMS_MSG_TYPE_READ_START, reason, parameters.slid, parameters.rx_rift_index);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&nack_cmd);
 	if (ret < 0) {
-		pr_err("Failed to send or enqueue nack packet! ret = %d\n", ret);
+		dd_dev_err(dms->dd, "Failed to send or enqueue nack packet! ret = %d\n", ret);
 	}
 	return 0;
 }
@@ -3647,7 +3693,7 @@ int hfi1_dms_impl_handle_read_start_work(struct hfi1_dms *dms, struct hfi1_dms_w
 			union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, HFI1_DMS_MSG_TYPE_READ_START, HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND, parameters.slid, parameters.rx_rift_index);
 			ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&nack_cmd);
 			if (ret < 0) {
-				pr_err("Failed to send or enqueue nack packet! ret = %d\n", ret);
+				dd_dev_err(dms->dd, "Failed to send or enqueue nack packet! ret = %d\n", ret);
 			}
 			return 0;
 		} else {
@@ -3831,7 +3877,7 @@ int hfi1_dms_impl_handle_data_request_small(struct hfi1_dms *dms, union hfi1_dms
 	cmd = hfi1_dms_proto_cmd_data_small_make(dms, dlid, tx_tracker->hdr.local_rift_index, rx_rift_index, data[0], data[1]);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 	if (ret < 0) {
-		pr_err("Failed to pio send small data request response.\n");
+		dd_dev_err(dms->dd, "Failed to pio send small data request response.\n");
 		return ret; // FIXME - blocksome 
 	}
 
@@ -3921,7 +3967,7 @@ void hfi1_dms_impl_handle_data_request_fixup(struct hfi1_dms *dms, struct hfi1_d
 	cmd = hfi1_dms_proto_cmd_data_fixup_make(dms, tx_tracker->hdr.remote_lid, parameters->tx_rift_index, parameters->rx_rift_index, head, tail);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&cmd);
 	if (ret < 0) {
-		pr_err("Failed to pio send data fixup.\n");
+		dd_dev_err(dms->dd, "Failed to pio send data fixup.\n");
 	}
 }
 
@@ -3978,7 +4024,7 @@ int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct dms_pkt_write_
 
 	access = hfi1_dms_access_lookup(dms, parameters.dms_key, &client);
 	if (!client) {
-		pr_info("Client not found for dms_key %llu.\n", parameters.dms_key);
+		dd_dev_info(dms->dd, "Client not found for dms_key %llu.\n", parameters.dms_key);
 		reason = HFI1_DMS_ERR_TYPE_CLIENT_NOT_FOUND;
 		goto nack;
 	}
@@ -4002,7 +4048,7 @@ int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct dms_pkt_write_
 	ret = access_xfer_begin(dms, access);
 	if (ret < 0) {
 		if (ret == -EBUSY) {
-			pr_info("Unable to begin transfer on ephemeral access %llu (0x%016llx) because another transfer is already active.\n", parameters.dms_key, parameters.dms_key);
+			dd_dev_info(dms->dd, "Unable to begin transfer on ephemeral access %llu (0x%016llx) because another transfer is already active.\n", parameters.dms_key, parameters.dms_key);
 			reason = HFI1_DMS_ERR_TYPE_ACCESS_BUSY;
 		}
 		hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
@@ -4019,7 +4065,7 @@ int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct dms_pkt_write_
 	ret = _dms_rx_rift_continue_write_start(dms, rx_tracker);
 	if (ret < 0) {
 		_rift_release(&dms->rx_rift, rx_tracker->hdr.local_rift_index);
-		access_xfer_cancel(dms, access);
+		access_xfer_end(dms, access, parameters.flags, parameters.imm_data, -ENOMEM);
 		hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
 		reason = HFI1_DMS_ERR_TYPE_NO_MEMORY;
 		goto nack;
@@ -4032,7 +4078,7 @@ nack:
 	union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, HFI1_DMS_MSG_TYPE_WRITE_START, reason, parameters.slid, parameters.tx_rift_index);
 	ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&nack_cmd);
 	if (ret < 0) {
-		pr_err("Failed to send or enqueue nack packet! ret = %d\n", ret);
+		dd_dev_err(dms->dd, "Failed to send or enqueue nack packet! ret = %d\n", ret);
 	}
 	return 0;
 }
@@ -4049,7 +4095,7 @@ int hfi1_dms_impl_handle_write_start_work(struct hfi1_dms *dms, struct hfi1_dms_
 			union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, HFI1_DMS_MSG_TYPE_WRITE_START, HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND, parameters.slid, parameters.tx_rift_index);
 			ret = hfi1_dms_impl_pio_send_or_enqueue_work(dms, (union hfi1_dms_proto_cmd *)&nack_cmd);
 			if (ret < 0) {
-				pr_err("Failed to send or enqueue nack packet! ret = %d\n", ret);
+				dd_dev_err(dms->dd, "Failed to send or enqueue nack packet! ret = %d\n", ret);
 			}
 			return 0;
 		} else {
@@ -4111,7 +4157,7 @@ void hfi1_dms_tx_tracker_cancel(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker
 	}
 
 	if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_READ) {
-		access_xfer_cancel(dms, tx_tracker->read.access);
+		access_xfer_end(dms, tx_tracker->read.access, tx_tracker->read.flags, tx_tracker->read.imm_data, err);
 	} else if (tx_tracker->op == HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE) {
 		tx_tracker->write.completion.fn(&tx_tracker->write.completion.cookie, err);
 	}
@@ -4174,11 +4220,11 @@ void hfi1_dms_rx_tracker_cancel(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker
 		}
 
 		// even with/without tidset waiter(s) there might be one or more active tidsets that must be disabled.
-		s32 const sz = (s32) HFI1_DMS_ARRAY_SIZE(dms->read_requests);
-		for (s32 tid_set = 0; tid_set < sz; ++tid_set) {
+		u32 const sz = HFI1_DMS_ARRAY_SIZE(dms->read_requests);
+		for (u32 tid_set = 0; tid_set < sz; ++tid_set) {
 			union hfi1_dms_tracker * tracker = (union hfi1_dms_tracker *) dms->read_requests[tid_set].rx_tracker;
-			if ((struct hfi1_dms_rx_tracker *)tracker == rx_tracker) {
-				hfi1_dms_tid_set_disable(dms, tid_set);
+			if (((struct hfi1_dms_rx_tracker *)tracker == rx_tracker) && (dms->read_requests[tid_set].state == HFI1_DMS_TIDSET_STATE_ENABLED)) {
+				_tidset_disable(dms, tid_set);
 			}
 		}		
 
@@ -4193,7 +4239,7 @@ void hfi1_dms_rx_tracker_cancel(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker
 	if (rx_tracker->op == HFI1_DMS_RX_TRACKER_OP_RDMA_READ) {
 		rx_tracker->read.completion.fn(&rx_tracker->read.completion.cookie, err);
 	} else { // HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE
-		access_xfer_cancel(dms, rx_tracker->write.access);
+		access_xfer_end(dms, rx_tracker->write.access, rx_tracker->write.flags, rx_tracker->write.imm_data, err);
 	}
 	hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
 
@@ -4259,7 +4305,7 @@ void hfi1_dms_impl_handle_nack_packet(struct hfi1_dms *dms, union hfi1_dms_16b_h
 			break;
 
 		default:
-			pr_debug("Received NACK for unknown message type %u with rift index: %hu, error type: %u\n", nack->info.msg_type, nack->info.rift_index, nack->info.err_type);
+			dd_dev_dbg(dms->dd, "Received NACK for unknown message type %u with rift index: %hu, error type: %u\n", nack->info.msg_type, nack->info.rift_index, nack->info.err_type);
 			break;
 	}
 }
@@ -4675,7 +4721,7 @@ int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 p
 		dms->cur_sdma_engine = cur_sdma_engine;	
 	}
 	if (sdma_engine_count < 0) {
-		dd_dev_warn(dms->dd, "dms: No sdma engine available. Tracker will be put back on the todo list\n");
+		dd_dev_dbg(dms->dd, "dms: No sdma engine available. Tracker will be put back on the todo list\n");
 		for (i = 0; i < nahg_mem; ++i) {
 			struct hfi1_dms_ahg_header *ahg_mem = dms->ahg_header_stack[i];
 			hfi1_dms_impl_dlist_append(&dms->ahg_headers.free, &ahg_mem->dlist);
@@ -4968,7 +5014,7 @@ struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_write_new(struct hfi1_dms *
 
 struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_read_new(struct hfi1_dms *dms, u32 size,
 		u64 byte_offset_from_first_page, u32 remote_lid, u16 remote_rift_index, struct hfi1_dms_access *access,
-		u8 head_misalignment, u8 include_fixup_data, u8 rx_id, u16 size_qw, u32 tid_info)
+		u8 head_misalignment, u8 include_fixup_data, u8 rx_id, u16 size_qw, u32 tid_info, u16 flags, u64 imm_data)
 {
 	struct hfi1_dms_tx_tracker * tx_tracker;
 
@@ -4984,6 +5030,9 @@ struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_read_new(struct hfi1_dms *d
 		tx_tracker->read.start.rx_id = rx_id;
 		tx_tracker->read.start.nbytes = size_qw << 3;
 		tx_tracker->read.start.tid_info = tid_info;
+
+		tx_tracker->read.flags = flags;
+		tx_tracker->read.imm_data = imm_data;
 	}
 
 	return tx_tracker;
@@ -5191,42 +5240,36 @@ void hfi1_dms_impl_dlist_remove(struct hfi1_dms_dlist * dlist, struct hfi1_dms_d
 
 }
 
-s32 hfi1_dms_impl_tid_set_peek(struct hfi1_dms *dms)
+int _tidset_idx_peek(struct hfi1_dms *dms, u32 *tid_set)
 {
-	s32 tid_set;
-	s32 ret;
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(!tid_set);
 
-	DMS_BUG_ON(dms == NULL);
-	if (dms->free_tid_sets_stack_top <= 0) {
-		ret = -1; // No free TID sets available
-		return ret;
-	}
-	tid_set = dms->free_tid_sets_stack[dms->free_tid_sets_stack_top - 1];
-
-	return tid_set;
-}
-
-s32 hfi1_dms_impl_tid_set_get(struct hfi1_dms *dms)
-{
-	s32 tid_set;
-
-	DMS_BUG_ON(dms == NULL);
-	if (dms->free_tid_sets_stack_top <= 0) {
+	if (dms->free_tid_sets_stack_top == 0) {
 		return -1; // No free TID sets available
 	}
 
-	tid_set = dms->free_tid_sets_stack[--dms->free_tid_sets_stack_top];
-
-	return tid_set;
+	*tid_set = dms->free_tid_sets_stack[dms->free_tid_sets_stack_top - 1];
+	return 0;
 }
 
-void hfi1_dms_impl_tid_set_put(struct hfi1_dms *dms, s32 tid_set)
+void _tidset_idx_reserve(struct hfi1_dms *dms, u32 tid_set)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(tid_set >= HFI1_DMS_TID_SET_IDX_COUNT);
+	DMS_BUG_ON(dms->read_requests[tid_set].state != HFI1_DMS_TIDSET_STATE_ENABLED);
+	DMS_BUG_ON(dms->free_tid_sets_stack_top == 0);
+	DMS_BUG_ON(dms->free_tid_sets_stack[dms->free_tid_sets_stack_top - 1] != tid_set);
+
+	--dms->free_tid_sets_stack_top;
+}
+
+void _tidset_idx_release(struct hfi1_dms *dms, u32 tid_set)
 {
 	DMS_BUG_ON(dms == NULL);
-	DMS_BUG_ON(tid_set < HFI1_DMS_TID_SET_IDX_MIN || tid_set > HFI1_DMS_TID_SET_IDX_MAX);
-	DMS_BUG_ON(dms->free_tid_sets_stack_top >= HFI1_DMS_TID_SET_IDX_MAX);
+	DMS_BUG_ON(tid_set >= HFI1_DMS_TID_SET_IDX_COUNT);
+	DMS_BUG_ON(dms->free_tid_sets_stack_top >= HFI1_DMS_TID_SET_IDX_COUNT);
 
-	dms->read_requests[tid_set] = (struct hfi1_dms_read_request_state){0};
 	dms->free_tid_sets_stack[dms->free_tid_sets_stack_top++] = tid_set;
 }
 
@@ -5337,7 +5380,7 @@ int hfi1_dms_impl_pio_send(struct hfi1_dms *dms, u64 pbc, void *data, u64 size_q
 	u32 avail = (u32) sc->credits - (sc->fill - sc->alloc_free);
 	// only retry once because we've got our work queue anyway
 	if (blocks > avail) {
-		pr_debug("PIO Not enough space, trying again");
+		dd_dev_dbg(dms->dd, "PIO Not enough space, trying again");
 		u64 hw_free = le64_to_cpu(*sc->hw_free);
 		sc->free = hw_free & CR_COUNTER_SMASK;
 		sc->alloc_free = sc->free;
@@ -5445,7 +5488,7 @@ int hfi1_dms_impl_pio_send_or_enqueue_work(struct hfi1_dms *dms, union hfi1_dms_
 
 	ret = hfi1_dms_cmd_pio_send(dms, cmd);
 	if (ret < 0) {
-		pr_debug("%s:%d:%s() pio send failed, queueing work. ret=%d\n", __FILENAME__, __LINE__, __func__, ret);
+		dd_dev_dbg(dms->dd, "%s:%d:%s() pio send failed, queueing work. ret=%d\n", __FILENAME__, __LINE__, __func__, ret);
 		hfi1_dms_impl_queue_work_item(dms, (void*)cmd, sizeof(*cmd), hfi1_dms_impl_pio_send_work);
 	}
 

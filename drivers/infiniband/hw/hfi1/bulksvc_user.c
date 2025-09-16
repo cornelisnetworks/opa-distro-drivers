@@ -401,7 +401,7 @@ struct reg_dma_buffer_cmpl_cookie {
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 };
 
-static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data)
+static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data, int status)
 {
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
@@ -410,7 +410,7 @@ static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completio
 		(struct reg_dma_buffer_cmpl_cookie *)cookie;
 
 	cmpl.app_context = reg_cookie->app_context;
-	cmpl.status = 0; /* success */
+	cmpl.status = status;
 	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = reg_cookie->access_key;
 
@@ -559,7 +559,7 @@ struct dma_access_once_cmpl_cookie {
 	u32 access_key;
 };
 
-static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data)
+static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data, int status)
 {
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
@@ -568,7 +568,7 @@ static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie
 		(struct dma_access_once_cmpl_cookie *)cookie;
 
 	cmpl.app_context = dma_cookie->app_context;
-	cmpl.status = 0; /* success */
+	cmpl.status = status;
 	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = dma_cookie->access_key;
 
@@ -653,7 +653,7 @@ struct dma_access_notify_cookie {
 	u32 access_key;
 };
 
-static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data)
+static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data, int status)
 {
 	struct hfi1_bulksvc_queue_record *cmplq_record;
 	struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
@@ -668,7 +668,7 @@ static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 f
 	}
 
 	cmpl.app_context = access_cookie->app_context;
-	cmpl.status = 0; /* success */
+	cmpl.status = status;
 	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_NOTIFY;
 	cmpl.type_notify.access_key = access_cookie->access_key;
 	cmpl.type_notify.flags = flags;
