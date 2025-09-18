@@ -177,6 +177,8 @@ cp $srcdir/include/uapi/rdma/rdma_user_ioctl.h $tardir/include/uapi/rdma
 cp $srcdir/include/uapi/rdma/rdma_user_ioctl_cmds.h $tardir/include/uapi/rdma
 cp $srcdir/include/rdma/opa_port_info.h $tardir/include/rdma
 cp $srcdir/include/rdma/rdma_vt.h $tardir/include/rdma
+cp $srcdir/include/rdma/rdmavt_qp.h $tardir/include/rdma
+cp $srcdir/include/rdma/tid_rdma_defs.h $tardir/include/rdma
 
 #build the modules
 cd $tardir

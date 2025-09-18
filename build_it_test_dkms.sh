@@ -124,8 +124,6 @@ if [[ $test_arg == "test" ]]; then
 	echo "Comparing verions..."
 	if [[ $h_new == $h_old ]]; then
 		echo -e "${RED}New HFI did not install!${NC}"
-		echo "Original: $h_old"
-		echo "Updated:  $h_new"
 		sudo dpkg -r opxs-modules-dkms
 		exit 1
 	else
@@ -136,8 +134,6 @@ if [[ $test_arg == "test" ]]; then
 
 	if [[ $r_new == $r_old ]]; then
 		echo -e "${RED}New RDMAVT did not install!${NC}"
-		echo "Original: $r_old"
-		echo "Updated:  $r_new"
 		sudo dpkg -r opxs-modules-dkms
 		exit 1
 	else
@@ -147,9 +143,8 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	if [[ $use_nvidia = y ]]; then
-		echo -e "\n--------------------"
 		echo "Checking GPU support:"
-		modinfo hfi1 | grep -i nvidia > /dev/null
+		modinfo hfi1.ko | grep -i nvidia > /dev/null
 		if [[ $? -eq 0 ]]; then
 			echo -e "${GREEN}Nvidia GPU build detected${NC}"
 		else
@@ -159,7 +154,6 @@ if [[ $test_arg == "test" ]]; then
 	fi
 
 	if [[ $use_amd = y ]] ; then
-		echo -e "\n--------------------"
 		echo "Checking AMD GPU support:"
 		modinfo hfi1 | grep -E '\<(amd_|amdgpu)' > /dev/null
 		if [[ $? -eq 0 ]] ; then
