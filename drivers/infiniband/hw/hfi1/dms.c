@@ -2045,6 +2045,24 @@ static struct hfi1_dms_rx_tracker * _dms_tidset_waiter_next(struct hfi1_dms *dms
 	return _dms_tidset_waiter_peek(dms, type);
 }
 
+static struct hfi1_dms_rx_tracker * _dms_tidset_waiter_head(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
+{
+	return _dms_tidset_waiter_peek(dms, type);
+}
+
+static struct hfi1_dms_rx_tracker * _dms_tidset_waiter_tail(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
+{
+	DMS_BUG_ON(!dms);
+	DMS_BUG_ON(type >= HFI1_DMS_TIDSET_WAITER_TYPE_COUNT);
+
+	if (dms->tidset_waiters[type].tail == dms->tidset_waiters[type].head)
+		return NULL;
+
+	static u64 const mask = HFI1_DMS_ARRAY_SIZE(dms->tidset_waiters[type].ring) - 1;
+	u64 const idx = (dms->tidset_waiters[type].tail - 1) & mask;
+	return (struct hfi1_dms_rx_tracker *) _rift_lookup(&dms->rx_rift, dms->tidset_waiters[type].ring[idx]);
+}
+
 static void _dms_tidset_waiters_poll(struct hfi1_dms *dms)
 {
 	struct hfi1_dms_rx_tracker *rx_tracker;
@@ -4094,21 +4112,26 @@ static void hfi1_dms_rx_tracker_cancel(struct hfi1_dms *dms, struct hfi1_dms_rx_
 	if (status != HFI1_DMS_RIFT_ERR_INDEX_NOT_SET) {
 
 		// remove from tidset waiter rings
-		u64 cancel = 0;
 		for (enum hfi1_dms_tidset_waiter_type type = HFI1_DMS_TIDSET_WAITER_TYPE_READ; type < HFI1_DMS_TIDSET_WAITER_TYPE_COUNT; ++type) {
+			DMS_BUG_ON(dms->tidset_waiters[type].head > dms->tidset_waiters[type].tail);
+
+			u64 cancel = 0;
 			u64 const head =  dms->tidset_waiters[type].head;
 			u64 const tail =  dms->tidset_waiters[type].tail;
 			u64 const count = tail - head;
 			u64 const mask = HFI1_DMS_ARRAY_SIZE(dms->tidset_waiters[type].ring) - 1;
+
+			if (count == 0)
+				continue;
 			
-			if ((struct hfi1_dms_rx_tracker *)_rift_lookup(&dms->rx_rift, dms->tidset_waiters[type].ring[head & mask]) == rx_tracker) {
+			if (_dms_tidset_waiter_head(dms, type) == rx_tracker) {
 				// special case: remove from head;
 				dms->tidset_waiters[type].head += 1;
-				break;				
-			} else if ((struct hfi1_dms_rx_tracker *)_rift_lookup(&dms->rx_rift, dms->tidset_waiters[type].ring[tail & mask]) == rx_tracker) {
+				break;
+			} else if (_dms_tidset_waiter_tail(dms, type) == rx_tracker) {
 				// special case: remove from tail;
 				dms->tidset_waiters[type].tail -= 1;
-				break;				
+				break;
 			} else {
 				// general case: remove from middle; must iterate entire ring in order to "compact" the ring after
 				// potentially removing a middle entry.
