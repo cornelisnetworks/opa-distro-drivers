@@ -89,13 +89,17 @@ int hfi1_acquire_user_pages(struct mm_struct *mm, unsigned long vaddr, size_t np
 		return -EINVAL;
 	
 	int ret;
-	unsigned int gup_flags = FOLL_LONGTERM | (writable ? FOLL_WRITE : 0);
+	unsigned int gup_flags = writable ? FOLL_WRITE : 0;
 
 	if (!current || !current->mm || current->mm != mm) {
 		mmap_read_lock(mm);
-		ret = pin_user_pages_remote(mm, vaddr, npages, gup_flags, pages, NULL, NULL);
-		mmap_read_unlock(mm);
+		int locked = 1;
+		ret = pin_user_pages_remote(mm, vaddr, npages, gup_flags | FOLL_WRITE, pages, NULL, &locked);
+		if (locked) {
+			mmap_read_unlock(mm);
+		}
 	} else {
+		gup_flags |= FOLL_LONGTERM;
 		ret = pin_user_pages_fast(vaddr, npages, gup_flags, pages);
 	}
 	if (ret < 0)
