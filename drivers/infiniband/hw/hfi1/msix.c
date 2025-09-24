@@ -3,6 +3,7 @@
  * Copyright(c) 2018 - 2020 Intel Corporation.
  */
 
+#include "bulksvc.h"
 #include "hfi.h"
 #include "affinity.h"
 #include "sdma.h"
@@ -28,6 +29,7 @@ int msix_initialize(struct hfi1_devdata *dd)
 	 *	one per kernel receive context
 	 *	one for each bulksvc context
 	 *	one for each VNIC context
+	 *	one for the bulksvc doorbell
 	 *      ...any new IRQs should be added here.
 	 */
 	total = 1 + (dr->last_sdma_engine - dr->first_sdma_engine);
@@ -37,6 +39,7 @@ int msix_initialize(struct hfi1_devdata *dd)
 		total += pr->n_krcv_queues + pr->num_netdev_contexts +
 			 pr->num_bulksvc_contexts;
 	}
+	total += 1;
 
 	if (total >= CCE_NUM_MSIX_VECTORS)
 		return -EINVAL;
@@ -128,7 +131,7 @@ printk("%s: failed, nr %ld, max_requested %d, -ENOSPC\n", __func__, nr, dd->msix
 	me->type = type;
 
 	/* affinity is not set up when the general interrupt is requested */
-	if (type != IRQ_GENERAL) {
+	if (type != IRQ_GENERAL && type != IRQ_BULKSVC_DOORBELL) {
 		/* This is a request, so a failure is not fatal */
 		ret = hfi1_get_irq_affinity(dd, me);
 		if (ret)
@@ -241,6 +244,25 @@ int msix_request_general_irq(struct hfi1_devdata *dd)
 		return -EINVAL;
 	}
 
+	return 0;
+}
+
+int msix_request_doorbell_irq(struct hfi1_devdata *dd)
+{
+	int nr;
+	char name[MAX_NAME_SIZE];
+
+	if (!dd->bulksvc)
+		return -EINVAL;
+
+	snprintf(name, sizeof(name), DRIVER_NAME "_%d doorbell", dd->unit);
+	nr = msix_request_irq(dd, dd->bulksvc, hfi1_bulksvc_doorbell_interrupt, hfi1_bulksvc_doorbell_interrupt_thr, IRQ_BULKSVC_DOORBELL, name);
+	dd_dev_dbg(dd, "requsted bulksvc doorbell msix irq, got %d\n", nr);
+	if (nr < 0)
+		return nr;
+	dd->bulksvc->doorbell_msix_intr = nr;
+	remap_intr(dd, 330, nr);
+	remap_intr(dd, 331, nr);
 	return 0;
 }
 

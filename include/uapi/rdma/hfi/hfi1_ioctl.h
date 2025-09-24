@@ -354,9 +354,10 @@ struct hfi1_gdr_cache_evict_params {
 enum hfi1_objects {
 	HFI1_OBJECT_DV0 = (1U << UVERBS_ID_NS_SHIFT),
 	HFI1_OBJECT_DV1,
+	HFI1_OBJECT_DV2
 };
 
-/* methods for custom objects dv0 and dv1 - max of 8 per object */
+/* methods for custom objects dv0-dv2 - max of 8 per object */
 enum hfi1_methods_dv0 {
 	HFI1_METHOD_ASSIGN_CTXT = (1U << UVERBS_ID_NS_SHIFT),
 	HFI1_METHOD_CTXT_INFO,
@@ -375,6 +376,13 @@ enum hfi1_methods_dv1 {
 	HFI1_METHOD_TID_INVAL_READ,
 	HFI1_METHOD_GET_VERS,
 	HFI1_METHOD_PIN_STATS,
+};
+
+enum hfi1_methods_dv2 {
+	HFI1_METHOD_BULKSVC_GET_CMPLQ = (1U << UVERBS_ID_NS_SHIFT),
+	HFI1_METHOD_BULKSVC_GET_CMDQ,
+	HFI1_METHOD_BULKSVC_CLIENT_INIT,
+	HFI1_METHOD_BULKSVC_DOORBELL
 };
 
 /*
@@ -654,6 +662,14 @@ struct hfi1_pin_stats_rsp {
 	__u64 external_evictions; /* system-driven evictions */
 };
 
+/*
+ * get_cmplq
+ */
+enum hfi1_attrs_bulksvc_get_cmplq {
+	/* no cmd */
+	HFI1_ATTR_BULKSVC_GET_CMPLQ_RSP = (1U << UVERBS_ID_NS_SHIFT),
+};
+
 struct hfi1_bulksvc_queue_info {
 	__u32 queue_id;
 	__u64 queue_ctrl_mmap_token;
@@ -662,10 +678,28 @@ struct hfi1_bulksvc_queue_info {
 	__u32 queue_buffer_mmap_size;
 };
 
-#define HFI1_BULKSVC_CLIENT_FLAG_DOORBELL (1u << 0)
+/*
+ * get_cmdq
+ */
+enum hfi1_attrs_bulksvc_get_cmdq {
+	/* no cmd */
+	HFI1_ATTR_BULKSVC_GET_CMDQ_RSP = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+/*
+ * client_init
+ */
+enum hfi1_bulksvc_get_client_init {
+	/* no cmd */
+	HFI1_ATTR_BULKSVC_CLIENT_INIT_RSP = (1U << UVERBS_ID_NS_SHIFT),
+};
+
 struct hfi1_bulksvc_client_init {
 	__u32 client_key;
 	__u32 flags;
+	__aligned_u64 fast_doorbell;
+	__u32 fast_doorbell_mmap_size;
 };
+#define HFI1_HFISVC_CLIENT_FLAG_DOORBELL (1u << 0)
 
 #endif /* _LINUX__HFI1_IOCTL_H */

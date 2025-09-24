@@ -26,6 +26,8 @@
 #include "aspm.h"
 #include "pinning.h"
 #include "file_ops.h"
+#include "uverbs.h"
+
 #include "bulksvc.h"
 
 #undef pr_fmt
@@ -49,7 +51,6 @@ static void init_subctxts(struct hfi1_ctxtdata *uctxt,
 static int init_user_ctxt(struct hfi1_filedata *fd,
 			  struct hfi1_ctxtdata *uctxt);
 static void user_init(struct hfi1_ctxtdata *uctxt);
-static int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type, struct vm_area_struct *vma, int qid);
 static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 static int get_base_info(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 static int user_exp_rcv_setup(struct hfi1_filedata *fd, unsigned long arg,
@@ -83,8 +84,7 @@ static int create_bulksvc_cmplq(struct hfi1_filedata *fd, unsigned long arg,
 				 u32 len);
 static int create_bulksvc_cmdq(struct hfi1_filedata *fd, unsigned long arg,
 				 u32 len);
-static int create_bulksvc_queue(struct hfi1_bulksvc_user_info* const bulksvc_user_info, bool is_cmplq, struct hfi1_bulksvc_queue_info __user * output_record);
-static int init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 len);
+static int ioctl_init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 static int ioctl_bulksvc_doorbell(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 
 static const struct file_operations hfi1_file_ops = {
@@ -129,6 +129,8 @@ static const struct vm_operations_struct vm_ops = {
 	HFI1_MMAP_TOKEN_SET(CTXT, ctxt) | \
 	HFI1_MMAP_TOKEN_SET(SUBCTXT, subctxt) | \
 	HFI1_MMAP_TOKEN_SET(OFFSET, (offset_in_page(addr))))
+
+#define HFI1_BULKSVC_FAST_DB_INDEX (5ull)
 
 #define dbg(fmt, ...)				\
 	pr_info(fmt, ##__VA_ARGS__)
@@ -303,7 +305,7 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 		break;
 	case HFI1_IOCTL_BULKSVC_CLIENT_INIT:
 		pr_debug("initializing bulksvc client\n");
-		ret = init_bulksvc_client(fd, arg, _IOC_SIZE(cmd));
+		ret = ioctl_init_bulksvc_client(fd, arg, _IOC_SIZE(cmd));
 		break;
 	case HFI1_IOCTL_BULKSVC_DOORBELL:
 		ret = ioctl_bulksvc_doorbell(fd, arg, _IOC_SIZE(cmd));
@@ -396,12 +398,11 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 	subctxt = HFI1_MMAP_TOKEN_GET(SUBCTXT, token);
 	type = HFI1_MMAP_TOKEN_GET(TYPE, token);
 
-	if (type == BULKSVC_CMDQ_CTRL || type == BULKSVC_CMDQ_BUF ||
-	    type == BULKSVC_CMPLQ_CTRL || type == BULKSVC_CMPLQ_BUF) {
+	if (type >= BULKSVC_QUEUE_TYPES_FIRST && type <= BULKSVC_QUEUE_TYPES_LAST) {
 		if (!fd->bulksvc_user_info || subctxt != 0) {
 			return -EINVAL;
 		}
-		return do_bulksvc_mmap(fd->bulksvc_user_info, type, vma, ctxt);
+		return do_bulksvc_mmap(fd->bulksvc_user_info, type, vma);
 	}
 
 	if (!uctxt) {
@@ -706,7 +707,35 @@ done:
 	return ret;
 }
 
-static int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type, struct vm_area_struct *vma, int qid)
+int do_bulksvc_doorbell_mmap(struct hfi1_filedata *fd, struct vm_area_struct *vma)
+{
+	struct hfi1_devdata *dd;
+	unsigned long flags;
+	u64 memaddr = 0;
+	int ret = 0;
+
+	if (!fd || !vma)
+		return -EINVAL;
+
+	if (!(vma->vm_flags & VM_SHARED))
+		return -EINVAL;
+
+	dd = fd->dd;
+	if (!dd)
+		return -EINVAL;
+	if ((vma->vm_end - vma->vm_start) != PAGE_SIZE)
+		return -EINVAL;
+
+	flags = vma->vm_flags;
+	flags |= VM_IO | VM_DONTEXPAND;
+	memaddr = (u64)dd->bar_maps[0].physaddr + (u64) dd->params->cce_int_force_reg;
+	vm_flags_reset(vma, flags);
+	ret = io_remap_pfn_range(vma, vma->vm_start, PFN_DOWN(memaddr), PAGE_SIZE, vma->vm_page_prot);
+
+	return ret;
+}
+
+int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type, struct vm_area_struct *vma)
 {
 	unsigned long flags;
 	u64 memaddr = 0;
@@ -729,57 +758,70 @@ static int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type, struct
 	vma->vm_pgoff = 0;
 	flags = vma->vm_flags;
 
-	switch (type) {
-	case BULKSVC_CMPLQ_CTRL:
-	case BULKSVC_CMPLQ_BUF:
-	case BULKSVC_CMDQ_CTRL:
-	case BULKSVC_CMDQ_BUF: {
-		mutex_lock(&info->queue_records_lock);
-		bool const is_cmplq = (type == BULKSVC_CMPLQ_CTRL ||
-							type == BULKSVC_CMPLQ_BUF);
-		u8 const current_present = is_cmplq ?
-			info->num_cmplqs :
-			info->num_cmdqs;
-		u8 const idx = qid;
-		if (idx >= current_present) {
+	mutex_lock(&info->queue_records_lock);
+	bool is_cmplq;
+	bool is_ctrl;
+	int qid;
+	{
+		if (type >= BULKSVC_CMPLQ_CTRL0 && type < BULKSVC_CMPLQ_CTRL0 + BULKSVC_USER_MAX_NUM_CMPLQS) {
+			is_cmplq = true;
+			is_ctrl = true;
+			qid = type - BULKSVC_CMPLQ_CTRL0;
+		} else if (type >= BULKSVC_CMPLQ_BUF0 && type < BULKSVC_CMPLQ_BUF0 + BULKSVC_USER_MAX_NUM_CMPLQS) {
+			is_cmplq = true;
+			is_ctrl = false;
+			qid = type - BULKSVC_CMPLQ_BUF0;
+		} else if (type >= BULKSVC_CMDQ_CTRL0 && type < BULKSVC_CMDQ_CTRL0 + BULKSVC_USER_MAX_NUM_CMDQS) {
+			is_cmplq = false;
+			is_ctrl = true;
+			qid = type - BULKSVC_CMDQ_CTRL0;
+		} else if (type >= BULKSVC_CMDQ_BUF0 && type < BULKSVC_CMDQ_BUF0 + BULKSVC_USER_MAX_NUM_CMDQS) {
+			is_cmplq = false;
+			is_ctrl = false;
+			qid = type - BULKSVC_CMDQ_BUF0;
+		} else {
 			mutex_unlock(&info->queue_records_lock);
-			ret = -EFAULT;
+			ret = -EINVAL;
 			goto done;
 		}
-		struct hfi1_bulksvc_queue_record* record = NULL;
-		if (is_cmplq) {
-			record = &info->cmplq_records[idx];
-		} else {
-			record = &info->cmdq_records[idx];
-		}
-		if (!record || !record->active) {
-			pr_err("record %p, active %d\n",
-			       record, record ? record->active : 0);
-			mutex_unlock(&info->queue_records_lock);
-			ret = -EFAULT;
-			goto done;
-		}
-		bool const is_ctrl = (type == BULKSVC_CMDQ_CTRL ||
-							type == BULKSVC_CMPLQ_CTRL);
-		if (is_ctrl) {
-			memaddr = (u64) record->ctrl;
-			memlen = record->queue_info.queue_ctrl_mmap_size;
-			flags |= VM_DONTEXPAND;
-			vmf = 1;
-		} else {
-			memaddr = (u64) record->queue_buf;
-			memlen = record->queue_info.queue_buffer_mmap_size;
-			flags |= VM_DONTEXPAND;
-			vmf = 1;
-			// TODO if cmplq buf, mark RO
-		}
+	}
+		
+	u8 const current_present = is_cmplq ?
+		info->num_cmplqs :
+		info->num_cmdqs;
+	
+	u8 const idx = qid;
+	if (idx >= current_present) {
 		mutex_unlock(&info->queue_records_lock);
-		break;
+		ret = -EFAULT;
+		goto done;
 	}
-	default:
-		ret = -EINVAL;
-		break;
+	struct hfi1_bulksvc_queue_record* record = NULL;
+	if (is_cmplq) {
+		record = &info->cmplq_records[idx];
+	} else {
+		record = &info->cmdq_records[idx];
 	}
+	if (!record || !record->active) {
+		pr_err("record %p, active %d\n",
+			record, record ? record->active : 0);
+		mutex_unlock(&info->queue_records_lock);
+		ret = -EFAULT;
+		goto done;
+	}
+	if (is_ctrl) {
+		memaddr = (u64) record->ctrl;
+		memlen = record->queue_info.queue_ctrl_mmap_size;
+		flags |= VM_DONTEXPAND;
+		vmf = 1;
+	} else {
+		memaddr = (u64) record->queue_buf;
+		memlen = record->queue_info.queue_buffer_mmap_size;
+		flags |= VM_DONTEXPAND;
+		vmf = 1;
+		// TODO if cmplq buf, mark RO
+	}
+	mutex_unlock(&info->queue_records_lock);
 
 	if ((vma->vm_end - vma->vm_start) != memlen) {
 		hfi1_cdbg(PROC, "Memory size mismatch for bulksvc queue %lu:%lu",
@@ -2136,26 +2178,32 @@ int hfi1_get_pinning_stats(struct hfi1_filedata *fd,
 
 static int create_bulksvc_cmplq(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 {
+	int ret;
 	(void) len;
 
 	struct hfi1_devdata * const dd = fd->dd;
 	struct hfi1_bulksvc* const bulksvc = dd->bulksvc;
+	struct hfi1_bulksvc_queue_info *out;
 
 	if (!bulksvc) {
-		printk(KERN_ERR "tried to get bulksvc cmplq, but bulksvc not enabled\n");
+		dd_dev_err(dd, "tried to get bulksvc cmplq, but bulksvc not enabled\n");
 		return -ENODEV;
 	}
 
 	if (!fd->bulksvc_user_info) {
-		printk(KERN_ERR "tried to get bulksvc cmplq, but user info not initialized\n");
+		dd_dev_err(dd, "tried to get bulksvc cmplq, but user info not initialized\n");
 		return -ENODEV;
 	}
 
 	struct hfi1_bulksvc_user_info* const bulksvc_user_info = fd->bulksvc_user_info;
 
-	struct hfi1_bulksvc_queue_info __user *cmplq_info_param = (struct hfi1_bulksvc_queue_info __user *) arg;
 
-	return create_bulksvc_queue(bulksvc_user_info, true, cmplq_info_param);
+	ret = create_bulksvc_queue(dd, bulksvc_user_info, true, false, &out);
+	if (ret)
+		return ret;
+
+	return copy_to_user((struct hfi1_bulksvc_user_info *)arg,
+			    out, sizeof(*out));
 }
 
 static int create_bulksvc_cmdq(struct hfi1_filedata *fd, unsigned long arg, u32 len)
@@ -2164,57 +2212,72 @@ static int create_bulksvc_cmdq(struct hfi1_filedata *fd, unsigned long arg, u32 
 
 	struct hfi1_devdata * const dd = fd->dd;
 	struct hfi1_bulksvc* const bulksvc = dd->bulksvc;
+	struct hfi1_bulksvc_queue_info *out;
+	int ret;
 
 	if (!bulksvc) {
-		printk(KERN_ERR "tried to get bulksvc cmplq, but bulksvc not enabled\n");
+		dd_dev_err(dd, "tried to get bulksvc cmdq, but bulksvc not enabled\n");
 		return -ENODEV;
 	}
 
 	if (!fd->bulksvc_user_info) {
-		printk(KERN_ERR "tried to get bulksvc cmdq, but user info not initialized\n");
+		dd_dev_err(dd, "tried to get bulksvc cmdq, but user info not initialized\n");
 		return -ENODEV;
-		// fd->bulksvc_user_info = hfi1_bulksvc_user_info_create(fd);
-		// if (!fd->bulksvc_user_info) {
-		// 	return -ENOMEM;
-		// }
-		// mutex_lock(&bulksvc->user_info_lock);
-		// list_add_tail(&fd->bulksvc_user_info->list_entry, &bulksvc->user_infos);
-		// mutex_unlock(&bulksvc->user_info_lock);
 	}
 
 	struct hfi1_bulksvc_user_info* const bulksvc_user_info = fd->bulksvc_user_info;
 
-	struct hfi1_bulksvc_queue_info __user *cmplq_info_param = (struct hfi1_bulksvc_queue_info __user *) arg;
+	ret = create_bulksvc_queue(dd, bulksvc_user_info, false, false, &out);
+	if (ret)
+		return ret;
 
-	return create_bulksvc_queue(bulksvc_user_info, false, cmplq_info_param);
+	return copy_to_user((struct hfi1_bulksvc_queue_info *)arg, out,
+			    sizeof(*out));
 }
 
 // module_param in bulksvc.c
 extern uint bulksvc_user_queue_size_pages_log2;
-static int create_bulksvc_queue(struct hfi1_bulksvc_user_info* const bulksvc_user_info, bool is_cmplq, struct hfi1_bulksvc_queue_info __user * output_info)
+int create_bulksvc_queue(struct hfi1_devdata *dd, struct hfi1_bulksvc_user_info* const bulksvc_user_info,
+			 bool is_cmplq, bool is_uverbs,
+			 struct hfi1_bulksvc_queue_info ** output_info)
 {
 	int rc = 0;
+	u64 c_token, b_token;
 
 	mutex_lock(&bulksvc_user_info->queue_records_lock);
 
-	if (bulksvc_user_info->num_cmplqs >= BULKSVC_USER_MAX_NUM_CMPLQS) {
-		rc = -ENOSPC;
-		printk(KERN_ERR "tried to get bulksvc cmplq, but no more available\n");
-		goto out;
-	}
+	*output_info = NULL;
 
 	struct hfi1_bulksvc_queue_record * const queue_rec = is_cmplq ? &bulksvc_user_info->cmplq_records[bulksvc_user_info->num_cmplqs] : &bulksvc_user_info->cmdq_records[bulksvc_user_info->num_cmdqs];
 
 	u8 *num = is_cmplq ? &bulksvc_user_info->num_cmplqs : &bulksvc_user_info->num_cmdqs;
+	u8 const max_queues = is_cmplq ? BULKSVC_USER_MAX_NUM_CMPLQS : BULKSVC_USER_MAX_NUM_CMDQS;
+
+	if (*num >= max_queues) {
+		rc = -ENOSPC;
+		dd_dev_info(dd, "tried to get bulksvc queue, but no more available\n");
+		goto out;
+	}
+
 	queue_rec->queue_info.queue_id = *num;
 
 	/* TODO constants */
-	int const ctrl_token_type = is_cmplq ? BULKSVC_CMPLQ_CTRL : BULKSVC_CMDQ_CTRL;
-	int const queue_token_type = is_cmplq ? BULKSVC_CMPLQ_BUF : BULKSVC_CMDQ_BUF;
+	int const ctrl_token_type = (is_cmplq ? BULKSVC_CMPLQ_CTRL0 : BULKSVC_CMDQ_CTRL0) + *num;
+	int const queue_token_type = (is_cmplq ? BULKSVC_CMPLQ_BUF0 : BULKSVC_CMDQ_BUF0) + *num;
 	queue_rec->queue_info.queue_ctrl_mmap_size = PAGE_SIZE;
-	queue_rec->queue_info.queue_ctrl_mmap_token = HFI1_MMAP_TOKEN(ctrl_token_type, queue_rec->queue_info.queue_id, 0, 0);
+
+	if (is_uverbs) {
+		/* format is <8bit type><PAGE_SIZE offset> */
+		c_token = rdma_mmap_token_i(ctrl_token_type, 0);
+		b_token = rdma_mmap_token_i(queue_token_type, 0);
+	} else {
+		/* format is <32 bit magic><8bit type><8bit ctxt><8bit subctxt><PAGE_SIZE offset> */
+		c_token = HFI1_MMAP_TOKEN(ctrl_token_type, 0, 0, 0);
+		b_token = HFI1_MMAP_TOKEN(queue_token_type, 0, 0, 0);
+	}
+	queue_rec->queue_info.queue_ctrl_mmap_token = c_token;
+	queue_rec->queue_info.queue_buffer_mmap_token = b_token;
 	queue_rec->queue_info.queue_buffer_mmap_size = (1 << bulksvc_user_queue_size_pages_log2) * PAGE_SIZE;
-	queue_rec->queue_info.queue_buffer_mmap_token = HFI1_MMAP_TOKEN(queue_token_type, queue_rec->queue_info.queue_id, 0, 0);
 
 	queue_rec->ctrl = vmalloc_user(queue_rec->queue_info.queue_ctrl_mmap_size);
 	if (!queue_rec->ctrl) {
@@ -2229,21 +2292,34 @@ static int create_bulksvc_queue(struct hfi1_bulksvc_user_info* const bulksvc_use
 		goto out;
 	}
 	WARN_ON(!IS_ALIGNED((unsigned long)queue_rec->queue_buf, PAGE_SIZE));
-
-	pr_debug("created bulksvc %s queue with id %d\n",
-		is_cmplq ? "completion" : "command", queue_rec->queue_info.queue_id);
-	rc = copy_to_user(output_info, &queue_rec->queue_info, sizeof(*output_info));
-
-	if (rc != 0) {
+	u64 const num_buf_pages = queue_rec->queue_info.queue_buffer_mmap_size / PAGE_SIZE;
+	struct page** const magic_buf_pages = (struct page **)kmalloc(2 * num_buf_pages * sizeof(struct page*), GFP_KERNEL);
+	if (!magic_buf_pages) {
 		vfree(queue_rec->ctrl);
 		vfree(queue_rec->queue_buf);
-		printk(KERN_ERR "failed to copy bulksvc cmplq info to user space\n");
+		rc = -ENOMEM;
+		goto out;
+	}
+	for (u32 i = 0; i < 2 * num_buf_pages; i++) {
+		magic_buf_pages[i] = vmalloc_to_page(queue_rec->queue_buf + ((i % num_buf_pages) * PAGE_SIZE));
+	}
+	queue_rec->queue_buf_magic = vmap(magic_buf_pages, 2 * num_buf_pages, 0, PAGE_KERNEL);
+	kfree(magic_buf_pages);
+	if (!queue_rec->queue_buf_magic) {
+		vfree(queue_rec->ctrl);
+		vfree(queue_rec->queue_buf);
+		rc = -ENOMEM;
 		goto out;
 	}
 
-	u32 const entry_size = is_cmplq ? sizeof(union hfi1_bulksvc_upd) : sizeof(union hfi1_bulksvc_cmd);
-	BUG_ON(queue_rec->queue_info.queue_buffer_mmap_size % entry_size != 0);
-	queue_rec->idx_mask = (queue_rec->queue_info.queue_buffer_mmap_size / entry_size) - 1;
+	dd_dev_dbg(dd, "created bulksvc %s queue with id %d\n",
+		is_cmplq ? "completion" : "command", queue_rec->queue_info.queue_id);
+
+	*output_info = &queue_rec->queue_info;
+
+	u32 const block_size = is_cmplq ? sizeof(union hfi1_bulksvc_upd) : CACHELINE_SIZE;
+	BUG_ON(queue_rec->queue_info.queue_buffer_mmap_size % block_size != 0);
+	queue_rec->idx_mask = (queue_rec->queue_info.queue_buffer_mmap_size / block_size) - 1;
 	queue_rec->head = (atomic64_t *) &queue_rec->ctrl->head;
 	queue_rec->tail = (atomic64_t *) &queue_rec->ctrl->tail;
 	queue_rec->active = true;
@@ -2256,14 +2332,38 @@ out:
 	return rc;
 }
 
-static int init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 len)
+static int ioctl_init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 len)
+{
+	struct hfi1_bulksvc_client_init out;
+	int ret;
+
+	ret = init_bulksvc_client(fd, &out);
+	if (ret)
+		return ret;
+
+	if (copy_to_user((struct hfi1_bulksvc_client_init *)arg, &out,
+			 sizeof(out))) {
+		pr_err("failed to copy bulksvc client key to user\n");
+		hfi1_bulksvc_user_info_put(fd->bulksvc_user_info);
+		fd->bulksvc_user_info = NULL;
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
+int init_bulksvc_client(struct hfi1_filedata *fd, struct hfi1_bulksvc_client_init *out)
 {
 	u32 client_flags = 0;
-	struct hfi1_bulksvc_client_init client_init = {0};
 	struct hfi1_bulksvc_event_entry *event_entry;
 
 	if (WARN_ON(!fd || !fd->dd || !fd->dd->bulksvc)) {
 		pr_err("Bulksvc not enabled\n");
+		return -EINVAL;
+	}
+
+	if (fd->dd->params->cce_int_force_reg  == 0) {
+		pr_err("Bulksvc - DD not fully initialized");
 		return -EINVAL;
 	}
 
@@ -2280,18 +2380,7 @@ static int init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 
 	}
 
 	if (hfi1_bulksvc_requires_doorbell(bulksvc)) {
-		client_flags |= HFI1_BULKSVC_CLIENT_FLAG_DOORBELL;
-	}
-
-	struct hfi1_bulksvc_client_init __user *out = (struct hfi1_bulksvc_client_init __user *) arg;
-	client_init.client_key = fd->bulksvc_user_info->client_key;
-	client_init.flags = client_flags;
-
-	if (copy_to_user(out, &client_init, sizeof(client_init))) {
-		pr_err("failed to copy bulksvc client key to user\n");
-		hfi1_bulksvc_user_info_put(fd->bulksvc_user_info);
-		fd->bulksvc_user_info = NULL;
-		return -EFAULT;
+		client_flags |= HFI1_HFISVC_CLIENT_FLAG_DOORBELL;
 	}
 
 	event_entry = kzalloc(sizeof(*event_entry), GFP_KERNEL);
@@ -2299,7 +2388,7 @@ static int init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 
 		return -ENOMEM;
 	}
 	event_entry->event.type = BULKSVC_EVENT_TYPE_USER_INFO_ADD;
-	event_entry->event.data = (u64) fd->bulksvc_user_info;
+	event_entry->event.user_info = fd->bulksvc_user_info;
 	if (hfi1_bulksvc_enqueue_event(bulksvc, event_entry)) {
 		pr_err("failed to enqueue bulksvc user info add event\n");
 		kfree(event_entry);
@@ -2307,6 +2396,11 @@ static int init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 
 		fd->bulksvc_user_info = NULL;
 		return -EAGAIN;
 	}
+
+	out->client_key = fd->bulksvc_user_info->client_key;
+	out->flags = client_flags;
+	out->fast_doorbell = rdma_mmap_token_i(BULKSVC_FAST_DOORBELL, 0);
+	out->fast_doorbell_mmap_size = PAGE_SIZE;
 
 	return 0;
 }

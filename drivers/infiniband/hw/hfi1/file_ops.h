@@ -8,6 +8,8 @@
 
 #include "hfi.h"
 
+#include "bulksvc_user.h"
+
 int hfi1_set_uevent_bits(struct hfi1_pportdata *ppd, const int evtbit);
 int hfi1_device_create(struct hfi1_devdata *dd);
 void hfi1_device_remove(struct hfi1_devdata *dd);
@@ -24,6 +26,16 @@ int hfi1_get_pinning_stats(struct hfi1_filedata *fd,
 			   struct hfi1_pin_stats *stats);
 int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma);
 ssize_t hfi1_do_write_iter(struct hfi1_filedata *fd, struct iov_iter *from);
+
+int create_bulksvc_queue(struct hfi1_devdata* dd, struct hfi1_bulksvc_user_info* const bulksvc_user_info,
+			 bool is_cmplq, bool is_uverbs,
+			 struct hfi1_bulksvc_queue_info ** output_info);
+int init_bulksvc_client(struct hfi1_filedata *fd,
+			struct hfi1_bulksvc_client_init *out);
+int do_bulksvc_doorbell_mmap(struct hfi1_filedata *fd, struct vm_area_struct *vma);
+int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type,
+		    struct vm_area_struct *vma);
+
 
 /*
  * Types of memories mapped into user processes' space
@@ -43,10 +55,15 @@ enum mmap_types {
 	SUBCTXT_EGRBUF,
 	SDMA_COMP,
 	RCV_RHEQ,
-	BULKSVC_CMPLQ_CTRL,
-	BULKSVC_CMPLQ_BUF,
-	BULKSVC_CMDQ_CTRL,
-	BULKSVC_CMDQ_BUF,
+	BULKSVC_FAST_DOORBELL,
+	// Range of values reserved for each bulksvc queue-related mmap type
+	BULKSVC_QUEUE_TYPES_FIRST,
+	BULKSVC_CMPLQ_CTRL0 = BULKSVC_QUEUE_TYPES_FIRST,
+	BULKSVC_CMPLQ_BUF0 = BULKSVC_CMPLQ_CTRL0 + BULKSVC_USER_MAX_NUM_CMPLQS,
+	BULKSVC_CMDQ_CTRL0 = BULKSVC_CMPLQ_BUF0 + BULKSVC_USER_MAX_NUM_CMPLQS,
+	BULKSVC_CMDQ_BUF0 = BULKSVC_CMDQ_CTRL0 + BULKSVC_USER_MAX_NUM_CMDQS,
+	BULKSVC_QUEUE_TYPES_LAST = BULKSVC_CMDQ_BUF0 + BULKSVC_USER_MAX_NUM_CMDQS - 1,
+	// End of range of values reserved for each bulksvc queue-related mmap type
 };
 
 #endif /* _HFI1_FILE_OPS_H */

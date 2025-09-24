@@ -18,6 +18,7 @@ int msix_request_general_irq(struct hfi1_devdata *dd);
 int msix_request_rcd_irq(struct hfi1_ctxtdata *rcd);
 int msix_request_sdma_irq(struct sdma_engine *sde);
 void msix_free_irq(struct hfi1_devdata *dd, u8 msix_intr);
+int msix_request_doorbell_irq(struct hfi1_devdata *dd);
 
 /* Netdev interface */
 void msix_netdev_synchronize_irq(struct hfi1_pportdata *ppd);

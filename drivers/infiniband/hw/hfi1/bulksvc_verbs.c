@@ -1,5 +1,5 @@
+#include <rdma/rdmavt_qp.h>
 #include "verbs_txreq.h"
-
 
 #include "bulksvc.h"
 #include "bulksvc_rvt.h"
@@ -92,6 +92,8 @@ static void bulksvc_on_qp_cmd_rdma_complete(
 		(struct qp_rdma_cmpl_cookie *)cookie;
 	struct hfi1_bulksvc * const svc = rdma_cookie->svc;
 	struct hfi1_bulksvc_verbs_cmd * const cmd = rdma_cookie->cmd;
+	struct hfi1_qp_priv *qpriv;
+	unsigned long flags;
 
 	if (rdma_cookie->remaining_wr_sges) {
 		(*rdma_cookie->remaining_wr_sges)--;
@@ -103,6 +105,26 @@ static void bulksvc_on_qp_cmd_rdma_complete(
 		rdma_cookie->remaining_wr_sges = NULL;
 	}
 
+	/*
+	 * if more verbs operations already queued and ready to go
+	 * don't wait for next bulksvc iteration, start handling now
+	 */
+	qpriv = cmd->rdma.txreq->qp->priv;
+	spin_lock_irqsave(&cmd->rdma.txreq->qp->s_lock, flags);
+	if (qpriv && --qpriv->bulksvc_qp_info->rdma_ops_sched > 0) {
+		/* we have more ready to go */
+		iowait_set_flag(&qpriv->s_iowait, IOWAIT_PENDING_BTS);
+		/* add to verbs queue */
+		if (__hfi1_do_bts_send(&qpriv->s_iowait.wait[IOWAIT_BTS_SE], true)) {
+			iowait_clear_flag(&qpriv->s_iowait, IOWAIT_PENDING_BTS);
+			spin_unlock_irqrestore(&cmd->rdma.txreq->qp->s_lock, flags);
+			/* process verbs queue */
+			hfi1_bulksvc_poll_verbs_cmds(svc);
+		} else {
+			spin_unlock_irqrestore(&cmd->rdma.txreq->qp->s_lock, flags);
+		}
+	} else
+		spin_unlock_irqrestore(&cmd->rdma.txreq->qp->s_lock, flags);
 	enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, cmd->rdma.txreq->bts_rc));
 
 release_cookie_resources:
@@ -146,7 +168,7 @@ static void bulksvc_on_qp_cmd_rdma_helper(struct hfi1_bulksvc * const svc,
 
 	u32 const remote_client_id = VERBS_PD_TO_CLIENT_ID(qp_info->qp_priv->owner->ibqp.pd->res.id);
 	u32 const access_key = txreq->wqe->rdma_wr.rkey;
-	u64 const dms_key = ((u64)remote_client_id << 32) | access_key;
+	union hfi1_dms_key const dms_key = { .access = access_key, .client = remote_client_id };
 
 	u32 const num_sge = txreq->wqe->rdma_wr.wr.num_sge;
 	if (WARN_ON(num_sge >= 256)) {
@@ -486,8 +508,12 @@ static void bulksvc_on_verbs_cmd_mr_reg(struct hfi1_bulksvc * const svc,
 	cookie->svc = svc;
 	cookie->lkey = rvt_mregion->lkey;
 
-	int rc = hfi1_dms_dma_access_enable(&svc->dms, mr_record->client_id, &mr_record->dms_mr, mr_record->rkey, 
-		mr_record->dms_mr.user.addr, mr_reg_cmd->mr->length, completion);
+	union hfi1_dms_key const dms_key = {
+		.client = mr_record->client_id,
+		.access = mr_record->rkey,
+	};
+	int rc = hfi1_dms_register_access(&svc->dms, &mr_record->dms_mr, mr_record->dms_mr.user.addr, mr_reg_cmd->mr->length, dms_key,
+				  completion, HFI1_DMS_ACCESS_TYPE_PERSISTENT, NULL);
 
 	if (rc < 0) {
 		pr_err("%s:%d:%s() bulksvc: Failed to register DMS data\n",
@@ -528,8 +554,11 @@ static void bulksvc_on_verbs_cmd_mr_dereg(struct hfi1_bulksvc * const svc,
 	}
 
 	struct bts_verbs_mr_record * const mr_record = pos;
-
-	int rc = hfi1_dms_dma_access_disable(&svc->dms, dms_client_id, mr_record->rkey);
+	union hfi1_dms_key const dms_key = {
+		.client = dms_client_id,
+		.access = mr_record->rkey,
+	};
+	int rc = hfi1_dms_unregister_access(&svc->dms, dms_key);
 	if (rc != 0) {
 		pr_err("%s:%d:%s() Failed to deregister MR from DMS: %d\n",
 		       __FILENAME__, __LINE__, __func__, rc);
@@ -600,6 +629,8 @@ struct hfi1_bulksvc_qp_info* hfi1_bulksvc_qp_info_create(struct hfi1_bulksvc_ver
 	res->verbs_state = verbs_state;
 
 	res->num_rx_transfers_seen_for_current_transaction = 0;
+
+	res->rdma_ops_sched = 0;
 
 	return res;
 }
@@ -984,3 +1015,146 @@ static void bts_verbs_mr_record_put(struct bts_verbs_mr_record * const mr_record
 {
 	kref_put(&mr_record->refcount, bts_verbs_mr_record_destroy);
 }
+
+static struct rvt_qp *qp_from_number(struct hfi1_bulksvc *svc, u64 app_context)
+{
+	struct rvt_qp *qp = NULL;
+	struct hfi1_bulksvc_qp_info* qp_info = NULL;
+	mutex_lock(&svc->verbs_state.qp_infos_lock);
+	list_for_each_entry(qp_info, &svc->verbs_state.qp_infos, node) {
+		if (qp_info->qp_priv->owner->ibqp.qp_num == app_context) {
+			qp = qp_info->qp_priv->owner;
+			break;
+		}
+	}
+	mutex_unlock(&svc->verbs_state.qp_infos_lock);
+
+	return qp;
+}
+
+static void bts_send_cq(struct rvt_qp *qp, u64 wr_id, u32 byte_len,
+			enum ib_wc_opcode wr_opcode, enum ib_wc_status status)
+{
+	unsigned long lflags;
+	struct rvt_dev_info *rdi = ib_to_rvt(qp->ibqp.device);
+	spin_lock_irqsave(&qp->s_lock, lflags);
+	struct ib_wc w = {
+		.wr_id = wr_id,
+		.status = status,
+		.opcode = rdi->wc_opcode[wr_opcode],
+		.qp = &qp->ibqp,
+		.byte_len = byte_len
+	};
+	rvt_send_cq(qp, &w, true,
+		    RVT_QP_LOCK_STATE_S);
+	spin_unlock_irqrestore(&qp->s_lock, lflags);
+}
+
+/*
+ * TODO - this function must check if the wqe can be passed to DMS
+ * and put on the wire now. Things to keep in mind:
+ * 1. is the wqe bts-able - see hfi1_setup_bulksvc_wqe
+ * 2. is anything else going through rdmavt? must respect
+ *    verbs ordering
+ */
+static bool can_bts_hotpath(void) {
+	/* TODO hotpath not implemented */
+	return false;
+}
+
+void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
+	struct hfi1_bulksvc_user_info * const user_info,
+	struct hfi1_bulksvc_cmd_uverbs_post_send const * const cmd)
+{
+	const struct ib_send_wr *bad_wr = NULL;
+	u64 qpn = cmd->app_context;
+	struct ib_uverbs_sge *sge;
+	struct rvt_qp *qp;
+	int ret;
+	u16 i;
+
+	qp = qp_from_number(svc, qpn);
+	if (!qp) {
+		dd_dev_err(svc->dd, "QP #%llu not found\n", cmd->app_context);
+		return;
+	}
+	if (qp->ibqp.qp_type != IB_QPT_RC) {
+		dd_dev_err(svc->dd, "Cannot ioctl bypass non RC qp's\n");
+		return;
+	}
+
+
+	u8 *ptr = (u8 *)cmd->wrs;
+	for (i = 0; i < cmd->num_wrs; i ++) {
+		struct ib_rdma_wr rdma_wr;
+		struct ib_atomic_wr atomic_wr;
+		struct ib_uverbs_send_wr *user_wr;
+
+		user_wr = (struct ib_uverbs_send_wr *)ptr;
+		sge = (struct ib_uverbs_sge *)(ptr + sizeof(*user_wr));
+
+		struct ib_send_wr *wr;
+		struct ib_send_wr swr = {
+			.next = NULL,
+			.wr_id = user_wr->wr_id,
+			.sg_list = (struct ib_sge *)sge,
+			.num_sge = user_wr->num_sge,
+			.opcode = user_wr->opcode,
+			.send_flags = user_wr->send_flags,
+			.ex.imm_data = user_wr->ex.imm_data
+		};
+		if (user_wr->opcode == IB_WR_RDMA_WRITE_WITH_IMM ||
+		    user_wr->opcode == IB_WR_RDMA_WRITE ||
+		    user_wr->opcode == IB_WR_RDMA_READ) {
+			rdma_wr.wr = swr;
+			rdma_wr.remote_addr =  user_wr->wr.rdma.remote_addr;
+			rdma_wr.rkey = user_wr->wr.rdma.rkey;
+
+			wr = &rdma_wr.wr;
+		} else if (user_wr->opcode == IB_WR_ATOMIC_CMP_AND_SWP ||
+			   user_wr->opcode == IB_WR_ATOMIC_FETCH_AND_ADD) {
+			atomic_wr.wr = swr,
+			atomic_wr.remote_addr = user_wr->wr.atomic.remote_addr;
+			atomic_wr.compare_add = user_wr->wr.atomic.compare_add;
+			atomic_wr.swap = user_wr->wr.atomic.swap;
+			atomic_wr.rkey = user_wr->wr.atomic.rkey;
+
+			wr = &atomic_wr.wr;
+		} else {
+			wr = &swr;
+		}
+
+		if (can_bts_hotpath()) {
+			/* we need to post errors to cq */
+			dd_dev_err(svc->dd, "BTS VERBS HOTPATH NOT IMPLEMENTED\n");
+			goto post_errs;
+		} else {
+			ret = rvt_post_send(&qp->ibqp, wr, &bad_wr);
+			if (ret) {
+				/* we need to post errors to cq */
+				dd_dev_err(svc->dd, "bts: rdmavt post send rc %d\n", ret);
+				goto post_errs;
+			}
+		}
+
+		ptr += sizeof(*user_wr) + (user_wr->num_sge * sizeof(*sge));
+	}
+
+	return;
+post_errs:
+	for (; i < cmd->num_wrs; i ++) {
+		struct ib_uverbs_send_wr *user_wr;
+		user_wr = (struct ib_uverbs_send_wr *)ptr;
+		u32 byte_len = 0;
+		/* sg_list follows the wr header */
+		sge = (struct ib_uverbs_sge *)(ptr + sizeof(*user_wr));
+		for (int s = 0; s < user_wr->num_sge; s++) {
+			byte_len += sge->length;
+			sge++;
+		}
+
+		bts_send_cq(qp, user_wr->wr_id, byte_len, user_wr->opcode, IB_WC_GENERAL_ERR);
+		ptr += sizeof(*user_wr) + (user_wr->num_sge * sizeof(*sge));
+	}
+}
+
