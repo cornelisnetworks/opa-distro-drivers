@@ -3224,6 +3224,15 @@ bool hfi1_tid_rdma_wqe_interlock(struct rvt_qp *qp, struct rvt_swqe *wqe)
 	s_prev = (qp->s_cur == 0 ? qp->s_size : qp->s_cur) - 1;
 	prev = rvt_get_swqe_ptr(qp, s_prev);
 
+	/*
+	 * Don't send a non-BTS workload if BTS operations are still
+	 * in flight.
+	 */
+	if ((!ib_wr_opcode_is_hfi1_bulksvc(wqe->wr.opcode)) &&
+	    ib_wr_opcode_is_hfi1_bulksvc(prev->wr.opcode) &&
+	    qp->s_acked != qp->s_cur)
+		goto interlock;
+
 	switch (wqe->wr.opcode) {
 	case IB_WR_SEND:
 	case IB_WR_SEND_WITH_IMM:
@@ -3261,17 +3270,15 @@ bool hfi1_tid_rdma_wqe_interlock(struct rvt_qp *qp, struct rvt_swqe *wqe)
 			break;
 		}
 		break;
-	/* Don't send a BTS workload if other operations are still
-	 * in flight. The opposite of this is protected by the ACK
-	 * flag, preventing hfi1_send_ok from returning true
+	/*
+	 * Don't send a BTS workload if other operations are still
+	 * in flight.
 	 */
 	case IB_WR_BULKSVC_READ:
 	case IB_WR_BULKSVC_WRITE:
 	case IB_WR_BULKSVC_WRITE_WITH_IMM:
-		if (prev->wr.opcode != IB_WR_BULKSVC_READ &&
-		    prev->wr.opcode != IB_WR_BULKSVC_WRITE &&
-		    prev->wr.opcode != IB_WR_BULKSVC_WRITE_WITH_IMM)
-			if (qp->s_acked != qp->s_cur)
+		if ((!ib_wr_opcode_is_hfi1_bulksvc(prev->wr.opcode)) &&
+		    qp->s_acked != qp->s_cur)
 				goto interlock;
 		break;
 

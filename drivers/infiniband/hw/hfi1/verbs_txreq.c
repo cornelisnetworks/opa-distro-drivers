@@ -24,6 +24,8 @@ void dealloc_txreq(struct kref *ref)
 
 	if (tx->mr)
 		rvt_put_mr(tx->mr);
+	if (tx->bts_cmd)
+		tx->bts_cmd = NULL;
 
 	sdma_txclean(dd_from_dev(dev), &tx->txreq);
 

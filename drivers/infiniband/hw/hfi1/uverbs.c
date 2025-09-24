@@ -7,6 +7,7 @@
 #include "user_sdma.h"
 #include "uverbs.h"
 #include "file_ops.h"
+#include "bulksvc.h"
 
 #define UVERBS_MODULE_NAME hfi1_uv
 #include <rdma/uverbs_named_ioctl.h>
@@ -25,12 +26,6 @@ static const u64 zero8; /* 8 bytes of 0 */
 static inline u8 rdma_mmap_get_type(unsigned long token)
 {
 	return token >> PAGE_SHIFT;
-}
-
-/* calculate the token from an integer offset */
-static inline unsigned long rdma_mmap_token_i(u8 type, unsigned long offset)
-{
-	return ((unsigned long)type << PAGE_SHIFT) | offset_in_page(offset);
 }
 
 /* calculate the token from a pointer offset */
@@ -459,6 +454,83 @@ static int UVERBS_HANDLER(HFI1_METHOD_PIN_STATS)(
 			      sizeof(rsp));
 };
 
+static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_GET_CMPLQ)(
+	struct uverbs_attr_bundle *attrs)
+{
+	struct hfi1_filedata *fd = fd_from_attrs(attrs);
+	struct hfi1_bulksvc_queue_info *rsp;
+	int ret;
+
+	if (!fd->bulksvc_user_info || !fd->dd->bulksvc)
+		return -EINVAL;
+
+	struct hfi1_bulksvc_user_info* const bulksvc_user_info = fd->bulksvc_user_info;
+
+	ret = create_bulksvc_queue(fd->dd, bulksvc_user_info, true, true, &rsp);
+	if (ret)
+		return ret;
+
+	return uverbs_copy_to(attrs, HFI1_ATTR_BULKSVC_GET_CMPLQ_RSP, rsp,
+			      sizeof(*rsp));
+}
+
+static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_GET_CMDQ)(
+	struct uverbs_attr_bundle *attrs)
+{
+	struct hfi1_filedata *fd = fd_from_attrs(attrs);
+	struct hfi1_bulksvc_queue_info *rsp;
+	int ret;
+
+	if (!fd->bulksvc_user_info || !fd->dd->bulksvc)
+		return -EINVAL;
+
+	struct hfi1_bulksvc_user_info* const bulksvc_user_info = fd->bulksvc_user_info;
+
+	ret = create_bulksvc_queue(fd->dd, bulksvc_user_info, false, true, &rsp);
+	if (ret)
+		return ret;
+
+	return uverbs_copy_to(attrs, HFI1_ATTR_BULKSVC_GET_CMDQ_RSP, rsp,
+			      sizeof(*rsp));
+}
+
+static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_CLIENT_INIT)(
+	struct uverbs_attr_bundle *attrs)
+{
+	struct hfi1_filedata *fd = fd_from_attrs(attrs);
+	struct hfi1_bulksvc_client_init rsp;
+	int ret;
+
+	if (!fd->dd || !fd->dd->bulksvc)
+		return -EINVAL;
+
+	ret = init_bulksvc_client(fd, &rsp);
+	if (ret)
+		return ret;
+
+	ret = uverbs_copy_to(attrs, HFI1_ATTR_BULKSVC_CLIENT_INIT_RSP,
+			     &rsp, sizeof(rsp));
+	if (ret)
+		hfi1_bulksvc_user_info_put(fd->bulksvc_user_info);
+
+	return ret;
+}
+
+static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_DOORBELL)(
+	struct uverbs_attr_bundle *attrs)
+{
+	struct hfi1_filedata *fd = fd_from_attrs(attrs);
+
+	if (!fd->dd || !fd->dd->bulksvc || !fd->bulksvc_user_info)
+		return -EINVAL;
+
+	hfi1_bulksvc_schedule(fd->dd->bulksvc);
+
+	return 0;
+}
+
+
+
 DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_ASSIGN_CTXT,
 	UVERBS_ATTR_PTR_IN(HFI1_ATTR_ASSIGN_CTXT_CMD,
 			   UVERBS_ATTR_TYPE(struct hfi1_assign_ctxt_cmd),
@@ -551,6 +623,32 @@ DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_PIN_STATS,
 			    UA_MANDATORY),
 	);
 
+DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_BULKSVC_GET_CMPLQ,
+	/* no cmd */
+	UVERBS_ATTR_PTR_OUT(HFI1_ATTR_BULKSVC_GET_CMPLQ_RSP,
+			    UVERBS_ATTR_TYPE(struct hfi1_bulksvc_queue_info),
+			    UA_MANDATORY),
+	);
+
+DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_BULKSVC_GET_CMDQ,
+	/* no cmd */
+	UVERBS_ATTR_PTR_OUT(HFI1_ATTR_BULKSVC_GET_CMDQ_RSP,
+			    UVERBS_ATTR_TYPE(struct hfi1_bulksvc_queue_info),
+			    UA_MANDATORY),
+	);
+
+DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_BULKSVC_CLIENT_INIT,
+	/* no cmd */
+	UVERBS_ATTR_PTR_OUT(HFI1_ATTR_BULKSVC_CLIENT_INIT_RSP,
+			    UVERBS_ATTR_TYPE(struct hfi1_bulksvc_client_init),
+			    UA_MANDATORY),
+	);
+
+DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_BULKSVC_DOORBELL,
+	/* no cmd */
+	/* no rsp */
+	);
+
 DECLARE_UVERBS_GLOBAL_METHODS(HFI1_OBJECT_DV0,
 	&UVERBS_METHOD(HFI1_METHOD_ASSIGN_CTXT),
 	&UVERBS_METHOD(HFI1_METHOD_CTXT_INFO),
@@ -569,9 +667,16 @@ DECLARE_UVERBS_GLOBAL_METHODS(HFI1_OBJECT_DV1,
 	&UVERBS_METHOD(HFI1_METHOD_GET_VERS),
 	&UVERBS_METHOD(HFI1_METHOD_PIN_STATS));
 
+DECLARE_UVERBS_GLOBAL_METHODS(HFI1_OBJECT_DV2,
+	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_GET_CMPLQ),
+	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_GET_CMDQ),
+	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_CLIENT_INIT),
+	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_DOORBELL));
+
 const struct uapi_definition hfi1_ib_defs[] = {
 	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(HFI1_OBJECT_DV0),
 	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(HFI1_OBJECT_DV1),
+	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(HFI1_OBJECT_DV2),
 	{}
 };
 
@@ -587,6 +692,15 @@ int hfi1_rdma_mmap(struct ib_ucontext *ucontext, struct vm_area_struct *vma)
 
 	token = vma->vm_pgoff << PAGE_SHIFT;
 	type = rdma_mmap_get_type(token);
+
+	if (type >= BULKSVC_QUEUE_TYPES_FIRST && type <= BULKSVC_QUEUE_TYPES_LAST) {
+		if (!fd->bulksvc_user_info) {
+			return -EINVAL;
+		}
+		return do_bulksvc_mmap(fd->bulksvc_user_info, type, vma);
+	} else if (type == BULKSVC_FAST_DOORBELL) {
+		return do_bulksvc_doorbell_mmap(fd, vma);
+	}
 
 	return hfi1_do_mmap(fd, type, vma);
 }
