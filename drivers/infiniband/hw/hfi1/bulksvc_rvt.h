@@ -22,6 +22,7 @@ bool hfi1_schedule_bts_send(struct rvt_qp *qp);
 
 /* called by iowait func for BTS */
 void _hfi1_do_bts_send(struct work_struct *work);
+bool __hfi1_do_bts_send(struct iowait_work *w, bool in_thread);
 
 /* notification from verbs stack of user mr reg/dereg */
 int verbs_bulksvc_reg_mr(struct hfi1_bulksvc *svc, struct rvt_mregion *mr);

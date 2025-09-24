@@ -1,5 +1,5 @@
 #include "bulksvc_user.h"
-
+#include "bulksvc_verbs.h" // to call post_send handler
 #include "bulksvc.h"
 #include "dms.h"
 
@@ -53,7 +53,7 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 	bulksvc_user_info->num_cmdqs = 0;
 	bulksvc_user_info->max_inflight = num_overflow;
 
-	bulksvc_user_info->client_key = atomic_inc_return(&fd->dd->bulksvc->last_client_key) - 1;
+	bulksvc_user_info->client_key = atomic_inc_return(&fd->dd->bulksvc->last_client_key);
 	pr_debug("assigned client key %u\n", bulksvc_user_info->client_key);
 
 	mmgrab(current->mm);
@@ -78,7 +78,7 @@ static void bulksvc_user_info_event_release(struct kref *ref)
 		return;
 	}
 	event_entry->event.type = BULKSVC_EVENT_TYPE_USER_INFO_RELEASE;
-	event_entry->event.data = (u64) info;
+	event_entry->event.user_info = info;
 	if (hfi1_bulksvc_enqueue_event(info->svc, event_entry)) {
 		pr_err("Failed to enqueue bulksvc user info release event, leaking user info\n");
 		kfree(event_entry);
@@ -124,12 +124,14 @@ void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info)
 	for (int i = 0; i < BULKSVC_USER_MAX_NUM_CMPLQS; i++) {
 		if (info->cmplq_records[i].active) {
 			vfree(info->cmplq_records[i].ctrl);
+			vunmap(info->cmplq_records[i].queue_buf_magic);
 			vfree(info->cmplq_records[i].queue_buf);
 		}
 	}
 	for (int i = 0; i < BULKSVC_USER_MAX_NUM_CMDQS; i++) {
 		if (info->cmdq_records[i].active) {
 			vfree(info->cmdq_records[i].ctrl);
+			vunmap(info->cmdq_records[i].queue_buf_magic);
 			vfree(info->cmdq_records[i].queue_buf);
 		}
 	}
@@ -221,7 +223,7 @@ static int try_give_completion(struct hfi1_bulksvc_user_info *user_info, struct 
 	}
 
 	entry = &((union hfi1_bulksvc_upd *)
-		cmplq_record->queue_buf)[cmplq_tail & mask].cmplq_entry;
+		cmplq_record->queue_buf_magic)[cmplq_tail & mask].cmplq_entry;
 
 	*entry = *cmpl;
 
@@ -411,7 +413,7 @@ static void on_registered_dma_buffer_completed_transact(union hfi1_dms_completio
 
 	cmpl.app_context = reg_cookie->app_context;
 	cmpl.status = status;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = reg_cookie->access_key;
 
 	give_completion(reg_cookie->user_info, reg_cookie->cmplq_record, &cmpl);
@@ -442,7 +444,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 
 		cmpl.app_context = cmd->app_context;
 		cmpl.status = -EFAULT;
-		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 		cmpl.type_default.access_key = cmd->access_key;
 		give_completion(user_info, cmplq_record, &cmpl);
 		goto exit;
@@ -458,7 +460,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 	BUILD_BUG_ON(sizeof(struct reg_dma_buffer_cmpl_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	int rc = hfi1_dms_register_access(&svc->dms, &mr_record->dms_mr, offset,
 		cmd->size_bytes,
-		((u64)user_info->client_key << 32) | cmd->access_key,
+		(union hfi1_dms_key) { .access = cmd->access_key, .client = user_info->client_key },
 		(struct hfi1_dms_access_completion) {
 		.fn = on_registered_dma_buffer_completed_transact,
 		.cookie = *(union hfi1_dms_completion_cookie*)&(struct reg_dma_buffer_cmpl_cookie) {
@@ -474,7 +476,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 
 		cmpl.status = (u32)rc;
 		cmpl.app_context = cmd->app_context;
-		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 		cmpl.type_default.access_key = cmd->access_key;
 		give_completion(user_info, cmplq_record, &cmpl);
 		user_mr_record_put(mr_record);
@@ -501,7 +503,7 @@ static void bulksvc_on_cmd_mr_open(struct hfi1_bulksvc * const svc,
 		goto exit;
 
 	cmpl.app_context = cmd->app_context;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_MR;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_MR;
 
 	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->len, cmd->flags);
 
@@ -539,7 +541,7 @@ static void bulksvc_on_cmd_mr_close(struct hfi1_bulksvc * const svc,
 	}
 
 	cmpl.app_context = cmd->app_context;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_MR;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_MR;
 	cmpl.type_mr.mr_key = cmd->mr_key;
 
 	give_completion(user_info, cmplq_record, &cmpl);
@@ -569,7 +571,7 @@ static void on_dma_access_once_complete(union hfi1_dms_completion_cookie *cookie
 
 	cmpl.app_context = dma_cookie->app_context;
 	cmpl.status = status;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = dma_cookie->access_key;
 
 	give_completion(dma_cookie->user_info, dma_cookie->cmplq_record, &cmpl);
@@ -592,7 +594,7 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 	struct hfi1_bulksvc_user_mr_record* mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
@@ -614,9 +616,12 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 	user_mr_record_get(mr_record);
 
 	BUILD_BUG_ON(sizeof(struct dma_access_once_cmpl_cookie) > sizeof(union hfi1_dms_completion_cookie));
-	int rc = hfi1_dms_dma_access_once(
-		&svc->dms, (u64)user_info->client_key, &mr_record->dms_mr,
-		cmd->access_key, offset, cmd->len,
+
+	int rc = hfi1_dms_register_access(&svc->dms, &mr_record->dms_mr, cmd->offset, cmd->len,
+		(union hfi1_dms_key) {
+			.client = user_info->client_key,
+			.access = cmd->access_key
+		},
 		(struct hfi1_dms_access_completion) {
 		.fn = on_dma_access_once_complete,
 		.cookie = *(union hfi1_dms_completion_cookie*)&(struct dma_access_once_cmpl_cookie) {
@@ -625,8 +630,9 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 			.mr_record = mr_record,
 			.app_context = cmd->app_context,
 			.access_key = cmd->access_key,
-		},
-	});
+		}},
+		HFI1_DMS_ACCESS_TYPE_EPHEMERAL, NULL);
+		
 	if (rc < 0) {
 		cmpl.status = (u32)rc;
 		user_mr_record_put(mr_record);
@@ -669,7 +675,7 @@ static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 f
 
 	cmpl.app_context = access_cookie->app_context;
 	cmpl.status = status;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_NOTIFY;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_NOTIFY;
 	cmpl.type_notify.access_key = access_cookie->access_key;
 	cmpl.type_notify.flags = flags;
 	cmpl.type_notify.imm_data = imm_data;
@@ -702,7 +708,7 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 	struct hfi1_bulksvc_user_mr_record *mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
@@ -730,10 +736,12 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 		goto exit;
 	}
 
-	rc = hfi1_dms_dma_access_enable(&svc->dms,
-					user_info->client_key, &mr_record->dms_mr,
-					cmd->access_key, cmd->offset, cmd->len,
-					notification);
+	union hfi1_dms_key const dms_key = {
+		.client = user_info->client_key,
+		.access = cmd->access_key,
+	};
+	rc = hfi1_dms_register_access(&svc->dms, &mr_record->dms_mr, cmd->offset, cmd->len, dms_key,
+				  notification, HFI1_DMS_ACCESS_TYPE_PERSISTENT, NULL);
 
 	if (rc < 0) {
 		pr_err("%s:%d:%s() failed to enable DMA access for key %u: %d\n",
@@ -764,7 +772,7 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 	struct hfi1_bulksvc_user_mr_access_record *access_record =
@@ -775,8 +783,11 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 		goto exit;
 	}
 
-	rc = hfi1_dms_dma_access_disable(&svc->dms, user_info->client_key,
-					 cmd->access_key);
+	union hfi1_dms_key const dms_key = {
+		.client = user_info->client_key,
+		.access = cmd->access_key,
+	};
+	rc = hfi1_dms_unregister_access(&svc->dms, dms_key);
 
 	if (rc == 0) {
 		user_mr_access_record_destroy_and_remove(access_record);
@@ -787,7 +798,7 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = rc;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 	cmpl.type_default.access_key = cmd->access_key;
 
 exit:
@@ -815,8 +826,8 @@ static void on_mr_rdma_transact_complete(union hfi1_dms_completion_cookie *cooki
 		(struct initiated_mr_rdma_transact_completion_cookie *)cookie;
 
 	cmpl.app_context = mr_transact_cookie->app_context;
-	cmpl.status = 0; /* success */
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.status = status;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	give_completion(mr_transact_cookie->user_info, mr_transact_cookie->cmplq_record, &cmpl);
 
@@ -839,7 +850,7 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
 	if (!mr_record) {
@@ -859,7 +870,7 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 	BUILD_BUG_ON(sizeof(struct initiated_mr_rdma_transact_completion_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	rc = hfi1_dms_read_data(
 		&svc->dms, cmd->lid,
-		((u64)cmd->client_key << 32) | cmd->access_key,
+		(union hfi1_dms_key) { .access = cmd->access_key, .client = user_info->client_key },
 		cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr, cmd->mr_offset,
 		cmd->flags, cmd->imm_data,
 		(struct hfi1_dms_tracker_completion) {
@@ -901,7 +912,7 @@ static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	mr_record = lookup_user_mr_record(user_info, cmd->mr_key);
 	if (!mr_record || validate_mr_access(mr_record, cmd->mr_offset, cmd->len_bytes) < 0) {
@@ -914,8 +925,7 @@ static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
 	user_mr_record_get(mr_record);
 
 	rc = hfi1_dms_write_data(&svc->dms, cmd->lid,
-				    ((u64)cmd->client_key << 32) |
-					    cmd->access_key,
+						(union hfi1_dms_key) { .access = cmd->access_key, .client = cmd->client_key },
 				    cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr,
 				    cmd->mr_offset,
 						(u16) cmd->flags,
@@ -965,8 +975,8 @@ static void on_rdma_va_complete(
 		(struct rdma_va_completion_cookie *)cookie;
 
 	cmpl.app_context = read_cookie->app_context;
-	cmpl.status = 0; /* errors not implemented */
-	cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+	cmpl.status = status;
+	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 
 	give_completion(read_cookie->user_info, read_cookie->cmplq_record, &cmpl);
 
@@ -998,7 +1008,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 		cmpl.app_context = cmd->app_context;
 		cmpl.status = -EFAULT;
-		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 		give_completion(user_info, cmplq_record, &cmpl);
 		hfi1_bulksvc_user_info_put(user_info);
 		return;
@@ -1007,7 +1017,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 	BUILD_BUG_ON(sizeof(struct rdma_va_completion_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	int rc = hfi1_dms_read_data(&svc->dms, cmd->lid,
-		((u64)cmd->client_key << 32) | cmd->access_key,
+		(union hfi1_dms_key) { .access = cmd->access_key, .client = cmd->client_key },
 		cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr, mr_offset,
 		cmd->flags, cmd->imm_data,
 		(struct hfi1_dms_tracker_completion) {
@@ -1024,7 +1034,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 		cmpl.status = (u32)rc;
 		cmpl.app_context = cmd->app_context;
-		cmpl.type = HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT;
+		cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 		give_completion(user_info, cmplq_record, &cmpl);
 		user_mr_record_put(mr_record);
 		hfi1_bulksvc_user_info_put(user_info);
@@ -1033,43 +1043,54 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 static void bulksvc_on_user_cmd(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_user_info * const user_info,
-	union hfi1_bulksvc_cmd const * const cmd)
+	struct hfi1_bulksvc_cmd const * const cmd)
 {
-	switch (cmd->op) {
+	switch (cmd->hdr.op) {
 	case HFI1_BULKSVC_CMD_REG_DMA_BUFFER:
 		bulksvc_on_cmd_reg_dma_buffer(svc, user_info,
-					      &cmd->register_dma_buffer);
+					      &cmd->payld[0].register_dma_buffer);
 		break;
 	case HFI1_BULKSVC_CMD_RDMA_READ_VA:
 		bulksvc_on_cmd_rdma_read_va(svc, user_info,
-						 &cmd->rdma_read_va);
+					    &cmd->payld[0].rdma_read_va);
 		break;
 	case HFI1_BULKSVC_CMD_RDMA_READ:
-		bulksvc_on_cmd_rdma_read(svc, user_info, &cmd->rdma_read);
+		bulksvc_on_cmd_rdma_read(svc, user_info,
+					 &cmd->payld[0].rdma_read);
 		break;
 	case HFI1_BULKSVC_CMD_RDMA_WRITE:
-		bulksvc_on_cmd_rdma_write(svc, user_info, &cmd->rdma_write);
+		bulksvc_on_cmd_rdma_write(svc, user_info,
+					  &cmd->payld[0].rdma_write);
 		break;
 	case HFI1_BULKSVC_CMD_MR_OPEN:
-		bulksvc_on_cmd_mr_open(svc, user_info, &cmd->mr_open);
+		bulksvc_on_cmd_mr_open(svc, user_info, &cmd->payld[0].mr_open);
 		break;
 	case HFI1_BULKSVC_CMD_MR_CLOSE:
-		bulksvc_on_cmd_mr_close(svc, user_info, &cmd->mr_close);
+		bulksvc_on_cmd_mr_close(svc, user_info,
+					&cmd->payld[0].mr_close);
 		break;
 	case HFI1_BULKSVC_CMD_DMA_ACCESS_ONCE:
-		bulksvc_on_cmd_dma_access_once(svc, user_info, &cmd->dma_access_once);
+		bulksvc_on_cmd_dma_access_once(svc, user_info,
+					       &cmd->payld[0].dma_access_once);
 		break;
 	case HFI1_BULKSVC_CMD_DMA_ACCESS_ENABLE:
 		bulksvc_on_cmd_dma_access_enable(svc, user_info,
-						 &cmd->dma_access_enable);
+						 &cmd->payld[0].dma_access_enable);
 		break;
 	case HFI1_BULKSVC_CMD_DMA_ACCESS_DISABLE:
 		bulksvc_on_cmd_dma_access_disable(svc, user_info,
-						  &cmd->dma_access_disable);
+						  &cmd->payld[0].dma_access_disable);
 		break;
+	case HFI1_BULKSVC_CMD_UVERBS_POST_SEND:
+		bulksvc_on_cmd_uverbs_post_send(svc, user_info,
+						&cmd->payld[0].uverbs_post_send);
+		/* completion will come through rvt not us so try_complete wont be called */
+		user_info->num_inflight--;
+		break;
+
 	default:
 		dd_dev_err(svc->dd, "%s:%d:%s() unknown bulksvc cmd op %u\n",
-			   __FILENAME__, __LINE__, __func__, cmd->op);
+			   __FILENAME__, __LINE__, __func__, cmd->hdr.op);
 		/* TODO enqueue failure somehow */
 		break;
 	}
@@ -1108,20 +1129,29 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 				&user_info->cmdq_records[i];
 			if (!rec->active)
 				continue;
-			u64 tail = atomic64_read_acquire(rec->tail);
+			const u64 tail = atomic64_read_acquire(rec->tail);
 			u64 head = atomic64_read(rec->head);
-			u64 total_entries = tail - head;
-			u64 to_process = min(total_entries, remaining_inflight);
-			u64 end_tail = head + to_process;
-			user_info->num_inflight += to_process;
-			remaining_inflight -= to_process;
-			for (u64 j = head; j < end_tail; ++j) {
-				bulksvc_on_user_cmd(svc, user_info,
-					&((union hfi1_bulksvc_cmd const *)
-					rec->queue_buf)[j & rec->idx_mask]);
+			const u64 max_cmds_to_process_for_user = remaining_inflight;
+			u64 processed_cmds_for_user = 0;
+
+			while (head < tail && processed_cmds_for_user < max_cmds_to_process_for_user) {
+				struct hfi1_bulksvc_cmd const * const next =
+					(struct hfi1_bulksvc_cmd const * const)
+					(rec->queue_buf_magic +
+					((head & rec->idx_mask) *
+					CACHELINE_SIZE));
+				// If a full command is not available, break
+				if ((head + next->hdr.num_blocks) > tail) {
+					break;
+				}
+				bulksvc_on_user_cmd(svc, user_info, next);
+				head += next->hdr.num_blocks;
+				processed_cmds_for_user += 1;
+				user_info->num_inflight += 1;
+				remaining_inflight -= 1;
 			}
-			atomic64_set_release(rec->head, end_tail);
-			processed += to_process;
+			atomic64_set_release(rec->head, head);
+			processed += processed_cmds_for_user;
 		}
 	}
 	mutex_unlock(&svc->user_info_lock);

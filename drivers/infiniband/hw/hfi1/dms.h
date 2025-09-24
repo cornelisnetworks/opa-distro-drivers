@@ -11,11 +11,12 @@
 #include <linux/xarray.h>
 #include <linux/rbtree.h>
 
-#define HFI1_DMS_JKEY (0xACDC)
+#define HFI1_DMS_CTRL_JKEY (0xACDC)
+#define HFI1_DMS_DATA_JKEY (0xACDD)
 #define HFI1_DMS_MAX_TID_VALUE (1024)
 #define HFI1_DMS_TID_SET_SIZE (16)
 #define HFI1_DMS_TID_SET_IDX_COUNT (HFI1_DMS_MAX_TID_VALUE / HFI1_DMS_TID_SET_SIZE)
-// 32 ahg indices per engine * 16 engines * 2
+// (32 ahg indices per engine * 16 engines * 2)
 #define HFI1_DMS_AHG_HEADER_BLOCK_SIZE (1024)
 
 #define HFI1_DMS_MAX_ACCESS_FAST (1024)
@@ -24,6 +25,8 @@
 #define HFI1_DMS_RIFT_IDX_SIZE (1ull << HFI1_DMS_RIFT_IDX_BITS)
 #define HFI1_DMS_RIFT_IDX_MASK (HFI1_DMS_RIFT_IDX_SIZE - 1)
 
+#define HFI1_DMS_RIFT_KEY_TYPE_MASK (0x01)
+
 #define HFI1_DMS_RIFT_GEN_BITS (5)
 #define HFI1_DMS_RIFT_GEN_SIZE (1ull << HFI1_DMS_RIFT_GEN_BITS)
 #define HFI1_DMS_RIFT_GEN_MASK ((HFI1_DMS_RIFT_GEN_SIZE - 1) << HFI1_DMS_RIFT_IDX_BITS)
@@ -31,10 +34,18 @@
 #define HFI1_DMS_RIFT_ERR_BITS (1)
 #define HFI1_DMS_RIFT_ERR_MASK (1ull << (16 - HFI1_DMS_RIFT_ERR_BITS))
 
+typedef struct {u16 value;} hfi1_dms_rift_key_t;
+
 enum hfi1_dms_rift_err {
 	HFI1_DMS_RIFT_ERR_NONE = 0,
-	HFI1_DMS_RIFT_ERR_INDEX_NOT_SET,
-	HFI1_DMS_RIFT_ERR_INDEX_DISABLED,
+	HFI1_DMS_RIFT_ERR_KEY_NOT_SET,
+	HFI1_DMS_RIFT_ERR_KEY_DISABLED,
+};
+
+enum hfi1_dms_xfer_type {
+	HFI1_DMS_XFER_TYPE_TARGET = 0,
+	HFI1_DMS_XFER_TYPE_INITIATOR,
+	HFI1_DMS_XFER_TYPE_COUNT,
 };
 
 struct sdma_engine;
@@ -114,11 +125,18 @@ struct hfi1_dms_access_completion {
 	union hfi1_dms_completion_cookie cookie;
 };
 
+union hfi1_dms_key {
+	u64 value;
+	struct {
+		u32 access;
+		u32 client;
+	};
+};
+
 struct hfi1_dms_access {
 	struct rb_node node;
 	struct hfi1_dms_dlist_element element;
-	u64 dms_key;
-	u32 access_key;
+	union hfi1_dms_key dms_key;
 	enum hfi1_dms_access_type type;
 	struct hfi1_dms_access_completion completion;
 	struct hfi1_dms_mr *mr; // memory region this access is for
@@ -127,12 +145,41 @@ struct hfi1_dms_access {
 	u32 active_count; // number of transfers currently using this access
 };
 
+struct hfi1_dms_read_start_parameters {
+	union hfi1_dms_key dms_key;
+	u64 offset; // offset into access buffer; interpreted on the target as either a byte offset or a virtual address
+	u64 imm_data;
+	u32 tbytes;
+	u32 tid_info;
+	u32 slid;
+	u16 flags;
+	hfi1_dms_rift_key_t rx_rift_key;
+	u16 size_qw;
+	u8 rx_id;
+	u8 include_fixup_data;
+	u8 head_misalignment;
+};
+
+struct hfi1_dms_write_start_parameters {
+	union hfi1_dms_key dms_key;
+	u64 offset; // offset into access buffer; interpreted on the target as either a byte offset or a virtual address
+	u64 imm_data;
+	u32 slid;
+	u32 size;
+	hfi1_dms_rift_key_t tx_rift_key;
+	u16 flags;
+};
+
 struct hfi1_dms_tracker_hdr {
 	struct hfi1_dms_dlist_element dlist;
+
+	ktime_t init_activity;
 	ktime_t first_activity;
 	ktime_t last_activity;
-	u16 local_rift_index;
-	u16 remote_rift_index;
+	bool remote_status_pending;
+
+	hfi1_dms_rift_key_t local_rift_key;
+	hfi1_dms_rift_key_t remote_rift_key;
 	u32 remote_lid;
 };
 
@@ -155,7 +202,9 @@ union hfi1_dms_16b_header {
 
 enum hfi1_dms_tx_tracker_op {
 	HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE = 0,
-	HFI1_DMS_TX_TRACKER_OP_RDMA_READ = 1,
+	HFI1_DMS_TX_TRACKER_OP_RDMA_READ,
+
+	HFI1_DMS_TX_TRACKER_OP_COUNT,
 };
 
 struct hfi1_dms_tx_tracker {
@@ -171,21 +220,14 @@ struct hfi1_dms_tx_tracker {
 		struct {
 			struct hfi1_dms_mr *mr;
 			struct hfi1_dms_tracker_completion completion;
-			u64 dms_key;
+			union hfi1_dms_key dms_key;
 			u64 rx_offset;
 			u64 imm_data;
 			u16 flags;
 		} write;
 		struct {
 			struct hfi1_dms_access * access;
-			struct {
-				u8 head_misalignment;
-				u8 include_fixup_data;
-				u8 rx_id;
-				u8 unused;
-				u32 nbytes;
-				u32 tid_info;
-			} start;
+			struct hfi1_dms_read_start_parameters start;
 			u64 imm_data;
 			u16 flags;
 		} read;
@@ -200,7 +242,7 @@ enum hfi1_dms_sdma_type {
 };
 
 struct hfi1_dms_sdma_parameters {
-	struct hfi1_dms_tx_tracker *tx_tracker; // could replace with "rift_index"
+	struct hfi1_dms_tx_tracker *tx_tracker; // could replace with "rift_key"
 	struct hfi1_dms_mr *mr;
 	u64 page_offset;
 	u32 nbytes;
@@ -217,7 +259,9 @@ struct hfi1_dms_sdma_tracker {
 
 enum hfi1_dms_rx_tracker_op {
 	HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE = 0,
-	HFI1_DMS_RX_TRACKER_OP_RDMA_READ = 1,
+	HFI1_DMS_RX_TRACKER_OP_RDMA_READ,
+
+	HFI1_DMS_RX_TRACKER_OP_COUNT,
  };
 
 struct hfi1_dms_rx_tracker {
@@ -242,13 +286,11 @@ struct hfi1_dms_rx_tracker {
 	union {
 		struct {
 			struct hfi1_dms_access * access;
-			u16 flags;
-			u16 unused[3];
-			u64 imm_data;
+			struct hfi1_dms_write_start_parameters start;
 		} write;
 
 		struct {
-			u64 dms_key;
+			union hfi1_dms_key dms_key;
 			struct hfi1_dms_tracker_completion completion;
 			u16 flags;
 			u16 unused[3];
@@ -306,18 +348,18 @@ struct hfi1_dms_mem_coh {
 	u64 len; // length of the memory region in bytes
 };
 
-struct hfi1_dms_ahg_header {
+struct hfi1_dms_ahg_header_set {
 	struct hfi1_dms_dlist_element dlist;
 
-	u32 desc_idx; // descriptor index for this header
-	struct hfi1_dms_mem_coh mem_coh;
+	u32 desc_idx; // descriptor index for these headers
+	struct hfi1_dms_mem_coh headers[HFI1_DMS_TID_SET_SIZE];
 };
 
 struct hfi1_dms_ahg_header_block {
 	struct hfi1_dms_dlist_element dlist;
 
 	struct hfi1_dms_mem_coh backing_mem;
-	struct hfi1_dms_ahg_header headers[HFI1_DMS_AHG_HEADER_BLOCK_SIZE];
+	struct hfi1_dms_ahg_header_set header_sets[HFI1_DMS_AHG_HEADER_BLOCK_SIZE];
 };
 
 // no active list, active headers managed elsewhere
@@ -367,9 +409,11 @@ union hfi1_dms_tracker {
 };
 
 struct hfi1_dms_rift {
-	struct hfi1_dms_dlist waitlist;
-	u16 stack_top;
-	u16 stack[HFI1_DMS_RIFT_IDX_SIZE];
+	struct {
+		struct hfi1_dms_dlist waitlist;
+		u16 stack_top;
+		hfi1_dms_rift_key_t stack[HFI1_DMS_RIFT_IDX_SIZE/HFI1_DMS_XFER_TYPE_COUNT];
+	} type[HFI1_DMS_XFER_TYPE_COUNT];
 	union hfi1_dms_tracker *arr[HFI1_DMS_RIFT_IDX_SIZE];
 };
 
@@ -383,11 +427,17 @@ enum hfi1_dms_tidset_waiter_type {
 struct hfi1_dms_tidset_waiters {
 	u64 head;
 	u64 tail;
-	u16 ring[HFI1_DMS_RIFT_IDX_SIZE*2];
+	hfi1_dms_rift_key_t ring[HFI1_DMS_RIFT_IDX_SIZE*2];
 };
 
 struct hfi1_dms_sdma_waiters {
 	struct hfi1_dms_dlist waitlist;
+};
+
+enum hfi1_dms_op {
+	HFI1_DMS_OP_NONE = 0,
+	HFI1_DMS_OP_RDMA_WRITE,
+	HFI1_DMS_OP_RDMA_READ,
 };
 
 struct hfi1_dms {
@@ -396,7 +446,8 @@ struct hfi1_dms {
 	s32 num_engines;                  /* Number of SDMA engines */
 	s32 cur_sdma_engine;
 
-	struct hfi1_ctxtdata *rctxt;
+	struct hfi1_ctxtdata *rcd_ctrl; // used for protocol and small PIO messages
+	struct hfi1_ctxtdata *rcd_data; // used for expected receive data (TODO: eager data?)
 	struct send_context *sctxt;
 	/* Read Request State - shared across messages */
 	// free list of TID sets available
@@ -422,8 +473,6 @@ struct hfi1_dms {
 	
 	struct sdma_desc *desc_stack;
 	s32 num_descs;
-	struct hfi1_dms_ahg_header **ahg_header_stack;
-	s32 num_ahgs;
 
 	struct rb_root client_rbtree;
 	struct {
@@ -440,6 +489,15 @@ struct hfi1_dms {
 	ktime_t now;
 	ktime_t last_stale_check;
 
+	struct {
+		int retries;
+		enum hfi1_dms_op op;
+		union {
+			struct hfi1_dms_read_start_parameters read;
+			struct hfi1_dms_write_start_parameters write;
+		};
+	} access_stall;
+
 	struct dms_counters counters;
 };
 
@@ -449,23 +507,14 @@ void hfi1_dms_uninit(struct hfi1_dms *dms);
 // struct hfi1_dms_mr * hfi1_dms_mr_new(struct mmu_rb_handler *handler, uintptr_t vaddr, u64 len);
 // int hfi1_dms_mr_free(struct hfi1_dms_mr *mr);
 
-int hfi1_dms_register_access(struct hfi1_dms *dms, struct hfi1_dms_mr *mr, u64 offset, u32 size, u64 dms_key, struct hfi1_dms_access_completion const completion,
+int hfi1_dms_register_access(struct hfi1_dms *dms, struct hfi1_dms_mr *mr, u64 offset, u32 size, union hfi1_dms_key dms_key, struct hfi1_dms_access_completion const completion,
 		enum hfi1_dms_access_type access_type, struct hfi1_dms_access **out);
 	
-// This probably isn't a real function or won't be like this
-// but it's useful for now on the testing side
-int hfi1_dms_unregister_access(struct hfi1_dms *dms, u64 dms_key);
-int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, u64 dms_key, u64 key_offset_or_vaddr, u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data, struct hfi1_dms_tracker_completion const completion);
+int hfi1_dms_unregister_access(struct hfi1_dms *dms, union hfi1_dms_key dms_key);
 
-int hfi1_dms_dma_access_once(struct hfi1_dms *dms, u32 client_key, struct hfi1_dms_mr *mr, u32 access_key,
-			       u64 offset, u32 len,
-			       struct hfi1_dms_access_completion const notification);
-int hfi1_dms_dma_access_enable(struct hfi1_dms *dms, u32 client_key, struct hfi1_dms_mr *mr, u32 access_key,
-			       u64 offset_into_buffer, u32 len,
-			       struct hfi1_dms_access_completion const notification);
-int hfi1_dms_dma_access_disable(struct hfi1_dms *dms, u32 client_key, u32 access_key);
+int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, union hfi1_dms_key dms_key, u64 key_offset_or_vaddr, u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data, struct hfi1_dms_tracker_completion const completion);
 
-int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, u64 dms_key, u64 remote_offset,
+int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, union hfi1_dms_key dms_key, u64 remote_offset,
 			u32 size, struct hfi1_dms_mr *mr, u64 mr_offset, u16 flags, u64 imm_data,
 			struct hfi1_dms_tracker_completion const completion);
 
@@ -479,8 +528,6 @@ void hfi1_dms_tracker_completion_fn_noop(union hfi1_dms_completion_cookie * cook
 /* called when user info is being freed */
 void hfi1_dms_release_client_key(struct hfi1_dms *dms, u32 client_key);
 
-union hfi1_dms_cmd_read_response_small hfi1_dms_cmd_read_response_small_make(struct hfi1_dms *dms,
-			struct hfi1_dms_mr * mr, u64 page_offset, u32 size, u32 dlid, u16 rx_rift_index, u16 tx_rift_index);
 int hfi1_dms_create_client_key(struct hfi1_dms *dms, u32 client_key);
 int hfi1_dms_impl_handle_data_request_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 

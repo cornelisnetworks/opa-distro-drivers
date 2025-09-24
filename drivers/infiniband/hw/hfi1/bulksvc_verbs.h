@@ -88,6 +88,7 @@ struct hfi1_bulksvc_qp_info {
 	// Held by the hfi1_qp_priv, as well as active dms ops
 	struct kref refcount;
 	struct list_head node;
+	u32 rdma_ops_sched; /* n ops in DMS, protected by s_lock */
 
 	struct hfi1_qp_priv *qp_priv;
 
@@ -134,5 +135,9 @@ void hfi1_bulksvc_verbs_cmpl_put(struct hfi1_bulksvc_verbs_cmpl *cmpl);
 
 int hfi1_bulksvc_verbs_dms_reg_client_id(struct hfi1_dms* dms);
 void hfi1_bulksvc_verbs_release_client_id(struct hfi1_dms* dms);
+
+void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
+	struct hfi1_bulksvc_user_info * const user_info,
+	struct hfi1_bulksvc_cmd_uverbs_post_send const * const cmd);
 
 #endif

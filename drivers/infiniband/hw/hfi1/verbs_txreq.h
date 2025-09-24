@@ -22,6 +22,7 @@ struct verbs_txreq {
 	struct rvt_sge_state    *ss;
 	struct sdma_engine     *sde;
 	struct send_context     *psc;
+	struct hfi1_bulksvc_verbs_cmd *bts_cmd;
 	struct kref		ref;
 	u16                     hdr_dwords;
 	u16			s_cur_size;

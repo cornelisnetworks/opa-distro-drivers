@@ -2239,6 +2239,7 @@ bail:
 	}
 	return err;
 }
+EXPORT_SYMBOL(rvt_post_send);
 
 /**
  * rvt_post_srq_recv - post a receive on a shared receive queue
