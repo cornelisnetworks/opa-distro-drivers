@@ -58,6 +58,7 @@
 #define _LINUX__HFI1_USER_H
 
 #include <linux/types.h>
+#include <rdma/ib_user_verbs.h>
 #include <rdma/rdma_user_ioctl.h>
 
 /*
@@ -324,16 +325,18 @@ enum hfi1_ureg {
 	ur_rcvtidflowtable = 256
 };
 
+#define CACHELINE_SIZE 64
+
 struct hfi1_bulksvc_queue_ctrl {
 	union {
 		__u64 head;
 		/* TODO use proper alignment utils */
-		__u8 padding1[64];
+		__u8 padding1[CACHELINE_SIZE];
 	};
 	union {
 		__u64 tail;
 		/* TODO use proper alignment utils */
-		__u8 padding2[64];
+		__u8 padding2[CACHELINE_SIZE];
 	};
 };
 
@@ -435,6 +438,13 @@ struct hfi1_bulksvc_cmd_mr_close {
 	__u32 cmplq_id;
 } __attribute__((packed, aligned(4)));
 
+struct hfi1_bulksvc_cmd_uverbs_post_send {
+	__u64 app_context;
+	__u16 num_wrs;
+	__u32 cmplq_id;
+	struct ib_uverbs_send_wr wrs[0];
+} __attribute__((packed, aligned(4)));
+
 enum hfi1_bulksvc_cmd_op {
 	HFI1_BULKSVC_CMD_REG_DMA_BUFFER,
 	HFI1_BULKSVC_CMD_RDMA_READ_VA,
@@ -445,11 +455,17 @@ enum hfi1_bulksvc_cmd_op {
 	HFI1_BULKSVC_CMD_DMA_ACCESS_DISABLE,
 	HFI1_BULKSVC_CMD_MR_OPEN,
 	HFI1_BULKSVC_CMD_MR_CLOSE,
+	HFI1_BULKSVC_CMD_UVERBS_POST_SEND,
 };
 
-union hfi1_bulksvc_cmd {
-	__u8 bytes[128];
-	__u32 dw[32];
+struct hfi1_bulksvc_cmd_hdr {
+	enum hfi1_bulksvc_cmd_op op;
+	__u16 num_blocks;
+	__u16 reserved;
+};
+
+struct hfi1_bulksvc_cmd {
+	struct hfi1_bulksvc_cmd_hdr hdr;
 	union {
 		struct hfi1_bulksvc_cmd_reg_dma_buffer register_dma_buffer;
 		struct hfi1_bulksvc_cmd_rdma_read_va rdma_read_va;
@@ -460,17 +476,14 @@ union hfi1_bulksvc_cmd {
 		struct hfi1_bulksvc_cmd_dma_access_disable dma_access_disable;
 		struct hfi1_bulksvc_cmd_mr_open mr_open;
 		struct hfi1_bulksvc_cmd_mr_close mr_close;
-		struct {
-			__u32 reserved[31];
-			enum hfi1_bulksvc_cmd_op op;
-		} __attribute__((packed, aligned(4)));
-	} __attribute__((packed, aligned(4)));
-};
+		struct hfi1_bulksvc_cmd_uverbs_post_send uverbs_post_send;
+	} payld[];
+} __attribute__((packed, aligned(CACHELINE_SIZE)));
 
 enum hfi1_bulksvc_cq_entry_type {
-	HFI1_BULKSVC_CQ_ENTRY_TYPE_DEFAULT,
-	HFI1_BULKSVC_CQ_ENTRY_TYPE_MR,
-	HFI1_BULKSVC_CQ_ENTRY_TYPE_NOTIFY,
+	HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT,
+	HFI1_HFISVC_CQ_ENTRY_TYPE_MR,
+	HFI1_HFISVC_CQ_ENTRY_TYPE_NOTIFY,
 };
 
 struct hfi1_bulksvc_cmplq_entry {

@@ -5,10 +5,12 @@
 
 #include "bulksvc.h"
 #include "chip.h"
+#include "chip_registers.h"
 #include "common.h"
 #include "dms.h"
 #include "hfi.h"
 #include "linux/workqueue.h"
+#include "msix.h"
 #include "sdma.h"
 #include "exp_rcv.h"
 #include "trace_dbg.h"
@@ -66,6 +68,7 @@ MODULE_PARM_DESC(bulksvc_progress_interval,
 // copy from chip.c
 #define RSM_TYPE_BULKSVC          6
 
+static void bulksvc_clear_interrupts(struct hfi1_bulksvc *svc);
 static void bulksvc_event_work(struct work_struct *work);
 static void bulksvc_event_work_eventing(struct work_struct *work);
 static void bulksvc_event_work_polling(struct work_struct *work);
@@ -239,6 +242,49 @@ exit:
 	return ret;
 }
 
+/** Sets the JKEY for both rcd and send_context as normal, but then marks
+  * the send_context's jkey mask to allow both dms jkeys.
+  */
+static int _set_bulksvc_ctxt_jkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd, u16 jkey)
+{
+	hfi1_set_ctxt_jkey(dd, rcd, jkey);
+	// mask is 0xFFFE to allow both DATA and PROTO job keys
+	u64 const bulksvc_jkey_mask = (SEND_CTXT_CHECK_JOB_KEY_VALUE_MASK - 1) << SEND_CTXT_CHECK_JOB_KEY_MASK_SHIFT;
+	int pidx;
+	u16 hw_ctxt;
+	u64 reg;
+
+	if (!rcd || !rcd->sc)
+		return -EINVAL;
+
+	pidx = rcd->ppd->hw_pidx;
+	hw_ctxt = rcd->sc->hw_context;
+	reg = bulksvc_jkey_mask |
+		((jkey & SEND_CTXT_CHECK_JOB_KEY_VALUE_MASK) <<
+		 SEND_CTXT_CHECK_JOB_KEY_VALUE_SHIFT);
+	/* JOB_KEY_ALLOW_PERMISSIVE is not allowed by default */
+	if (HFI1_CAP_KGET_MASK(rcd->flags, ALLOW_PERM_JKEY))
+		reg |= SEND_CTXT_CHECK_JOB_KEY_ALLOW_PERMISSIVE_SMASK;
+	write_epsc_csr(dd, pidx, hw_ctxt, dd->params->send_ctxt_check_job_key_reg, reg);
+
+	return 0;
+}
+
+irqreturn_t hfi1_bulksvc_doorbell_interrupt(int irq, void *data)
+{
+	struct hfi1_bulksvc *svc = data;
+	hfi1_bulksvc_schedule(svc);
+	return IRQ_HANDLED;
+}
+
+irqreturn_t hfi1_bulksvc_doorbell_interrupt_thr(int irq, void *data)
+{
+	struct hfi1_bulksvc *svc = data;
+	dd_dev_dbg(svc->dd, "DOORBELL!\n");
+	hfi1_bulksvc_schedule(svc);
+	return IRQ_HANDLED;
+}
+
 int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 {
 	struct hfi1_bulksvc *svc = dd->bulksvc;
@@ -247,6 +293,7 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 	bool bulksvc_polling = get_bulksvc_polling(dd);
 	u32 sdma_rm;
 	int ret = 0;
+	int nr;
 
 	if (!svc) {
 		ret = -1;
@@ -281,13 +328,16 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 		goto fail;
 	}
 
+	// if we get here we know we have at least 2 bulksvc contexts otherwise the above would fail
 	for (s32 i = 0; i < dd->num_pports; i++) {
 		if (!port_available_ppd(&dd->pport[i]))
 			continue;
 
-		pr_debug("%s:%d:%s() bulksvc: Setting JKEY %u for port %u\n",
-			   __FILENAME__, __LINE__, __func__, HFI1_DMS_JKEY, i);
-		hfi1_set_ctxt_jkey(dd, svc->rsrc.pp[i].rcd[0], HFI1_DMS_JKEY);
+		pr_debug("%s:%d:%s() bulksvc: Setting JKEY %u for rctxt %u and JKEY %u for rctxt %u on  port %u\n",
+			   __FILENAME__, __LINE__, __func__, HFI1_DMS_CTRL_JKEY, svc->rsrc.pp[i].rcd[0]->ctxt, HFI1_DMS_DATA_JKEY, svc->rsrc.pp[i].rcd[1]->ctxt, i);
+		_set_bulksvc_ctxt_jkey(dd, svc->rsrc.pp[i].rcd[0], HFI1_DMS_CTRL_JKEY);
+		_set_bulksvc_ctxt_jkey(dd, svc->rsrc.pp[i].rcd[1], HFI1_DMS_DATA_JKEY);
+
 	}
 
 	if (dd->num_pports < 2) {
@@ -298,6 +348,12 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 				sdma_rm);
 		bulksvc_rsm_init(svc);
 		hfi1_bulksvc_verbs_dms_reg_client_id(&svc->dms);
+	}
+
+	nr = msix_request_doorbell_irq(dd);
+	if (nr < 0) {
+		dd_dev_warn(dd, "Bulksvc: could not allocate msix vector for doorbell, using general handler\n");
+		dd->bulksvc->doorbell_msix_intr = CCE_NUM_MSIX_VECTORS;
 	}
 
 	/* setup polling event queue */
@@ -322,6 +378,7 @@ int hfi1_bulksvc_loan_resources(struct hfi1_devdata *dd)
 		pr_info("Bulksvc configured to poll\n");
 		INIT_WORK(&svc->event_work, bulksvc_event_work_polling);
 	} else {
+		bulksvc_clear_interrupts(svc);
 		pr_info("Bulksvc configured to be event driven\n");
 		INIT_WORK(&svc->event_work, bulksvc_event_work_eventing);
 	}
@@ -359,7 +416,7 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 	dd->bulksvc = kcalloc(sizeof(*dd->bulksvc), 1, GFP_KERNEL);
 	if (!dd->bulksvc) {
 		ret = -ENOMEM;
-		goto exit;
+		return ret;
 	}
 
 	dd->bulksvc->dd = dd; /* add backref */
@@ -379,7 +436,7 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 		kfree(dd->bulksvc);
 		dd->bulksvc = NULL;
 		ret = 1;
-		goto exit;
+		return ret;
 	}
 
 	if (bulksvc_cpu != -1) {
@@ -418,7 +475,6 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 
 	atomic_set(&dd->bulksvc->last_client_key, 0);
 
-exit:
 	return ret;
 }
 
@@ -427,7 +483,7 @@ static void flush_event_queue(struct hfi1_bulksvc *svc)
 	struct list_head *entry, *tmp_entry;
 
 	if (list_empty(&svc->event_queue))
-		goto exit;
+		return;
 
 	list_for_each_safe(entry, tmp_entry, &svc->event_queue) {
 		list_del(entry);
@@ -435,7 +491,6 @@ static void flush_event_queue(struct hfi1_bulksvc *svc)
 				 list));
 	}
 
-exit:
 }
 
 /* can be called multiple times */
@@ -514,6 +569,9 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 		svc->rsrc.pp = NULL;
 	}
 
+	if (svc->doorbell_msix_intr != CCE_NUM_MSIX_VECTORS)
+		msix_free_irq(dd, svc->doorbell_msix_intr);
+
 	kfree(svc);
 	dd->bulksvc = NULL;
 }
@@ -553,36 +611,37 @@ static int bulksvc_poll_event_queue(struct hfi1_bulksvc *svc)
 			list_del(&event_entry->list);
 			processed += 1;
 
-			if (event_entry->event.type == BULKSVC_EVENT_TYPE_USER_INFO_ADD) {
-				struct hfi1_bulksvc_user_info *user_info = 
-					(struct hfi1_bulksvc_user_info *)event_entry->event.data;
-				if (WARN_ON(user_info == NULL)) {
-					continue;
+			switch (event_entry->event.type) {
+				case BULKSVC_EVENT_TYPE_SDMA:
+					break;
+				case BULKSVC_EVENT_TYPE_USER_INFO_ADD: {
+					struct hfi1_bulksvc_user_info *user_info = event_entry->event.user_info;
+					if (WARN_ON(user_info == NULL)) {
+						break;
+					}
+
+					if (hfi1_dms_create_client_key(&svc->dms,
+									user_info->client_key)) {
+						dd_dev_err(svc->dd, "Failed to create DMS client key %u\n",
+							user_info->client_key);
+						break;
+					}
+
+					list_add_tail(&user_info->list_entry, &svc->user_infos);
+					break;
 				}
+				case BULKSVC_EVENT_TYPE_USER_INFO_RELEASE: {
+					struct hfi1_bulksvc_user_info *user_info = event_entry->event.user_info;
+					if (WARN_ON(user_info == NULL)) {
+						break;
+					}
+					list_del(&user_info->list_entry);
 
-				if (hfi1_dms_create_client_key(&svc->dms,
-								user_info->client_key)) {
-					dd_dev_err(svc->dd, "Failed to create DMS client key %u\n",
-						user_info->client_key);
-					continue;
+					bulksvc_user_info_destroy(user_info);
+					break;
 				}
-
-				// can probably remove this lock soon now that we event to bulksvc
-				mutex_lock(&svc->user_info_lock);
-				list_add_tail(&user_info->list_entry, &svc->user_infos);
-				mutex_unlock(&svc->user_info_lock);
-
-			} else if (event_entry->event.type == BULKSVC_EVENT_TYPE_USER_INFO_RELEASE) {
-				struct hfi1_bulksvc_user_info *user_info = (struct hfi1_bulksvc_user_info *)event_entry->event.data;
-				if (WARN_ON(user_info == NULL)) {
-					continue;
-				}
-				mutex_lock(&svc->user_info_lock);
-				list_del(&user_info->list_entry);
-				mutex_unlock(&svc->user_info_lock);
-
-				bulksvc_user_info_destroy(user_info);
 			}
+
 
 			kfree(event_entry);
 		}
@@ -609,6 +668,8 @@ static void bulksvc_event_work(struct work_struct *work)
 		processed += hfi1_bulksvc_poll_verbs_cmds(svc);
 	} while (iters < max_iters_per_work && processed != 0);
 
+	if (iters == max_iters_per_work && !svc->stop_scheduling)
+		hfi1_bulksvc_schedule(svc);
 }
 
 static void bulksvc_clear_interrupts(struct hfi1_bulksvc *svc)
@@ -616,11 +677,14 @@ static void bulksvc_clear_interrupts(struct hfi1_bulksvc *svc)
 	struct hfi1_devdata *dd = svc->dd;
 	u32 off = 8 * (dd->params->is_sdma_start / 64);
 
-	hfi1_rcd_eoi_intr(svc->dms.rctxt);
+	hfi1_rcd_eoi_intr(svc->dms.rcd_ctrl);
+	hfi1_rcd_eoi_intr(svc->dms.rcd_data);
 	for (int i = 0; i < svc->dms.num_engines; ++i) {
 		struct sdma_engine *sde = svc->dms.sdma_engines[i];
 		write_csr(dd, dd->params->cce_int_clear_reg + off, sde->imask);
 	}
+	// clear the doorbell is
+	write_csr(dd, dd->params->cce_int_clear_reg + (8 * 5), 1ull << 11);
 }
 
 /* Polling work queue function that reschedules itself */
@@ -763,9 +827,9 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
 		rrd.index2_off = 0;
 		rrd.index2_width = 0;
 		rrd.mask1 = 0xFF;
-		rrd.value1 = HFI1_DMS_JKEY & 0xFF;
+		rrd.value1 = HFI1_DMS_CTRL_JKEY & 0xFF;
 		rrd.mask2 = 0xFF;
-		rrd.value2 = (HFI1_DMS_JKEY >> 8) & 0xFF;
+		rrd.value2 = (HFI1_DMS_CTRL_JKEY >> 8) & 0xFF;
 
 		add_rsm_rule(svc->dd, rule_index, &rrd);
 

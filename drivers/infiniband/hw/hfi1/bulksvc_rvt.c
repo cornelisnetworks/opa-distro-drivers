@@ -10,8 +10,6 @@
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
-static bool __hfi1_do_bts_send(struct iowait_work *w, bool in_thread);
-
 /*** TEMP THINGS UNTIL API IS DEFINED ***/
 int verbs_bulksvc_reg_mr(struct hfi1_bulksvc *svc, struct rvt_mregion *mr)
 {
@@ -193,16 +191,36 @@ void verbs_bulksvc_enqueue(struct hfi1_qp_priv *qpriv, struct verbs_txreq *tx,
 	struct rvt_qp *qp = qpriv->owner;
 
 	lockdep_assert_held(&qp->s_lock);
+	qpriv->bulksvc_qp_info->rdma_ops_sched++;
 	/* txreq is more or less a shell around our wqe, grab extra kref
 	 * since we will be dropping it in make_rc_req
 	 */
 	/* this kref should be dropped when handed to BTS in _hfi1_do_bts_send */
 	hfi1_get_txreq(tx);
 	tx->wqe = wqe; // wqe is what we really will need later
+
+	tx->bts_cmd = hfi1_bulksvc_verbs_cmd_rdma_create(qpriv->bulksvc_qp_info, tx);
+	if (!tx->bts_cmd) {
+		printk(KERN_ERR "vBTS failed to allocate cmd\n");
+		hfi1_put_txreq(tx);
+		qp->s_cur = qp->s_cur == 0 ? qp->s_size - 1 : qp->s_cur - 1;
+		qp->s_tail = qp->s_tail == 0 ? qp->s_size - 1 : qp->s_tail - 1;
+		return;
+	}
+
 	list_add_tail(&tx->txreq.list,
 		      &qpriv->s_iowait.wait[IOWAIT_BTS_SE].tx_head);
 
+	/*
+	 * if something is already going through bulksvc then no need to kick
+	 * handoff, prev completion should invoke
+	 */
+	if (qpriv->bulksvc_qp_info->rdma_ops_sched > 1) {
+		return;
+	}
 	iowait_set_flag(&qpriv->s_iowait, IOWAIT_PENDING_BTS);
+
+
 	/* try to send now */
 	if (__hfi1_do_bts_send(&qpriv->s_iowait.wait[IOWAIT_BTS_SE], true))
 		iowait_clear_flag(&qpriv->s_iowait, IOWAIT_PENDING_BTS);
@@ -243,18 +261,6 @@ static bool _hfi1_schedule_bts_send(struct rvt_qp *qp)
 				   cpumask_first(cpumask_of_node(dd->node)));
 }
 
-
-/* same as hfi1_send_okay minus check for RVT_S_WAIT_ACK, bc that's us */
-static inline int bts_send_ok(struct rvt_qp *qp)
-{
-	struct hfi1_qp_priv *priv = qp->priv;
-
-	return !(qp->s_flags & (RVT_S_BUSY | HFI1_S_ANY_WAIT_IO)) &&
-		(verbs_txreq_queued(iowait_get_ib_work(&priv->s_iowait)) ||
-		(qp->s_flags & RVT_S_RESP_PENDING) ||
-		 !(qp->s_flags & ~RVT_S_WAIT_ACK & RVT_S_ANY_WAIT_SEND));
-}
-
 /* called by iowait functions */
 bool hfi1_schedule_bts_send(struct rvt_qp *qp)
 {
@@ -278,10 +284,9 @@ bool hfi1_schedule_bts_send(struct rvt_qp *qp)
 
 /* STEP 4: Hand to BTS */
 /* returns true if list item handled false if not */
-static bool __hfi1_do_bts_send(struct iowait_work *w, bool in_thread)
+bool __hfi1_do_bts_send(struct iowait_work *w, bool in_thread)
 {
 	struct sdma_txreq *txreq = iowait_get_txhead(w);
-	struct hfi1_qp_priv *qpriv;
 	struct verbs_txreq *tx;
 	unsigned long flags;
 	struct rvt_qp *qp;
@@ -298,40 +303,20 @@ static bool __hfi1_do_bts_send(struct iowait_work *w, bool in_thread)
 		hfi1_put_txreq(tx);
 		return true;
 	}
-	qpriv = qp->priv;
 
-	if (WARN_ON(!qpriv)) {
-		printk(KERN_ERR "vBTS scheduled request with no qp priv\n");
+	if (!tx->bts_cmd) {
+		printk(KERN_ERR "vBTS scheduled with no bts cmd\n");
 		hfi1_put_txreq(tx);
 		return true;
 	}
 
-	// /* no more sending until we get this acked by hfi1_bts_send_complete */
-	if (!in_thread) {
-		spin_lock_irqsave(&qp->s_lock, flags);
-		tx->qp->s_flags |= RVT_S_WAIT_ACK;
-		spin_unlock_irqrestore(&qp->s_lock, flags);
-	} else {
-		tx->qp->s_flags |= RVT_S_WAIT_ACK;
-	}
-	
-	struct hfi1_bulksvc_verbs_cmd *cmd = hfi1_bulksvc_verbs_cmd_rdma_create(qpriv->bulksvc_qp_info, tx);
-	if (!cmd) {
-		printk(KERN_ERR "vBTS failed to allocate cmd\n");
-		return true;
-	}
-	if(!bts_on_verbs_rdma_op(cmd)) {
-		rvt_get_qp(qp); /* put by hfi1_qp_wakeup */
-
+	if(!bts_on_verbs_rdma_op(tx->bts_cmd)) {
 		hfi1_put_txreq(tx);
 		return true; /* success case */
 	}
 
-	hfi1_bulksvc_verbs_cmd_put(cmd);
-	/* error state reset our work so we can try again later */
 	if (!in_thread)
 		spin_lock_irqsave(&qp->s_lock, flags);
-	tx->qp->s_flags &= ~RVT_S_WAIT_ACK;
 	list_add_tail(&tx->txreq.list, &w->tx_head);
 	if (!in_thread)
 		spin_unlock_irqrestore(&qp->s_lock, flags);
@@ -370,12 +355,13 @@ static void bts_rdma_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
 
 	spin_lock_irqsave(&qp->s_lock, flags);
 	rvt_send_complete(tx->qp, tx->wqe, tx->bts_rc, RVT_QP_LOCK_STATE_S);
+	if (priv->s_flags & HFI1_S_TID_WAIT_INTERLCK &&
+	    !priv->bulksvc_qp_info->rdma_ops_sched) {
 
-	/* allow other things to be sent now */
-	qp->s_flags &= ~RVT_S_WAIT_ACK;
-	hfi1_schedule_send(qp);
+		priv->s_flags &= ~HFI1_S_TID_WAIT_INTERLCK;
+		hfi1_schedule_send(qp);
+	}
 	spin_unlock_irqrestore(&qp->s_lock, flags);
-	hfi1_qp_wakeup(qp, RVT_S_WAIT_TX);
 }
 
 static void bts_mr_reg_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)

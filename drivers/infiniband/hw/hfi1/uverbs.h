@@ -8,6 +8,12 @@
 
 #include <rdma/uverbs_ioctl.h>
 
+/* calculate the token from an integer offset */
+static inline unsigned long rdma_mmap_token_i(u8 type, unsigned long offset)
+{
+	return ((unsigned long)type << PAGE_SHIFT) | offset_in_page(offset);
+}
+
 int hfi1_alloc_ucontext(struct ib_ucontext *ucontext, struct ib_udata *udata);
 void hfi1_dealloc_ucontext(struct ib_ucontext *ucontext);
 int hfi1_rdma_mmap(struct ib_ucontext *ucontext, struct vm_area_struct *vma);
