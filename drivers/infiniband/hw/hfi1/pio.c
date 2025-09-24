@@ -1261,8 +1261,10 @@ void pio_freeze(struct hfi1_devdata *dd)
  */
 void pio_kernel_unfreeze(struct hfi1_devdata *dd)
 {
+	struct hfi1_portrsrcs *pr;
+	struct hfi1_ctxtdata *rcd;
 	struct send_context *sc;
-	int i;
+	int i, p;
 
 	for (i = 0; i < dd->num_send_contexts; i++) {
 		sc = dd->send_contexts[i].sc;
@@ -1272,6 +1274,24 @@ void pio_kernel_unfreeze(struct hfi1_devdata *dd)
 			continue;
 
 		sc_enable(sc);	/* will clear the sc frozen flag */
+	}
+
+	if (!dd->bulksvc)
+		return;
+
+	/* bulksvc contexts are SC_USER send contexts */
+	for (p = 0; p < dd->num_pports; p++) {
+		pr = &dd->rsrcs.ppd[p];
+		for (i = pr->first_bulksvc_alloc_ctxt;
+		     i < pr->first_dyn_alloc_ctxt; i++) {
+			rcd = hfi1_rcd_get_by_index(dd, i);
+			if (!rcd)
+				continue;
+			sc = rcd->sc;
+			if (sc && sc->flags & SCF_LINK_DOWN)
+				sc_enable(sc);
+			hfi1_rcd_put(rcd);
+		}
 	}
 }
 
@@ -1290,6 +1310,8 @@ void pio_kernel_unfreeze(struct hfi1_devdata *dd)
 void pio_kernel_linkup(struct hfi1_pportdata *ppd)
 {
 	struct hfi1_devdata *dd = ppd->dd;
+	struct hfi1_portrsrcs *pr;
+	struct hfi1_ctxtdata *rcd;
 	struct send_context *sc;
 	int i;
 
@@ -1302,6 +1324,22 @@ void pio_kernel_linkup(struct hfi1_pportdata *ppd)
 			continue;
 
 		sc_enable(sc);	/* will clear the sc link down flag */
+	}
+
+	if (!dd->bulksvc)
+		return;
+
+	pr = &dd->rsrcs.ppd[ppd->port - 1];
+	/* bulksvc contexts are SC_USER send contexts */
+	for (i = pr->first_bulksvc_alloc_ctxt;
+	     i < pr->first_dyn_alloc_ctxt; i++) {
+		rcd = hfi1_rcd_get_by_index(dd, i);
+		if (!rcd)
+			continue;
+		sc = rcd->sc;
+		if (sc && sc->flags & SCF_LINK_DOWN)
+			sc_enable(sc);
+		hfi1_rcd_put(rcd);
 	}
 }
 
