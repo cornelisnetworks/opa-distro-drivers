@@ -5299,14 +5299,6 @@ int cport_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 #endif
 	print_mad(dd, port, in_mad, __func__, !!in_grh);
 #endif
-	/* if this MAD arrived on MCTXT UMAD, do not ever send back to CPORT */
-	if (in_wc && in_wc->vendor_err == OPA_WC_MCTXT_UMAD) {
-#ifdef CPORT_UMAD_TRACE
-		print_hex_dump(KERN_INFO, "MCTXT UMAD2 ", DUMP_PREFIX_OFFSET, 16, 1, in_mad, 64, false);
-#endif
-		mad_result = IB_MAD_RESULT_SUCCESS;
-		goto done;
-	}
 	/* XXX - all SA MADs just return success.
 	 * in fact, everything returns success except specific MADs.
 	 */
@@ -5355,6 +5347,14 @@ int cport_process_mad(struct ib_device *ibdev, int mad_flags, u32 port,
 		goto done;
 	}
 pass_thru:
+	/* if this MAD arrived on MCTXT UMAD, do not ever send back to CPORT */
+	if (in_wc && in_wc->vendor_err == OPA_WC_MCTXT_UMAD) {
+#ifdef CPORT_UMAD_TRACE
+		print_hex_dump(KERN_INFO, "MCTXT UMAD2 ", DUMP_PREFIX_OFFSET, 16, 1, in_mad, 64, false);
+#endif
+		mad_result = IB_MAD_RESULT_SUCCESS;
+		goto done;
+	}
 	/*
 	 * XXX - in order to pass a MAD over MCTXT, we will need to
 	 * construct a "fake" header. We don't know what minimal
