@@ -542,7 +542,7 @@ check_s_state:
 
 		/*
 		 * Interlock between various IB requests and TID RDMA
-		 * if necessary.
+		 * or bulksvc if necessary.
 		 */
 		if ((priv->s_flags & HFI1_S_TID_WAIT_INTERLCK) ||
 		    hfi1_tid_rdma_wqe_interlock(qp, wqe))

@@ -17,6 +17,7 @@ struct hfi1_bulksvc_queue_record {
 	atomic64_t *tail;
 	u32 idx_mask;
 	u8 *queue_buf;
+	u8 *queue_buf_magic;
 };
 
 #define BULKSVC_USER_MAX_NUM_CMPLQS 16
