@@ -1776,6 +1776,16 @@ void sdma_all_running(struct hfi1_devdata *dd)
 		sde = &dd->per_sdma[i];
 		sdma_process_event(sde, sdma_event_e30_go_running);
 	}
+
+	if (!dd->bulksvc || !dd->bulksvc->rsrc.sde_arr)
+		return;
+	/* bulksvc sde's are not included in first->last smda_engine */
+	for (i = 0; i < dd->bulksvc->prereqs.num_sdma; i++) {
+		sde = dd->bulksvc->rsrc.sde_arr[i];
+		if (!sde)
+			continue;
+		sdma_process_event(sde, sdma_event_e30_go_running);
+	}
 }
 
 /**
@@ -1794,6 +1804,16 @@ void sdma_all_idle(struct hfi1_devdata *dd)
 	for (i = dr->first_sdma_engine; i < dr->last_sdma_engine; ++i) {
 		sde = &dd->per_sdma[i];
 		sdma_process_event(sde, sdma_event_e70_go_idle);
+	}
+
+	if (!dd->bulksvc || !dd->bulksvc->rsrc.sde_arr)
+		return;
+	/* bulksvc sde's are not included in first->last smda_engine */
+	for (i = 0; i < dd->bulksvc->prereqs.num_sdma; i++) {
+		sde = dd->bulksvc->rsrc.sde_arr[i];
+		if (!sde)
+			continue;
+		sdma_process_event(sde, sdma_event_e30_go_running);
 	}
 }
 
