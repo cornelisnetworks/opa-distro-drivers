@@ -1020,4 +1020,6 @@ void rvt_qp_iter(struct rvt_dev_info *rdi,
 		 u64 v,
 		 void (*cb)(struct rvt_qp *qp, u64 v));
 void rvt_qp_mr_clean(struct rvt_qp *qp, u32 lkey);
+int rvt_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
+		  const struct ib_send_wr **bad_wr);
 #endif          /* DEF_RDMAVT_INCQP_H */

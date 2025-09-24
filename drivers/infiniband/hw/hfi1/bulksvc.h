@@ -9,6 +9,7 @@
 #include "dms.h"
 #include "bulksvc_user.h"
 #include "bulksvc_verbs.h"
+#include "linux/irqreturn.h"
 
 struct rsm_map_table;
 
@@ -44,7 +45,9 @@ enum hfi1_bulksvc_event_type {
 
 struct hfi1_bulksvc_event {
   enum hfi1_bulksvc_event_type type;
-  u64 data;
+  union {
+	struct hfi1_bulksvc_user_info *user_info;
+  };
 } __attribute__((packed, aligned(64)));
 
 struct hfi1_bulksvc_event_entry {
@@ -82,6 +85,7 @@ struct hfi1_bulksvc {
 	atomic_t last_client_key;
 
 	int cpu; /* cpu to run on when scheduled */
+	int doorbell_msix_intr;
 };
 
 /* setup data structures, define requirements */
@@ -112,5 +116,9 @@ void bulksvc_rsm_reserve(struct hfi1_devdata *dd, struct rsm_map_table *rmt);
 void bulksvc_rsm_init(struct hfi1_bulksvc *svc);
 
 int hfi1_bulksvc_enqueue_event(struct hfi1_bulksvc *svc, struct hfi1_bulksvc_event_entry *entry);
+
+/* Bulksvc doorbell handlers */
+irqreturn_t hfi1_bulksvc_doorbell_interrupt(int irq, void *data);
+irqreturn_t hfi1_bulksvc_doorbell_interrupt_thr(int irq, void *data);
 
 #endif          /* DEF_HFI1_BULKSVC_H */

@@ -3,10 +3,15 @@
  * Copyright(c) 2023 - Cornelis Networks, Inc.
  */
 
+#include "bulksvc.h"
 #include "hfi.h"
 #include "trace.h"
 #include "chip_jkr.h"
 #include "cport.h"
+
+// IS source value within the IS_PORT range
+#define JKR_IS_PORT0INT6 (6)
+#define JKR_IS_PORT0INT7 (7)
 
 int jkr_find_used_resources(struct hfi1_devdata *dd)
 {
@@ -431,6 +436,12 @@ static void jkr_is_various_int(struct hfi1_devdata *dd, unsigned int source)
 
 static void jkr_is_port_int(struct hfi1_devdata *dd, unsigned int source)
 {
+	// This is a fallback in case the msix vector is full
+	if (dd->bulksvc && (source == JKR_IS_PORT0INT6 || source == JKR_IS_PORT0INT7)) {
+		hfi1_bulksvc_doorbell_interrupt(source, dd->bulksvc);
+		return;
+	}
+
 	char name[64];
 	u32 pidx = source / 8; /* port interrupts are in groups of 8 */
 	u32 which = source % 8;
