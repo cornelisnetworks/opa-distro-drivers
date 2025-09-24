@@ -9,6 +9,7 @@
 #include "hfi.h"
 #include "linux/dma-mapping.h"
 #include "linux/gfp_types.h"
+#include "pio.h"
 #include "sdma.h"
 #include "bulksvc.h"
 #include "sdma_defs.h"
@@ -4634,6 +4635,9 @@ int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 p
 	dms_trace(dms_sdma_send, dms, mr);
 
 	start = dms_rdtsc();
+	// sdma still performs send context checks on egress
+	if (!(dms->sctxt->flags & SCF_ENABLED))
+		return -ECOMM;
 
 	tid_offset = (tid_info & 0x7fff) << 2;
 	tid = (tid_info >> 16) & 0x3ff;
@@ -4700,7 +4704,7 @@ int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 p
 	sdma = dms->sdma_engines[cur_sdma_engine];
 	DMS_BUG_ON(!sdma);
 
-	while ((--sdma_engine_count >= 0) && (sdma_descq_freecnt(sdma) < ndesc_total)) {
+	while ((--sdma_engine_count >= 0) && (!__sdma_running(sdma) || (sdma_descq_freecnt(sdma) < ndesc_total))) {
 		cur_sdma_engine = (cur_sdma_engine + 1) % num_sdma_engines;
 		sdma = dms->sdma_engines[cur_sdma_engine];
 	}
@@ -4710,7 +4714,7 @@ int hfi1_dms_impl_sdma_send(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 p
 		sdma_engine_count = num_sdma_engines;
 		while ((--sdma_engine_count >= 0)) {
 			sdma_gethead_dma(sdma);
-			if (sdma_descq_freecnt(sdma) >= ndesc_total) {
+			if (__sdma_running(sdma) && sdma_descq_freecnt(sdma) >= ndesc_total) {
 				break;
 			}
 			cur_sdma_engine = (cur_sdma_engine + 1) % num_sdma_engines;
@@ -5371,6 +5375,9 @@ u64 hfi1_dms_impl_slow_read_from_user(struct hfi1_dms_mr *mr, u64 offset, u64 si
 int hfi1_dms_impl_pio_send(struct hfi1_dms *dms, u64 pbc, void *data, u64 size_qw)
 {
 	struct send_context *sc = dms->sctxt;
+	if (!(sc->flags & SCF_ENABLED))
+		return -ECOMM;
+
 	u64 total_size_qw = size_qw + 1; // +1 for pbc
 
 	u32 blocks = QWORD2BLOCK_ROUND_UP(total_size_qw); // include pbc
