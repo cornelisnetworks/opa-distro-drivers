@@ -1662,7 +1662,9 @@ int _dms_tx_rift_poll(struct hfi1_dms *dms)
 	struct hfi1_dms_dlist_element *waiter;
 	struct hfi1_dms_tx_tracker *tx_tracker;
 
-	DMS_BUG_ON(!_rift_available(&dms->tx_rift));
+	if (!_rift_available(&dms->tx_rift)) {
+		return 0;
+	}
 
 	waiter = _rift_waitlist_peek(&dms->tx_rift);
 	if (!waiter) {
@@ -2228,7 +2230,9 @@ int _dms_rx_rift_poll(struct hfi1_dms *dms)
 	struct hfi1_dms_dlist_element *waiter;
 	struct hfi1_dms_rx_tracker *rx_tracker;
 
-	DMS_BUG_ON(!_rift_available(&dms->rx_rift));
+	if (!_rift_available(&dms->rx_rift)) {
+		return 0;
+	}
 
 	waiter = _rift_waitlist_peek(&dms->rx_rift);
 	if (!waiter) {
