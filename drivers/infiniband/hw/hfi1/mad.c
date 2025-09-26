@@ -5501,6 +5501,17 @@ static int cport_set_opa_nodeinfo(struct hfi1_pportdata *ppd,
 	return 0;
 }
 
+static int cport_get_opa_nodeinfo(struct hfi1_pportdata *ppd,
+				  struct opa_smp *smp,
+				  u8 *data)
+{
+	struct opa_node_info *ni = (struct opa_node_info *)data;
+
+	/* override with the system image */
+	ni->system_image_guid = ib_hfi1_sys_image_guid;
+	return MSG_RSP_STATUS_OK;
+}
+
 /*
  * Take a GET_RESP PORT_INFO MAD and use it to update the hfi1 device data structures.
  * The entire MAD is referenced through 'smp'.
@@ -6116,6 +6127,10 @@ static int cport_subn_opa(struct hfi1_pportdata *ppd, struct opa_mad *mad)
 			sts = cport_do_opa_nodedesc(ppd, smp, opa_get_smp_data(smp));
 			break;
 		}
+		if (smp->attr_id == IB_SMP_ATTR_NODE_INFO) {
+			sts = cport_get_opa_nodeinfo(ppd, smp, opa_get_smp_data(smp));
+			break;
+		}
 #ifdef CPORT_MAD_TRACE
 #ifndef GET_PORT_INFO_DEBUG
 		if (smp->attr_id != IB_SMP_ATTR_PORT_INFO)
@@ -6153,7 +6168,11 @@ static int hfi1_opa_mad_cport(struct hfi1_pportdata *ppd, struct opa_mad *mad)
 
 static int cport_get_ib_nodeinfo(struct hfi1_pportdata *ppd, struct ib_smp *smp)
 {
-	/* XXX anything to do? */
+	struct ib_node_info *nip = (struct ib_node_info *)&smp->data;
+
+	/* This is already in network order */
+	nip->sys_guid = ib_hfi1_sys_image_guid;
+
 	return 0;
 }
 
