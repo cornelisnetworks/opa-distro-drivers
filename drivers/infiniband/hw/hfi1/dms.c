@@ -1581,7 +1581,7 @@ int hfi1_dms_impl_inject_read_response_small(struct hfi1_dms *dms, struct hfi1_d
 
 int _dms_tx_rift_continue_read_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
 {
-	int ret;
+	int ret = 0;
 
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tx_tracker);
