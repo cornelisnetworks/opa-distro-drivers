@@ -1224,6 +1224,18 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, u16 maxpkts)
 			}
 		}
 
+		/*
+		 * protocol decision: provider must give QWORD aligned data
+		 * for 16B (as opposed to driver padding missing bytes)
+		 */
+		if (req->is16b && datalen & req->pad_mask) {
+			SDMA_DBG(req,
+				"16B packet size %u not QWORD aligned\n",
+				 datalen);
+				ret = -EINVAL;
+				goto free_tx;
+		}
+
 		if (req->ahg_idx >= 0) {
 			if (!req->seqnum) {
 				ret = user_sdma_txadd_ahg(req, tx, datalen);
