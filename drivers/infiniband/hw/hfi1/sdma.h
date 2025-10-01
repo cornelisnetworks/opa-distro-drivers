@@ -535,8 +535,8 @@ void _sdma_txreq_ahgadd(
 
 /*
  * Padding is needed if the data is not a multiple of 4 bytes.  This will
- * only possibly be true for 9B packets.  The packet_len for 16B packets will
- * already be padded to a multiple of 8 bytes.
+ * only possibly be true for 9B packets. Non QWORD aligned 16B packets
+ * will have already been dropped.
  */
 static inline int needs_pad(u16 packet_len)
 {
