@@ -141,9 +141,9 @@ unmap_dma:
 unpin_pages:
 	hfi1_release_user_pages(e->rb.handler->mn.mm, pages, pinned, false);
 free_dma:
-	kfree(dma_list);
+	kvfree(dma_list);
 free_pages:
-	kfree(pages);
+	kvfree(pages);
 	return rc;
 }
 
