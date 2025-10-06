@@ -18,6 +18,18 @@
  * This file contains PCIe utility routines.
  */
 
+#define PCI_EXP_COMP_TIMEOUT_RANGE_A	0x01
+#define PCI_EXP_COMP_TIMEOUT_RANGE_B	0x02
+#define PCI_EXP_COMP_TIMEOUT_RANGE_C	0x04
+#define PCI_EXP_COMP_TIMEOUT_RANGE_D	0x08
+
+#define PCI_EXP_COMP_TIMEOUT_MASK	(PCI_EXP_DEVCTL2_COMP_TMOUT_DIS | \
+					 PCI_EXP_DEVCTL2_COMP_TIMEOUT)
+
+int pcie_compl_to = PCI_EXP_COMP_TIMEOUT_RANGE_C | PCI_EXP_COMP_TIMEOUT_RANGE_B;
+module_param_named(pcie_compl_to, pcie_compl_to, int, S_IRUGO);
+MODULE_PARM_DESC(pcie_compl_to, "PCIe Completion Timeout bitmap, 0 no change, 0x10 disable");
+
 /*
  * Prevent upstream errors from being reported if a software stray read
  * occurs in a write-only BAR range.
@@ -474,6 +486,17 @@ void tune_pcie_caps(struct hfi1_devdata *dd)
 	u16 rc_mpss, rc_mps, ep_mpss, ep_mps;
 	u16 rc_mrrs, ep_mrrs, max_mrrs, ectl;
 	int ret;
+
+	if (dd->params->chip_type != CHIP_WFR && pcie_compl_to > 0) {
+		if (pcie_compl_to > PCI_EXP_COMP_TIMEOUT_MASK) {
+			dd_dev_warn(dd, "Ignoring invalid pcie_compl_to 0x%x\n",
+				    pcie_compl_to);
+		} else {
+			pcie_capability_clear_and_set_word(dd->pcidev, PCI_EXP_DEVCTL2,
+							   PCI_EXP_COMP_TIMEOUT_MASK,
+							   pcie_compl_to);
+		}
+	}
 
 	/*
 	 * Turn on extended tags in DevCtl in case the BIOS has turned it off
