@@ -81,6 +81,7 @@ MODULE_PARM_DESC(jkr_sdma_credits_limit, "Limit JKR per-SDMA engine buffer credi
 /* all SDMA engine errors that cause a halt */
 
 #define SD(name) SEND_DMA_##name
+/* all SDMA engine errors that cause a halt */
 #define ALL_SDMA_ENG_HALT_ERRS \
 	(SD(ENG_ERR_STATUS_SDMA_WRONG_DW_ERR_SMASK) \
 	| SD(ENG_ERR_STATUS_SDMA_GEN_MISMATCH_ERR_SMASK) \
@@ -100,6 +101,14 @@ MODULE_PARM_DESC(jkr_sdma_credits_limit, "Limit JKR per-SDMA engine buffer credi
 	| SD(ENG_ERR_STATUS_SDMA_PACKET_TRACKING_UNC_ERR_SMASK) \
 	| SD(ENG_ERR_STATUS_SDMA_HEADER_STORAGE_UNC_ERR_SMASK) \
 	| SD(ENG_ERR_STATUS_SDMA_HEADER_REQUEST_FIFO_UNC_ERR_SMASK))
+
+/* all SDMA engine errors that are correctable */
+#define ALL_SDMA_ENG_COR_ERRS \
+	( SEND_DMA_ENG_ERR_STATUS_SDMA_HEADER_REQUEST_FIFO_COR_ERR_SMASK \
+	| SEND_DMA_ENG_ERR_STATUS_SDMA_HEADER_STORAGE_COR_ERR_SMASK \
+	| SEND_DMA_ENG_ERR_STATUS_SDMA_PACKET_TRACKING_COR_ERR_SMASK \
+	| SEND_DMA_ENG_ERR_STATUS_SDMA_ASSEMBLY_COR_ERR_SMASK \
+	| SEND_DMA_ENG_ERR_STATUS_SDMA_DESC_TABLE_COR_ERR_SMASK)
 
 /* sdma_sendctrl operations */
 #define SDMA_SENDCTRL_OP_ENABLE    BIT(0)
@@ -2179,7 +2188,8 @@ void sdma_engine_error(struct sdma_engine *sde, u64 status)
 	write_seqlock(&sde->head_lock);
 	if (status & ALL_SDMA_ENG_HALT_ERRS)
 		__sdma_process_event(sde, sdma_event_e60_hw_halted);
-	if (status & ~SD(ENG_ERR_STATUS_SDMA_HALT_ERR_SMASK)) {
+	/* only print if not (SDmaHaltErr or a correctable error) */
+	if (status & ~(SD(ENG_ERR_STATUS_SDMA_HALT_ERR_SMASK) | ALL_SDMA_ENG_COR_ERRS)) {
 		dd_dev_err(sde->dd,
 			   "SDMA (%u) engine error: 0x%llx state %s\n",
 			   sde->this_idx,
