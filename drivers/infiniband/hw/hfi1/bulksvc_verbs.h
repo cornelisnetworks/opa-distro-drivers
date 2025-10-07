@@ -89,7 +89,9 @@ struct hfi1_bulksvc_qp_info {
 	// Held by the hfi1_qp_priv, as well as active dms ops
 	struct kref refcount;
 	struct list_head node;
-	u32 rdma_ops_sched; /* n ops in DMS, protected by s_lock */
+
+	u32 rvt_rdma_ops_sched; /* n ops in DMS from rvt, protected by s_lock */
+	u32 hotpath_rdma_ops_inflight;
 
 	struct hfi1_qp_priv *qp_priv;
 
