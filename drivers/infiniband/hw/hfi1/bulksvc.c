@@ -982,71 +982,70 @@ char* hfi1_bulksvc_prepare_debug_info(struct hfi1_bulksvc * const svc)
 	cursor += snprintf(cursor, end - cursor, "Number of SDMA Engines: %u\n", dms->num_engines);
 
 	for (int i = 0; i < HFI1_DMS_TIDSET_WAITER_TYPE_COUNT; ++i) {
-		cursor += snprintf(cursor, end - cursor, "tidset_waiters[%d]: head=%llu tail=%llu\n", i, dms->tidset_waiters[i].head, dms->tidset_waiters[i].tail);
+		cursor += snprintf(cursor, end - cursor, "tidset_waiters[%d]: head=%llu tail=%llu\n", i, dms->tidset_waiters[i].ring.head, dms->tidset_waiters[i].ring.tail);
 
 	}
-	cursor += snprintf(cursor, end - cursor, "Free TID Sets Stack Top: %u\n", dms->free_tid_sets_stack_top);
+	cursor += snprintf(cursor, end - cursor, "Free TID Sets Stack Top: %u\n", dms->free_tidsets.top);
 
-	cursor += snprintf(cursor, end - cursor, "sdma_waiters: head=%p tail=%p\n", dms->sdma_waiters.waitlist.head, dms->sdma_waiters.waitlist.tail);
+	cursor += snprintf(cursor, end - cursor, "sdma_waiters: head=%p tail=%p\n", dms->sdma_waiters[HFI1_DMS_SDMA_ENGINE_IDX_ANY].waitlist.head, dms->sdma_waiters[HFI1_DMS_SDMA_ENGINE_IDX_ANY].waitlist.tail);
 
 	cursor += snprintf(cursor, end - cursor, "num sdma descs %u\n", dms->num_descs);
 
-	cursor += snprintf(cursor, end - cursor, "TX rift:\n");
+	cursor += snprintf(cursor, end - cursor, "Rift:\n");
 	for (int i = 0; i < HFI1_DMS_RIFT_IDX_SIZE; ++i) {
-		union hfi1_dms_tracker* tracker = dms->tx_rift.arr[i];
+		union hfi1_dms_tracker* tracker = dms->rift.arr[i];
 		if (!tracker) {
 			continue;
-		} else if (tracker->tx.payload_remaining == 0) {
-			cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d - rift entry present but no remaining data\n",
-				i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->tx.op);
-
-			continue;
 		}
-		cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d total_payload=%u payload_remaining=%u xfer_start_byte_offset=%u\n", 
-			i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->tx.op, tracker->tx.total_payload, tracker->tx.payload_remaining, tracker->tx.xfer_start_byte_offset);
+		hfi1_dms_rift_key_t const key = _rift_key_create(0, i);
+		if (_rift_key_side_tx(key)) {
+			if (tracker->tx.payload_remaining == 0) {
+				cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d - rift entry present but no remaining data\n",
+					i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->tx.op);
 
-		switch (tracker->tx.op) {
-			case HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE:
-				cursor += snprintf(cursor, end - cursor, "\t\tWrite: mr=%p dms_key=%llu rx_offset=%llu flags=%u imm_data=%llu\n",
-					tracker->tx.write.mr, tracker->tx.write.dms_key.value, tracker->tx.write.rx_offset, tracker->tx.write.flags, tracker->tx.write.imm_data);
+				continue;
+			}
+			cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d total_payload=%u payload_remaining=%u xfer_start_byte_offset=%u\n", 
+				i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->tx.op, tracker->tx.total_payload, tracker->tx.payload_remaining, tracker->tx.xfer_start_byte_offset);
 
-				break;
-			case HFI1_DMS_TX_TRACKER_OP_RDMA_READ:
-				cursor += snprintf(cursor, end - cursor, "\t\tRead: access=%p flags=%u imm_data=%llu size_qw=%u rx_id=%u include_fixup_data=%u head_misalignment=%u\n",
-					tracker->tx.read.access, tracker->tx.read.start.flags, tracker->tx.read.start.imm_data, tracker->tx.read.start.size_qw, tracker->tx.read.start.rx_id, tracker->tx.read.start.include_fixup_data, tracker->tx.read.start.head_misalignment);
+			switch (tracker->tx.op) {
+				case HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE:
+					cursor += snprintf(cursor, end - cursor, "\t\tWrite: mr=%p dms_key=%llu rx_offset=%llu flags=%u imm_data=%llu\n",
+						tracker->tx.write.mr, tracker->tx.write.dms_key.value, tracker->tx.write.rx_offset, tracker->tx.write.flags, tracker->tx.write.imm_data);
 
-				break;
-			default:
-				break;
-		}
-	}
-	cursor += snprintf(cursor, tot_size - (cursor - res), "RX rift:\n");
-	for (int i = 0; i < HFI1_DMS_RIFT_IDX_SIZE; ++i) {
-		union hfi1_dms_tracker* tracker = dms->rx_rift.arr[i];
-		if (!tracker) {
-			continue;
-		} else if (tracker->rx.payload_remaining == 0) {
-			cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d - rift entry present but no remaining data\n",
-				i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->rx.op);
+					break;
+				case HFI1_DMS_TX_TRACKER_OP_RDMA_READ:
+					cursor += snprintf(cursor, end - cursor, "\t\tRead: access=%p flags=%u imm_data=%llu size_qw=%u rx_id=%u head_misalignment=%u tail_misalignment=%u\n",
+						tracker->tx.read.access, tracker->tx.read.start.flags, tracker->tx.read.start.imm_data, tracker->tx.read.start.size_qw, tracker->tx.read.start.rx_id, tracker->tx.read.start.head_misalignment, tracker->tx.read.start.tail_misalignment);
 
-			continue;
-		}
-		cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d total_payload=%u payload_remaining=%u payload_requested=%u sbuf_offset=%u rbuf_offset=%llu\n", 
-			i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->rx.op, tracker->rx.total_payload, tracker->rx.payload_remaining, tracker->rx.payload_requested, tracker->rx.sbuf_offset, tracker->rx.rbuf_offset);
+					break;
+				default:
+					break;
+			}
+		} else {	// rx
+			if (tracker->rx.payload_remaining == 0) {
+				cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d - rift entry present but no remaining data\n",
+					i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->rx.op);
 
-		switch (tracker->rx.op) {
-			case HFI1_DMS_RX_TRACKER_OP_RDMA_READ:
-				cursor += snprintf(cursor, end - cursor, "\t\tRead: dms_key=%llu flags=%u imm_data=%llu\n", 
-					tracker->rx.read.dms_key.value, tracker->rx.read.flags, tracker->rx.read.imm_data);
+				continue;
+			}
+			cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d total_payload=%u payload_remaining=%u payload_requested=%u sbuf_offset=%u rbuf_offset=%llu\n", 
+				i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->rx.op, tracker->rx.total_payload, tracker->rx.payload_remaining, tracker->rx.payload_requested, tracker->rx.sbuf_offset, tracker->rx.rbuf_offset);
 
-				break;
-			case HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE:
-				cursor += snprintf(cursor, end - cursor, "\t\tWrite: access=%p flags=%u imm_data=%llu size=%u\n", 
-					tracker->rx.write.access, tracker->rx.write.start.flags, tracker->rx.write.start.imm_data, tracker->rx.write.start.size);
+			switch (tracker->rx.op) {
+				case HFI1_DMS_RX_TRACKER_OP_RDMA_READ:
+					cursor += snprintf(cursor, end - cursor, "\t\tRead: dms_key=%llu flags=%u imm_data=%llu\n", 
+						tracker->rx.read.dms_key.value, tracker->rx.read.flags, tracker->rx.read.imm_data);
 
-				break;
-			default:
-				break;
+					break;
+				case HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE:
+					cursor += snprintf(cursor, end - cursor, "\t\tWrite: access=%p flags=%u imm_data=%llu size=%u\n", 
+						tracker->rx.write.access, tracker->rx.write.start.flags, tracker->rx.write.start.imm_data, tracker->rx.write.start.size);
+
+					break;
+				default:
+					break;
+			}
 		}
 	}
 
@@ -1101,32 +1100,65 @@ char* hfi1_bulksvc_prepare_debug_info(struct hfi1_bulksvc * const svc)
 	}
 	mutex_unlock(&svc->user_info_lock);
 
-	int rx_rift_target = 0;
-	struct hfi1_dms_dlist_element* curd = dms->rx_rift.type[HFI1_DMS_XFER_TYPE_TARGET].waitlist.head;
+	int rift_target = 0;
+	struct hfi1_dms_dlist_element* curd = dms->rift.type[HFI1_DMS_XFER_TYPE_TARGET].waitlist.head;
 	while (curd != NULL) {
-		rx_rift_target++;
+		rift_target++;
 		curd = curd->next;
 	}
-	int rx_rift_initiator = 0;
-	curd = dms->rx_rift.type[HFI1_DMS_XFER_TYPE_INITIATOR].waitlist.head;
+	int rift_initiator = 0;
+	curd = dms->rift.type[HFI1_DMS_XFER_TYPE_INITIATOR].waitlist.head;
 	while (curd != NULL) {
-		rx_rift_initiator++;
+		rift_initiator++;
 		curd = curd->next;
 	}
-	int tx_rift_target = 0;
-	curd = dms->tx_rift.type[HFI1_DMS_XFER_TYPE_TARGET].waitlist.head;
-	while (curd != NULL) {
-		tx_rift_target++;
-		curd = curd->next;
+	cursor += snprintf(cursor, end - cursor, "Rift Waitlists: Target=%d Initiator=%d\n", rift_target, rift_initiator);
+
+	cursor += snprintf(cursor, end - cursor, "DMS Counters:\n");
+	for (enum hfi1_dms_xfer_type t = 0; t < HFI1_DMS_XFER_TYPE_COUNT; ++t) {
+		cursor += snprintf(cursor, end - cursor, "  %s:\n", t == HFI1_DMS_XFER_TYPE_INITIATOR ? "Initiator" : "Target");
+
+		for (enum hfi1_dms_xfer_op o = 0; o < HFI1_DMS_XFER_OP_COUNT; ++o) {
+			u64 ns;
+			cursor += snprintf(cursor, end - cursor, "    %s:\n", o == HFI1_DMS_XFER_OP_READ ? "RDMA Read" : "RDMA Write");
+			struct dms_perf_counters * perf = &dms->counters.perf[t][o];
+
+			cursor += snprintf(cursor, end - cursor, "      Total Transfers: ......... %llu\n", perf->transfers);
+			cursor += snprintf(cursor, end - cursor, "      Total Bytes: ............. %llu\n", perf->bytes);
+
+			u64 const total_ns = ktime_to_ns(perf->total_time);
+			ns = perf->transfers == 0 ? 0 : total_ns / perf->transfers;
+			cursor += snprintf(cursor, end - cursor, "      Total Transfer Time (ns):  %llu, %llu\n", total_ns, ns);
+
+			u64 const rift_wait_ns = ktime_to_ns(perf->rift_wait_time);
+			ns = perf->transfers == 0 ? 0 : rift_wait_ns / perf->transfers;
+			cursor += snprintf(cursor, end - cursor, "      Total Rift Wait Time (ns): %llu, %llu\n", rift_wait_ns, ns);
+
+			u64 gbps = total_ns == 0 ? 0 : (perf->bytes * 8) / total_ns;
+			cursor += snprintf(cursor, end - cursor, "      Bandwidth (gbps): ........ %llu\n", gbps);
+		}
 	}
-	int tx_rift_initiator = 0;
-	curd = dms->tx_rift.type[HFI1_DMS_XFER_TYPE_INITIATOR].waitlist.head;
-	while (curd != NULL) {
-		tx_rift_initiator++;
-		curd = curd->next;
+
+	if (_ring_size(&dms->counters.tidset.ring) > 0) {
+		cursor += snprintf(cursor, end - cursor, "Tidset Log:\n");
+		cursor += snprintf(cursor, end - cursor, "%12s %12s %12s %12s %12s %12s %12s %12s\n", "idx", "total_ns", "enable_ns", "rtt_ns", "data_ns", "bytes", "order_key", "rift(l:r)");
+		u32 i = 0;
+		while (_ring_size(&dms->counters.tidset.ring) > 0) {
+			u32 const idx = _ring_consume(&dms->counters.tidset.ring);
+			u64 const total_ns = ktime_to_ns(dms->counters.tidset.arr[idx].total);
+			u64 const enable_ns = ktime_to_ns(dms->counters.tidset.arr[idx].enable);
+			u64 const rtt_ns = ktime_to_ns(dms->counters.tidset.arr[idx].rtt);
+			u64 const data_ns = ktime_to_ns(dms->counters.tidset.arr[idx].data);
+			u32 const bytes = dms->counters.tidset.arr[idx].bytes;
+			u64 const order = dms->counters.tidset.arr[idx].order_key;
+			hfi1_dms_rift_key_t const local = dms->counters.tidset.arr[idx].local;
+			hfi1_dms_rift_key_t const remote = dms->counters.tidset.arr[idx].remote;
+			cursor += snprintf(cursor, end - cursor, "%12u %12llu %12llu %12llu %12llu %12u %12llu %7hu:%-4hu\n", i++, total_ns, enable_ns, rtt_ns, data_ns, bytes, order, local.value, remote.value);
+		}
 	}
-	cursor += snprintf(cursor, end - cursor, "Rift Waitlists: RX Target=%d RX Initiator=%d TX Target=%d TX Initiator=%d\n",
-		rx_rift_target, rx_rift_initiator, tx_rift_target, tx_rift_initiator);
+
+	memset(dms->counters.perf, 0, sizeof(dms->counters.perf));
+
 
 	return res;
 }
