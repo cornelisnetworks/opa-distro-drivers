@@ -82,6 +82,7 @@ struct vf2pf_getcfg_msg {
 	u8 hfi1_id;
 	u8 icode;
 	u16 irev;
+	u64 cport_ver;
 };
 
 struct vf2pf_asgnrs_msg {
