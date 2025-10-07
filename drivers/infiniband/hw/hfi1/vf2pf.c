@@ -165,6 +165,7 @@ int vf2pf_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si)
 		dd->hfi1_id = pdd->hfi1_id;
 		dd->icode = pdd->icode;
 		dd->irev = pdd->irev;
+		dd->cport_ver = pdd->cport_ver;
 		return 0;
 	}
 	mem = msg_alloc(dd, &hdr);
@@ -185,6 +186,7 @@ int vf2pf_get_config(struct hfi1_devdata *dd, struct hfi1_devrsrcs *out, int si)
 	dd->hfi1_id = msg->hfi1_id;
 	dd->icode = msg->icode;
 	dd->irev = msg->irev;
+	dd->cport_ver = msg->cport_ver;
 out:
 	kfree(mem);
 	return ret;
@@ -677,6 +679,7 @@ void vf2pf_rcv_msg(struct hfi1_devdata *dd, struct vf2pf_hdr *hdr, void *buf)
 		msg->hfi1_id = dd->hfi1_id;
 		msg->icode = dd->icode;
 		msg->irev = dd->irev;
+		msg->cport_ver = dd->cport_ver;
 		break;
 	}
 	case VF2PF_ASGN_RES: {
