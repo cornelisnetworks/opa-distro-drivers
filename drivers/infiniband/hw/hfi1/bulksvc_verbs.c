@@ -1,3 +1,4 @@
+#include "qp.h"
 #include <rdma/rdmavt_qp.h>
 #include "verbs_txreq.h"
 
@@ -109,21 +110,11 @@ static void bulksvc_on_qp_cmd_rdma_complete(
 	 * don't wait for next bulksvc iteration, start handling now
 	 */
 	qpriv = cmd->rdma.txreq->qp->priv;
+
 	spin_lock_irqsave(&cmd->rdma.txreq->qp->s_lock, flags);
-	if (qpriv && --qpriv->bulksvc_qp_info->rdma_ops_sched > 0) {
-		/* we have more ready to go */
-		iowait_set_flag(&qpriv->s_iowait, IOWAIT_PENDING_BTS);
-		/* add to verbs queue */
-		if (__hfi1_do_bts_send(&qpriv->s_iowait.wait[IOWAIT_BTS_SE], true)) {
-			iowait_clear_flag(&qpriv->s_iowait, IOWAIT_PENDING_BTS);
-			spin_unlock_irqrestore(&cmd->rdma.txreq->qp->s_lock, flags);
-			/* process verbs queue */
-			hfi1_bulksvc_poll_verbs_cmds(svc);
-		} else {
-			spin_unlock_irqrestore(&cmd->rdma.txreq->qp->s_lock, flags);
-		}
-	} else
-		spin_unlock_irqrestore(&cmd->rdma.txreq->qp->s_lock, flags);
+	qpriv->bulksvc_qp_info->rvt_rdma_ops_sched -= 1;
+	spin_unlock_irqrestore(&cmd->rdma.txreq->qp->s_lock, flags);
+
 	enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, cmd->rdma.txreq->bts_rc));
 
 release_cookie_resources:
@@ -278,24 +269,27 @@ static void bulksvc_on_qp_cmd_rdma_helper(struct hfi1_bulksvc * const svc,
 		cookie->mr_record = mr_record;
 		cookie->remaining_wr_sges = remaining_sges;
 
+		u64 const local_lid = qp_info->qp_priv->rcd->ppd->lid;	// FIXME - there has to be a better way to get the local lid
+		u64 const qp_num = txreq->qp->ibqp.qp_num;
+		u64 const order_key = (local_lid << 32) | qp_num;
+
 		int rc = 0;
-		u16 flags = 0; u64 imm_data = 0; // FIXME - blocksome - temporary
 		if (rdma_opcode == IB_WR_BULKSVC_READ) {
 			rc = hfi1_dms_read_data(&svc->dms, remote_lid, dms_key, remote_addr,
 						sge_size, &mr_record->dms_mr,
 						mr->user_base + user_base_offset,
-						flags, imm_data,
-						completion);
+						0, 0,
+						completion, true, order_key);
 
 		} else if (rdma_opcode == IB_WR_BULKSVC_WRITE) {
 			rc = hfi1_dms_write_data(&svc->dms, remote_lid, dms_key,
 						remote_addr, sge_size, &mr_record->dms_mr,
 						mr->user_base + user_base_offset,
-						flags, imm_data,						
-						completion);
+						0, 0,						
+						completion, true, order_key);
 		} else if (rdma_opcode == IB_WR_BULKSVC_WRITE_WITH_IMM) {
-			flags |= HFI1_BULKSVC_VERBS_WRITE_FLAGS_IMMDT;
-			imm_data = be32_to_cpu(txreq->wqe->wr.ex.imm_data);
+			u16 flags = HFI1_BULKSVC_VERBS_WRITE_FLAGS_IMMDT;
+			u64 imm_data = be32_to_cpu(txreq->wqe->wr.ex.imm_data);
 			// Should only be 24 bits, we rely on that
 			if (WARN_ON(txreq->qp->remote_qpn >= (1 << 24))) {
 				pr_err("%s:%d:%s() remote_qpn %u is too large for imm_data, max 24 bits allowed\n",
@@ -314,7 +308,7 @@ static void bulksvc_on_qp_cmd_rdma_helper(struct hfi1_bulksvc * const svc,
 						remote_addr, sge_size, &mr_record->dms_mr,
 						mr->user_base + user_base_offset,
 						flags, imm_data,						
-						completion);
+						completion, true, order_key);
 		} else {
 			pr_err("unknown opcode %u\n", rdma_opcode);
 			err_rc = -EINVAL;
@@ -640,7 +634,8 @@ struct hfi1_bulksvc_qp_info* hfi1_bulksvc_qp_info_create(struct hfi1_bulksvc_ver
 
 	res->num_rx_transfers_seen_for_current_transaction = 0;
 
-	res->rdma_ops_sched = 0;
+	res->rvt_rdma_ops_sched = 0;
+	res->hotpath_rdma_ops_inflight = 0;
 
 	return res;
 }
@@ -1042,11 +1037,14 @@ static struct rvt_qp *qp_from_number(struct hfi1_bulksvc *svc, u64 app_context)
 }
 
 static void bts_send_cq(struct rvt_qp *qp, u64 wr_id, u32 byte_len,
-			enum ib_wc_opcode wr_opcode, enum ib_wc_status status)
+			enum ib_wc_opcode wr_opcode, int wr_send_flags,
+			enum ib_wc_status status)
 {
 	unsigned long lflags;
+	bool need_completion;
 	struct rvt_dev_info *rdi = ib_to_rvt(qp->ibqp.device);
 	spin_lock_irqsave(&qp->s_lock, lflags);
+	
 	struct ib_wc w = {
 		.wr_id = wr_id,
 		.status = status,
@@ -1054,8 +1052,14 @@ static void bts_send_cq(struct rvt_qp *qp, u64 wr_id, u32 byte_len,
 		.qp = &qp->ibqp,
 		.byte_len = byte_len
 	};
-	rvt_send_cq(qp, &w, true,
-		    RVT_QP_LOCK_STATE_S);
+
+	/* taken from rvt_qp_complete_swqe */
+	need_completion = (!(qp->s_flags & RVT_S_SIGNAL_REQ_WR) ||
+			   (wr_send_flags & IB_SEND_SIGNALED) ||
+			   status != IB_WC_SUCCESS);
+	if (need_completion)
+		rvt_send_cq(qp, &w, true,
+			    RVT_QP_LOCK_STATE_S);
 	spin_unlock_irqrestore(&qp->s_lock, lflags);
 }
 
@@ -1066,9 +1070,293 @@ static void bts_send_cq(struct rvt_qp *qp, u64 wr_id, u32 byte_len,
  * 2. is anything else going through rdmavt? must respect
  *    verbs ordering
  */
-static bool can_bts_hotpath(void) {
+static bool can_bts_hotpath(struct ib_send_wr *wr) {
 	/* TODO hotpath not implemented */
-	return false;
+	if (wr->opcode != IB_WR_RDMA_READ &&
+	    wr->opcode != IB_WR_RDMA_WRITE &&
+	    wr->opcode != IB_WR_RDMA_WRITE_WITH_IMM)
+		return false;
+
+	return true;
+}
+
+
+struct direct_rdma_sge_info {
+	u32 remaining_wr_sges;
+	enum ib_wc_status status;
+};
+
+struct direct_rdma_cmpl_cookie {
+	struct bts_verbs_mr_record* mr_record;
+	struct direct_rdma_sge_info* sge_info;
+	struct rvt_qp *qp;
+	u64 wr_id;
+	enum ib_wc_opcode wr_opcode;
+	u32 byte_len;
+	int wr_send_flags;
+};
+
+static void bulksvc_direct_cmd_rdma_complete(
+	union hfi1_dms_completion_cookie * const cookie, int status)
+{
+	struct direct_rdma_cmpl_cookie * const d_rdma_cookie =
+		(struct direct_rdma_cmpl_cookie *)cookie;
+	u32 *remaining_wr_sges = &d_rdma_cookie->sge_info->remaining_wr_sges;
+	u32 *wc_status = &d_rdma_cookie->sge_info->status;
+
+	/* one mr ref per sge */
+	bts_verbs_mr_record_put(d_rdma_cookie->mr_record);
+	if (remaining_wr_sges) {
+		/* if this is first error, whole wqe fails */
+		if (*wc_status == IB_WC_SUCCESS && status != 0)
+			*wc_status = IB_WC_GENERAL_ERR;
+
+		if (*wc_status != IB_WC_SUCCESS)
+			status = *wc_status;
+
+		(*remaining_wr_sges)--;
+		if (*remaining_wr_sges > 0) {
+			// Still more SGE to process, do not complete yet
+			return;
+		}
+		kfree(d_rdma_cookie->sge_info);
+		d_rdma_cookie->sge_info = NULL;
+	}
+
+	bts_send_cq(d_rdma_cookie->qp, d_rdma_cookie->wr_id,
+		    d_rdma_cookie->byte_len, d_rdma_cookie->wr_opcode,
+		    d_rdma_cookie->wr_send_flags,
+		    status ? IB_WC_GENERAL_ERR : IB_WC_SUCCESS);
+
+	ulong flags;
+	struct hfi1_bulksvc_qp_info* qp_info = ((struct hfi1_qp_priv*) d_rdma_cookie->qp->priv)->bulksvc_qp_info;
+	spin_lock_irqsave(&d_rdma_cookie->qp->s_lock, flags);
+	qp_info->hotpath_rdma_ops_inflight -= 1;
+	if (qp_info->hotpath_rdma_ops_inflight == 0) {
+		d_rdma_cookie->qp->s_flags &= ~HFI1_S_TID_WAIT_INTERLCK;
+		hfi1_schedule_send(d_rdma_cookie->qp);
+	}
+	spin_unlock_irqrestore(&d_rdma_cookie->qp->s_lock, flags);
+
+	/* one qp ref per wqe */
+	rvt_put_qp(d_rdma_cookie->qp);
+}
+
+
+/* more or less a re-use of bulksvc_on_qp_cmd_rdma_helper
+ * but suited towards working with struct ib_send_wr and
+ * different completion handler
+ * TODO unify some dup code here
+ */
+static int bulksvc_verbs_hotpath_send_one(struct hfi1_bulksvc *svc,
+					   struct rvt_qp *qp,
+					   struct ib_send_wr *wr)
+{
+	struct hfi1_bulksvc_verbs_state * const verbs_state = &svc->verbs_state;
+	struct ib_rdma_wr *rdma_wr = container_of(wr, struct ib_rdma_wr, wr);
+	u16 const remote_lid = qp->remote_ah_attr.opa.dlid;
+
+	struct direct_rdma_sge_info *sge_info = NULL;
+	int err_rc = 0;
+
+	if (WARN_ON(!qp->ibqp.pd)) {
+		pr_err("%s:%d:%s() invalid qp->ibqp.pd\n",
+		       __FILENAME__, __LINE__, __func__);
+		err_rc = -EINVAL;
+		goto on_err;
+	}
+
+	if (WARN_ON(!wr->sg_list)) {
+		pr_err("%s:%d:%s() invalid wr->sg_list\n",
+		       __FILENAME__, __LINE__, __func__);
+		err_rc = -EINVAL;
+		goto on_err;
+	}
+
+	u32 const remote_client_id = VERBS_PD_TO_CLIENT_ID(qp->ibqp.pd->res.id);
+	u32 const access_key = rdma_wr->rkey;
+	union hfi1_dms_key const dms_key = { .access = access_key, .client = remote_client_id };
+
+	u32 const num_sge = wr->num_sge;
+	if (WARN_ON(num_sge >= 256)) {
+		// We only use 8 bits on the wire, impose a cap on num_sges
+		pr_err("%s:%d:%s() num_sge %u is too large, max 255 supported\n",
+		       __FILENAME__, __LINE__, __func__, num_sge);
+		err_rc = -EINVAL;
+		goto on_err;
+	}
+	if (num_sge > 1) {
+		sge_info = kzalloc(sizeof(*sge_info), GFP_KERNEL);
+
+		if (!sge_info) {
+			pr_err("%s:%d:%s() failed to allocate sge_info\n",
+			       __FILENAME__, __LINE__, __func__);
+			err_rc = -ENOMEM;
+			goto on_err;
+		}
+	}
+
+	u32 const rdma_opcode = wr->opcode;
+	u64 remote_addr = rdma_wr->remote_addr;
+
+	u32 total_wqe_len = 0;
+	/* quickly loop and get wq size for cq */
+	for (u32 sge_idx = 0; sge_idx < num_sge; ++sge_idx) {
+		total_wqe_len += wr->sg_list[sge_idx].length;
+	}
+
+	struct bts_verbs_mr_record* mr_record = NULL;
+	for (u32 sge_idx = 0; sge_idx < num_sge; ++sge_idx) {
+		//printk (KERN_ERR "SGE IDX %d\n", sge_idx);
+		struct ib_sge* const sge = &wr->sg_list[sge_idx];
+		u32 const sge_size = sge->length;
+
+		if (!mr_record || mr_record->rkey != sge->lkey) {
+			list_for_each_entry(mr_record, &verbs_state->mr_info_records, list_entry) {
+				if (mr_record->type == BTS_VERBS_MR_RECORD_TYPE_PERSISTENT &&
+				    mr_record->rkey == sge->lkey) {
+					break;
+				}
+			}
+		}
+	
+		if (WARN_ON(!mr_record)) {
+			pr_err("%s:%d:%s() bulksvc: Failed to find any MR records\n",
+			__FILENAME__, __LINE__, __func__);
+			err_rc = -ENOENT;
+			goto on_err;
+		}
+
+		if (mr_record->rkey != sge->lkey) {
+			dd_dev_err(svc->dd, "%s:%d:%s() verbs RDMA OP trying to use unknown MR %u\n",
+				   __FILENAME__, __LINE__, __func__, sge->lkey);
+			err_rc = -ENOENT;
+			goto on_err;
+		}
+		if ( atomic_read(&(mr_record->rvt_mr->lkey_invalid))) {
+			dd_dev_err(svc->dd, "%s:%d:%s() verbs RDMA OP trying to use unknown MR %u\n",
+				   __FILENAME__, __LINE__, __func__, sge->lkey);
+			err_rc = -ENOENT;
+			goto on_err;
+		}
+		if (mr_record->rvt_mr->lkey != sge->lkey) {
+			dd_dev_err(svc->dd, "%s:%d:%s() verbs RDMA OP trying to use unknown MR %u\n",
+				   __FILENAME__, __LINE__, __func__, sge->lkey);
+			err_rc = -ENOENT;
+			goto on_err;
+		}
+		if (mr_record->rvt_mr->pd != qp->ibqp.pd) {
+			dd_dev_err(svc->dd, "%s:%d:%s() verbs RDMA OP trying to use unknown MR %u\n",
+				   __FILENAME__, __LINE__, __func__, sge->lkey);
+			err_rc = -ENOENT;
+			goto on_err;
+		}
+		u64 user_base_offset = sge->addr - mr_record->dms_mr.user.addr;
+		if (sge_size + user_base_offset > mr_record->dms_mr.user.len) {
+			pr_err("%s:%d:%s():len err, sge wants %u bytes to offset %llu of mr with len %lu\n",
+			       __FILENAME__, __LINE__, __func__, sge_size,
+			       user_base_offset, mr_record->dms_mr.user.len);
+			err_rc = -EINVAL;
+			goto on_err;
+		}
+
+		struct hfi1_dms_tracker_completion completion = {
+			.fn = bulksvc_direct_cmd_rdma_complete,
+			.cookie = {},
+		};
+
+		struct direct_rdma_cmpl_cookie * cookie =
+			(struct direct_rdma_cmpl_cookie *) &completion.cookie;
+
+		cookie->qp = qp; /* calling func grabbed ref */
+		cookie->sge_info = sge_info;
+		cookie->wr_id = wr->wr_id; 
+		cookie->wr_opcode = (enum ib_wc_opcode) wr->opcode;
+		cookie->byte_len = total_wqe_len;
+		bts_verbs_mr_record_get(mr_record);
+		cookie->mr_record = mr_record;
+		cookie->wr_send_flags = wr->send_flags;
+
+		u64 const local_lid = ((struct hfi1_qp_priv *)qp->priv)->rcd->ppd->lid;	// FIXME - there has to be a better way to get the local lid
+		u64 const qp_num = qp->ibqp.qp_num;
+		u64 const order_key = (local_lid << 32) | qp_num;
+
+		int rc = 0;
+		if (rdma_opcode == IB_WR_RDMA_READ) {
+			rc = hfi1_dms_read_data(&svc->dms, remote_lid, dms_key, remote_addr,
+						sge_size, &mr_record->dms_mr,
+						mr_record->rvt_mr->user_base +
+						user_base_offset,
+						0, 0,
+						completion, true, order_key);
+
+		} else if (rdma_opcode == IB_WR_RDMA_WRITE) {
+			rc = hfi1_dms_write_data(&svc->dms, remote_lid, dms_key,
+						remote_addr, sge_size, &mr_record->dms_mr,
+						mr_record->rvt_mr->user_base +
+						user_base_offset,
+						0, 0,						
+						completion, true, order_key);
+		} else if (rdma_opcode == IB_WR_RDMA_WRITE_WITH_IMM) {
+			u16 flags = HFI1_BULKSVC_VERBS_WRITE_FLAGS_IMMDT;
+			u64 imm_data = be32_to_cpu(wr->ex.imm_data);
+			// Should only be 24 bits, we rely on that
+			if (WARN_ON(qp->remote_qpn >= (1 << 24))) {
+				pr_err("%s:%d:%s() remote_qpn %u is too large for imm_data, max 24 bits allowed\n",
+				       __FILENAME__, __LINE__, __func__,
+				       qp->remote_qpn);
+				err_rc = -EINVAL;
+				goto drop_mr_err;
+			}
+			imm_data |= (u64) (qp->remote_qpn & ((1 << 24) - 1)) << 32;
+			// Verified above that num_sge < 256
+			imm_data |= (u64) (num_sge & ((1 << 8) - 1)) << 56;
+			if (wr->send_flags & IB_SEND_SOLICITED) {
+				flags |= HFI1_BULKSVC_VERBS_WRITE_FLAGS_SOLICITED;
+			}
+			rc = hfi1_dms_write_data(&svc->dms, remote_lid, dms_key,
+						remote_addr, sge_size, &mr_record->dms_mr,
+						mr_record->rvt_mr->user_base +
+						user_base_offset,
+						flags, imm_data,						
+						completion, true, order_key);
+		} else {
+			pr_err("unknown opcode %u\n", rdma_opcode);
+			err_rc = -EINVAL;
+			goto drop_mr_err;
+		}
+
+		if (rc < 0) {
+			pr_err("%s:%d:%s() Could not initiate RDMA read: %d\n",
+			__FILENAME__, __LINE__, __func__, rc);
+			err_rc = rc;
+			goto drop_mr_err;
+		}
+
+		if (sge_info)
+			sge_info->remaining_wr_sges++;
+
+		remote_addr += sge_size;
+	}
+
+	/* success */
+	return err_rc;
+
+drop_mr_err:
+	bts_verbs_mr_record_put(mr_record);
+
+on_err:
+	if (!sge_info || sge_info->remaining_wr_sges == 0) {
+		// No outstanding sges, caller will see err and post cqe
+		if (sge_info)
+			kfree(sge_info);
+	} else {
+		/* sges in flight, enqueue error later, return success */
+		sge_info->status = IB_WC_GENERAL_ERR;
+		err_rc = 0;
+	}
+
+	return err_rc;
 }
 
 void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
@@ -1091,8 +1379,9 @@ void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
 		dd_dev_err(svc->dd, "Cannot ioctl bypass non RC qp's\n");
 		return;
 	}
+	rvt_get_qp(qp);
 
-
+	struct hfi1_bulksvc_qp_info * qp_info = ((struct hfi1_qp_priv*) qp->priv)->bulksvc_qp_info;
 	u8 *ptr = (u8 *)cmd->wrs;
 	for (i = 0; i < cmd->num_wrs; i ++) {
 		struct ib_rdma_wr rdma_wr;
@@ -1132,11 +1421,50 @@ void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
 		} else {
 			wr = &swr;
 		}
+		
+		ulong flags;
+		bool can_send_hotpath = false;
 
-		if (can_bts_hotpath()) {
-			/* we need to post errors to cq */
-			dd_dev_err(svc->dd, "BTS VERBS HOTPATH NOT IMPLEMENTED\n");
-			goto post_errs;
+		spin_lock_irqsave(&qp->s_lock, flags);
+		{
+			if (can_bts_hotpath(wr)) {
+				if (qp->s_head != qp->s_last) {
+					can_send_hotpath = false;
+				} else {
+					// Nothing in flight
+					can_send_hotpath = true;
+				}
+			} else {
+				can_send_hotpath = false;
+			}
+	
+			if (can_send_hotpath) {
+				if (qp_info->hotpath_rdma_ops_inflight == 0) {
+					qp->s_flags |= HFI1_S_TID_WAIT_INTERLCK;
+				}
+				qp_info->hotpath_rdma_ops_inflight += 1;
+			}
+		}
+		spin_unlock_irqrestore(&qp->s_lock, flags);
+
+		if (can_send_hotpath) {
+			rvt_get_qp(qp);
+			ret = bulksvc_verbs_hotpath_send_one(svc, qp, wr);
+			if (ret) {
+				spin_lock_irqsave(&qp->s_lock, flags);
+				qp_info->hotpath_rdma_ops_inflight -= 1;
+				if (qp_info->hotpath_rdma_ops_inflight == 0) {
+					qp->s_flags &= ~HFI1_S_TID_WAIT_INTERLCK;
+					hfi1_schedule_send(qp);
+				}
+				spin_unlock_irqrestore(&qp->s_lock, flags);
+
+				rvt_put_qp(qp);
+
+				/* we need to post errors to cq */
+				dd_dev_err(svc->dd, "bts: hotpath post send rc %d\n", ret);
+				goto post_errs;
+			}
 		} else {
 			ret = rvt_post_send(&qp->ibqp, wr, &bad_wr);
 			if (ret) {
@@ -1149,6 +1477,7 @@ void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
 		ptr += sizeof(*user_wr) + (user_wr->num_sge * sizeof(*sge));
 	}
 
+	rvt_put_qp(qp);
 	return;
 post_errs:
 	for (; i < cmd->num_wrs; i ++) {
@@ -1162,8 +1491,9 @@ post_errs:
 			sge++;
 		}
 
-		bts_send_cq(qp, user_wr->wr_id, byte_len, user_wr->opcode, IB_WC_GENERAL_ERR);
+		bts_send_cq(qp, user_wr->wr_id, byte_len, user_wr->opcode,
+			    user_wr->send_flags, IB_WC_GENERAL_ERR);
 		ptr += sizeof(*user_wr) + (user_wr->num_sge * sizeof(*sge));
 	}
+	rvt_put_qp(qp);
 }
-

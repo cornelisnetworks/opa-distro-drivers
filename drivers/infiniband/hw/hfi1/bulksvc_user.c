@@ -882,14 +882,15 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 		cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr, cmd->mr_offset,
 		cmd->flags, cmd->imm_data,
 		(struct hfi1_dms_tracker_completion) {
-		.fn = on_mr_rdma_transact_complete,
-		.cookie = *(union hfi1_dms_completion_cookie*)&(struct initiated_mr_rdma_transact_completion_cookie) {
-			.user_info = user_info,
-			.cmplq_record = cmplq_record,
-			.app_context = cmd->app_context,
-			.mr_record = mr_record,
+			.fn = on_mr_rdma_transact_complete,
+			.cookie = *(union hfi1_dms_completion_cookie*)&(struct initiated_mr_rdma_transact_completion_cookie) {
+				.user_info = user_info,
+				.cmplq_record = cmplq_record,
+				.app_context = cmd->app_context,
+				.mr_record = mr_record,
+			},
 		},
-	});
+		false, 0);
 
 	if (rc < 0) {
 		pr_err("Could not initiate RDMA read: %d\n", rc);
@@ -938,15 +939,16 @@ static void bulksvc_on_cmd_rdma_write(struct hfi1_bulksvc * const svc,
 				    cmd->mr_offset,
 						(u16) cmd->flags,
 						cmd->imm_data,
-				    (struct hfi1_dms_tracker_completion){
-					.fn = on_mr_rdma_transact_complete,
-					.cookie = *(union hfi1_dms_completion_cookie*)&(struct initiated_mr_rdma_transact_completion_cookie) {
-						.user_info = user_info,
-						.cmplq_record = cmplq_record,
-						.app_context = cmd->app_context,
-						.mr_record = mr_record,
-					},
-				 });
+				    (struct hfi1_dms_tracker_completion) {
+							.fn = on_mr_rdma_transact_complete,
+							.cookie = *(union hfi1_dms_completion_cookie*)&(struct initiated_mr_rdma_transact_completion_cookie) {
+								.user_info = user_info,
+								.cmplq_record = cmplq_record,
+								.app_context = cmd->app_context,
+								.mr_record = mr_record,
+							},
+				 		},
+						false, 0);
 
 	if (rc < 0) {
 		cmpl.status = (u32)rc;
@@ -1029,14 +1031,15 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 		cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr, mr_offset,
 		cmd->flags, cmd->imm_data,
 		(struct hfi1_dms_tracker_completion) {
-		.fn = on_rdma_va_complete,
-		.cookie = *(union hfi1_dms_completion_cookie*)&(struct rdma_va_completion_cookie) {
-			.user_info = user_info,
-			.cmplq_record = cmplq_record,
-			.app_context = cmd->app_context,
-			.mr_record = mr_record,
+			.fn = on_rdma_va_complete,
+			.cookie = *(union hfi1_dms_completion_cookie*)&(struct rdma_va_completion_cookie) {
+				.user_info = user_info,
+				.cmplq_record = cmplq_record,
+				.app_context = cmd->app_context,
+				.mr_record = mr_record,
+			},
 		},
-	});
+		false, 0);
 	if (rc < 0) {
 		struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
