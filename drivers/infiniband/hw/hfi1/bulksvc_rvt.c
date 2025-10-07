@@ -191,7 +191,7 @@ void verbs_bulksvc_enqueue(struct hfi1_qp_priv *qpriv, struct verbs_txreq *tx,
 	struct rvt_qp *qp = qpriv->owner;
 
 	lockdep_assert_held(&qp->s_lock);
-	qpriv->bulksvc_qp_info->rdma_ops_sched++;
+	qpriv->bulksvc_qp_info->rvt_rdma_ops_sched++;
 	/* txreq is more or less a shell around our wqe, grab extra kref
 	 * since we will be dropping it in make_rc_req
 	 */
@@ -211,15 +211,7 @@ void verbs_bulksvc_enqueue(struct hfi1_qp_priv *qpriv, struct verbs_txreq *tx,
 	list_add_tail(&tx->txreq.list,
 		      &qpriv->s_iowait.wait[IOWAIT_BTS_SE].tx_head);
 
-	/*
-	 * if something is already going through bulksvc then no need to kick
-	 * handoff, prev completion should invoke
-	 */
-	if (qpriv->bulksvc_qp_info->rdma_ops_sched > 1) {
-		return;
-	}
 	iowait_set_flag(&qpriv->s_iowait, IOWAIT_PENDING_BTS);
-
 
 	/* try to send now */
 	if (__hfi1_do_bts_send(&qpriv->s_iowait.wait[IOWAIT_BTS_SE], true))
@@ -356,7 +348,7 @@ static void bts_rdma_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
 	spin_lock_irqsave(&qp->s_lock, flags);
 	rvt_send_complete(tx->qp, tx->wqe, tx->bts_rc, RVT_QP_LOCK_STATE_S);
 	if (priv->s_flags & HFI1_S_TID_WAIT_INTERLCK &&
-	    !priv->bulksvc_qp_info->rdma_ops_sched) {
+		!priv->bulksvc_qp_info->rvt_rdma_ops_sched) {
 
 		priv->s_flags &= ~HFI1_S_TID_WAIT_INTERLCK;
 		hfi1_schedule_send(qp);
