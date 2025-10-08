@@ -770,20 +770,34 @@ fail:
 void is_cport_int(struct hfi1_devdata *dd, unsigned int source)
 {
 	u64 ints;
+	const int limit = 100; /* arbitrary */
+	int count;
 
 	if (!dd->cport)
 		return;
 
-#ifdef CONFIG_HFI_CPORT_POLLING
-	ints = read_csr(dd, JKR_MCTXT_PF0_INT_STATUS);
-#else
-	ints = read_csr(dd, JKR_MCTXT_PF0_INT_STATUS_ENABLED);
-#endif
+	/*
+	 * MctxtCportToPcieInt is a "one shot" merged interrupt.  To ensure
+	 * nothing is missed, ensure that its source, MctxtPf0IntStatusEnabled,
+	 * is cleared and reads as zero.
+	 */
+	ints = 0;
+	for (count = 0; count < limit; count++) {
+		u64 temp;
+
+		temp = read_csr(dd, JKR_MCTXT_PF0_INT_STATUS_ENABLED);
+		if (temp == 0)
+			break;
+		ints |= temp;
+		write_csr(dd, JKR_MCTXT_PF0_INT_ACK, temp);
+	}
+	if (count == limit)
+		dd_dev_warn(dd, "MCTXT interrupt too many loops\n");
 	if (!ints) {
 		dd_dev_warn(dd, "MCTXT interrupt, but no status bits set\n");
 		return;
 	}
-	write_csr(dd, JKR_MCTXT_PF0_INT_ACK, ints);
+
 #ifdef CPORT_INT_DEBUG
 	dd_dev_info(dd, "is_cport_int() %02llx\n", ints);
 #endif
