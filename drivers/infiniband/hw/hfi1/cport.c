@@ -22,6 +22,10 @@ static bool cport_mctxt_recovery = true;
 module_param_named(cport_mctxt_recovery, cport_mctxt_recovery, bool, 0644);
 MODULE_PARM_DESC(cport_mctxt_recovery, "Attempt recovery of MCTXT state");
 
+static uint cport_ping_to = 0;
+module_param_named(cport_ping_to, cport_ping_to, uint, 0644);
+MODULE_PARM_DESC(cport_ping_to, "ping timeout, seconds (0 = infinite)");
+
 static void cport_send_req_fn(struct work_struct *work);
 static void cport_send_rsp_fn(struct work_struct *work);
 
@@ -868,13 +872,17 @@ static int cport_ping(void *data)
 		len = snprintf(buf, sizeof(buf), "ping %u", num);
 		rspbuf = NULL;
 		rc = cport_send_req(dd, CH_OP_PING, 0, buf, len,
-				    &rspbuf, &rsplen, MAX_SCHEDULE_TIMEOUT);
+				    &rspbuf, &rsplen,
+				    cport_ping_to ? cport_ping_to * HZ :
+						    MAX_SCHEDULE_TIMEOUT);
 		if (rc < 0) {
 			dd_dev_info(dd, "CPORT \"%s\" error %d\n", buf, rc);
-			break;
+			if (!cport_ping_to)
+				break;
+		} else {
+			dd_dev_info(dd, "CPORT \"%s\" -> %d \"%.*s\"\n",
+				    buf, rc, rsplen, (char *)rspbuf);
 		}
-		dd_dev_info(dd, "CPORT \"%s\" -> %d \"%.*s\"\n",
-			    buf, rc, rsplen, (char *)rspbuf);
 		kfree(rspbuf);
 		atomic_dec(&dd->cport->nping);
 	}
