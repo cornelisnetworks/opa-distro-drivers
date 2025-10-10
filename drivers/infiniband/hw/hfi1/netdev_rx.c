@@ -358,14 +358,18 @@ int hfi1_alloc_rx(struct hfi1_devdata *dd)
 		ppd = &dd->pport[i];
 
 		rx = kzalloc_node(sizeof(*rx), GFP_KERNEL, dd->node);
-
 		if (!rx) {
 			hfi1_free_rx(dd);
 			return -ENOMEM;
 		}
 		rx->dd = dd;
 		rx->ppd = ppd;
-		init_dummy_netdev(rx->rx_napi);
+
+		rx->rx_napi = alloc_netdev_dummy(0);
+		if (!rx->rx_napi) {
+			kfree(rx);
+			return -ENOMEM;
+		}
 
 		xa_init(&rx->dev_tbl);
 		atomic_set(&rx->enabled, 0);
