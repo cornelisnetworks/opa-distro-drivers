@@ -2565,6 +2565,10 @@ static void wait_for_clients(struct hfi1_devdata *dd)
 	wait_for_completion(&dd->user_comp);
 }
 
+/*
+ * This is called for rmmod or other driver-device unbinds.
+ * (and now by shutdown_one() if not WFR)
+ */
 static void remove_one(struct pci_dev *pdev)
 {
 	struct hfi1_devdata *dd = pci_get_drvdata(pdev);
@@ -2598,11 +2602,17 @@ static void remove_one(struct pci_dev *pdev)
 	postinit_cleanup(dd);
 }
 
+/*
+ * This is called during system reboot/shutdown/halt.
+ */
 static void shutdown_one(struct pci_dev *pdev)
 {
 	struct hfi1_devdata *dd = pci_get_drvdata(pdev);
 
-	shutdown_device(dd);
+	if (dd->params->chip_type == CHIP_WFR)
+		shutdown_device(dd);
+	else
+		remove_one(pdev);
 }
 
 /**
