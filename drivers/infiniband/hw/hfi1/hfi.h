@@ -1391,6 +1391,7 @@ struct hfi1_cport {
 	struct hfi1_devdata *dd;
 	struct cport_options opts;
 	struct cport_trap_status traps;
+	struct cport_trap_status traps_act;
 	struct semaphore outbox;	/* PF0->CPORT outbox contention avoidance */
 	struct xarray tid_xa;		/* maps req msg to u32 tid */
 	u32 tid_next;			/* for xa_alloc_cyclic() */
@@ -2663,6 +2664,7 @@ int get_platform_config_field(struct hfi1_pportdata *ppd,
 			      u32 *data, u32 len);
 
 struct pci_dev *get_pci_dev(struct rvt_dev_info *rdi);
+void hfi1_overtemp(struct hfi1_devdata *dd);
 
 /*
  * Flush write combining store buffers (if present) and perform a write
