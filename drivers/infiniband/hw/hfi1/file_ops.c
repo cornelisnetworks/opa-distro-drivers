@@ -1027,10 +1027,21 @@ static int complete_subctxt(struct hfi1_filedata *fd)
 	}
 
 	if (ret) {
+		int last;
+
 		spin_lock_irqsave(&fd->dd->uctxt_lock, flags);
 		__clear_bit(fd->subctxt, fd->uctxt->in_use_ctxts);
+		last = bitmap_empty(fd->uctxt->in_use_ctxts, HFI1_MAX_SHARED_CTXTS);
 		spin_unlock_irqrestore(&fd->dd->uctxt_lock, flags);
 		hfi1_rcd_put(fd->uctxt);
+
+		/*
+		 * When last is true this was the last reference to fd->uctxt.
+		 * No new references to uctxt will be taken. So this task
+		 * must free uctxt.
+		 */
+		if (last)
+			deallocate_ctxt(fd->uctxt);
 		fd->uctxt = NULL;
 	}
 
