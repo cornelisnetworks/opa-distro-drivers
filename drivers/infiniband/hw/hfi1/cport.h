@@ -59,7 +59,8 @@ struct cport_trap_status {
 	u32 bqk:1;	/* Bad Q Key */
 	u32 lwc:1;	/* Link Width Change */
 	u32 qsfp:1;	/* QSFP Fault */
-	u32 _resv:22;
+	u32 ovtm:1;	/* Over-temp */
+	u32 _resv:21;
 };
 
 union cport_fw_ver {

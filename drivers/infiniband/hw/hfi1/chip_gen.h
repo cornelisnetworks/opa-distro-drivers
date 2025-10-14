@@ -25,5 +25,6 @@ int cport_read_temp(struct hfi1_devdata *dd, struct cport_temp *gen_temp);
 
 int init_cport_trap128(struct hfi1_devdata *dd);
 int deinit_cport_trap128(struct hfi1_devdata *dd);
+int init_cport_overtemp(struct hfi1_devdata *dd);
 
 #endif /* _CHIP_GEN_H */
