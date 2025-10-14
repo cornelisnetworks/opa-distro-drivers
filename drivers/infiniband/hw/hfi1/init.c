@@ -602,7 +602,10 @@ struct cport_trap_reg {
 static int cport_start(struct hfi1_devdata *dd, int to_secs)
 {
 	struct cport_start_payload start = {0};
-	u64 *resp = NULL;
+	union {
+		struct cport_start_payload pl;
+		u64 qw;
+	} *resp = NULL;
 	int resp_len = 0;
 	int ret;
 
@@ -611,12 +614,14 @@ static int cport_start(struct hfi1_devdata *dd, int to_secs)
 
 	ret = cport_send_req(dd, CH_OP_START, 0, &start, sizeof(start),
 			     (void **)&resp, &resp_len, to_secs * HZ);
-	if (ret)
+	if (ret) {
 		dd_dev_err(dd, "CPORT start failed %d\n", ret);
-	else if (resp_len)
-		dd_dev_info(dd, "CPORT started %016llx\n", *resp);
-	else
+	} else if (resp_len) {
+		dd_dev_info(dd, "CPORT started %016llx\n", resp->qw);
+		dd->cport->traps_act = resp->pl.trap_ena;
+	} else {
 		dd_dev_info(dd, "CPORT started\n");
+	}
 	kfree(resp);
 	return ret;
 }
@@ -705,7 +710,7 @@ static void clearall_cport_trap(struct hfi1_devdata *dd)
 	/* there should be none left, but make certain */
 	xa_for_each(&dd->cport->trap_xa, index, entry) {
 		__xa_erase(&dd->cport->trap_xa, index);
-		dd_dev_info(dd, "removing latent TRAP handler %pS\n", entry->func);
+		dd_dev_info(dd, "removing latent TRAP handler %ps\n", entry->func);
 		kfree(entry);
 	}
 	xa_unlock_irq(&dd->cport->trap_xa);
@@ -2550,6 +2555,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	sdma_start(dd);
+	init_cport_overtemp(dd);
 
 	if (dd->bulksvc) {
 		ret = hfi1_bulksvc_loan_resources(dd);
@@ -2629,6 +2635,13 @@ static void shutdown_one(struct pci_dev *pdev)
 		shutdown_device(dd);
 	else
 		remove_one(pdev);
+}
+
+/* The device has reported over-temp and will shutdown soon (~500mS) */
+void hfi1_overtemp(struct hfi1_devdata *dd)
+{
+	dd_dev_err(dd, "*** OVER TEMP *** device shutdown imminent!\n");
+	/* take some action to gracefully shut down/quiesce */
 }
 
 /**
