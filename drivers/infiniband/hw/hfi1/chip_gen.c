@@ -309,6 +309,8 @@ int init_cport_trap128(struct hfi1_devdata *dd)
 	ret = register_cport_trap(dd, traps, handle_cport_trap128);
 	if (ret)
 		dd_dev_warn(dd, "Failed to register for CPORT TRAP 128: %d\n", ret);
+	else if (!dd->cport->traps_act.psc)
+		dd_dev_warn(dd, "CPORT TRAP128 not supported\n");
 	/* Fake a TRAP-128 to gather initial port states even if register fails */
 	handle_cport_trap128(dd, traps);
 	return ret;
@@ -316,9 +318,33 @@ int init_cport_trap128(struct hfi1_devdata *dd)
 
 int deinit_cport_trap128(struct hfi1_devdata *dd)
 {
-	if (!dd->cport)
+	if (!dd->cport || !dd->cport->traps.psc)
 		return 0;
 	return deregister_cport_trap(dd, handle_cport_trap128);
+}
+
+static void handle_cport_overtemp(struct hfi1_devdata *dd, struct cport_trap_status traps)
+{
+	/* note: traps are already repressed */
+	hfi1_overtemp(dd);
+}
+
+/* no deinit_ - clearall_cport_trap() unregisters this */
+int init_cport_overtemp(struct hfi1_devdata *dd)
+{
+	struct cport_trap_status traps = {0};
+	int ret = 0;
+
+	if (!dd->cport)
+		return 0;
+
+	traps.ovtm = 1;	/* Over Temp emergency */
+	ret = register_cport_trap(dd, traps, handle_cport_overtemp);
+	if (ret)
+		dd_dev_warn(dd, "Failed to register for CPORT Over Temp: %d\n", ret);
+	else if (!dd->cport->traps_act.ovtm)
+		dd_dev_warn(dd, "CPORT Over-Temp notification not supported\n");
+	return ret;
 }
 
 static int cport_goto_offline(struct hfi1_pportdata *ppd, struct opa_port_info *pi,
