@@ -4,6 +4,7 @@ DEFAULT_KERNEL_VERSION=""
 kerneldir="./"
 
 pkgname="opxs-modules-dkms"
+pkgbase=$pkgname
 
 set -e
 
@@ -110,15 +111,16 @@ else
 	[ ! $? ] && exit 1
 fi
 
-pkgarch=$(uname -m)
+pkgarch=noarch
 
 # configure the file dir
 filedir=$srcdir/files
 echo "filedir = $filedir"
 
-pkgrelease=`git rev-list --count HEAD`
+pkgrelease=r`git rev-list --count HEAD`
+echo "pkgrelease is $pkgrelease"
+
 if [[ $build_nvidia = y ]]; then
-	pkgrelease+="cuda"
 	gpuopts="CONFIG_HFI1_NVIDIA=y"
 fi
 
@@ -134,24 +136,28 @@ if [[ $build_amd = y ]]; then
 		exit 1
 	fi
 	echo "AMD module symbols found at $amdmodsyms"
-	pkgrelease+="rocm"
 	gpuopts="CONFIG_HFI1_AMD=y KBUILD_EXTRA_SYMBOLS=$amdmodsyms"
 fi
 
-echo "pkgrelease is $pkgrelease"
-
 pkgname=$(echo "$pkgname" | sed -e 's/[.]/_/g')
-pkgversion=$(echo "$DEFAULT_KERNEL_VERSION" | sed -e 's/_/-/g')
-pkgarch=$(echo "$pkgarch" | sed -e 's/x86_64/amd64/g')
+if [[ $build_nvidia = y ]]; then
+	pkgname+="-cuda"
+fi
+if [[ $build_amd = y ]]; then
+	pkgname+="-rocm"
+fi
+devpkgname="$pkgname-dev"
+pkgversion=$(echo "$DEFAULT_KERNEL_VERSION" | cut -d - -f 1)
 # build final package name 
-pkgfull="$pkgname-$pkgversion-$pkgrelease"
-pkgfull+="_"
-pkgfull+=$pkgarch
+pkgfull="$pkgname-$pkgversion-$pkgrelease-noarch"
+devpkgfull="$devpkgname-$pkgversion-$pkgrelease-noarch"
 
 # after cd, where are we *really*
 cd -P "$workdir"; workdir=$(pwd)
 tardir=$workdir/$pkgfull/usr/src/$pkgname-$pkgversion-$pkgrelease
 rm -rf $tardir
+rm -rf $devtardir
+
 mkdir -p $tardir/hfi1
 mkdir -p $tardir/rdmavt
 mkdir -p $tardir/include/rdma
@@ -173,8 +179,8 @@ cp $filedir/Makefile.hfi $tardir/hfi1/Makefile
 
 echo "Creating DKMS config file"
 cat $filedir/dkms.conf | sed -e "s/@@VERSION@@/$pkgversion-$pkgrelease/" \
-							 -e "s!@@GPUOPTS@@!$gpuopts!"\
-							 -e "s/@@PACKAGE@@/$pkgname/" > $tardir/dkms.conf
+			     -e "s!@@GPUOPTS@@!$gpuopts!"\
+			     -e "s/@@PACKAGE@@/$pkgname/" > $tardir/dkms.conf
 
 echo "SRCDIR is $srcdir"
 echo "KernelDir is $kerneldir"
@@ -195,44 +201,96 @@ cp $srcdir/include/rdma/rdmavt_qp.h $tardir/include/rdma
 cp $srcdir/include/rdma/tid_rdma_defs.h $tardir/include/rdma
 
 echo "final package name is $workdir/$pkgfull"
+echo "final dev package name is $workdir/$devpkgfull"
 
 # setup deb files here
 # postinst and prerm scripts will take care of moving headers around
 
 mkdir $workdir/$pkgfull/DEBIAN
 
-# make control file
+# make control file for main package
 cat > $workdir/$pkgfull/DEBIAN/control << CEOF
 Package: ${pkgname}
 Version: ${pkgversion}-${pkgrelease}
-Architecture: ${pkgarch}
-Maintainer: Dennis Dalessandro <dennis.dalessandro@cornelisnetworkscom>
+Architecture: all
+Maintainer: Dennis Dalessandro <dennis.dalessandro@cornelisnetworks.com>
 Description: Kernel modules for Cornelis Omni-Path Architecture HFI drivers
 CEOF
+conline="Conflicts: $pkgbase-cuda, $pkgbase-rocm"
 depline="Depends: linux-headers-generic (>=6.8.0-~), dkms (>=3.0.0)"
 if [[ $build_nvidia = y ]]; then
 nvdrvname=$(dpkg -l | grep nvidia-kernel-source | awk '{print $2}')
 depline+=", $nvdrvname"
+conline="Conflicts: $pkgbase, $pkgbase-rocm"
 fi
 if [[ $build_amd = y ]]; then
 amddrvname=$(dpkg -l | grep amdgpu-dkms | awk '{print $2}' | head -n 1)
 depline+=", $amddrvname"
+conline="Conflicts: $pkgbase-cuda, $pkgbase"
 fi
 echo "${depline}" >> $workdir/$pkgfull/DEBIAN/control
+echo "${conline}" >> $workdir/$pkgfull/DEBIAN/control
 
-cat $filedir/postinst-dkms | sed -e "s/@@VERSION@@/$pkgversion-$pkgrelease/" > $workdir/$pkgfull/DEBIAN/postinst
-cat $filedir/prerm-dkms | sed -e "s/@@VERSION@@/$pkgversion-$pkgrelease/" > $workdir/$pkgfull/DEBIAN/prerm
+cat $filedir/postinst-dkms | sed -e "s/@@VERSION@@/$pkgversion-$pkgrelease/" \
+       				 -e "s/@@PACKAGE@@/$pkgname/" > $workdir/$pkgfull/DEBIAN/postinst
+cat $filedir/prerm-dkms | sed -e "s/@@VERSION@@/$pkgversion-$pkgrelease/" \
+			      -e "s/@@PACKAGE@@/$pkgname/" > $workdir/$pkgfull/DEBIAN/prerm
 chmod +x $workdir/$pkgfull/DEBIAN/postinst
 chmod +x $workdir/$pkgfull/DEBIAN/prerm
 
-echo "Control file"
+echo "Control file for $pkgfull"
 echo "------------"
 cat $workdir/$pkgfull/DEBIAN/control
 echo "------------"
 
+# setup deb files for dev package
+echo "Creating deb files for $devpkgfull"
+
+# Install sanitized headers for user space development using the kernel's
+# headers_install.sh script. This is the same method used by the RPM spec file.
+(
+    # The destination for the final headers in the .deb package.
+    targetdir_base=$workdir/$devpkgfull/usr/include/uapi/rdma
+    mkdir -p $targetdir_base/hfi
+
+    # The location of the source headers from our build stage.
+    srcdir=$tardir
+
+    # The headers_install.sh script needs to be run from the kernel build directory.
+    cd $kernelsrc
+
+    # Install and sanitize each required header file.
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl.h $targetdir_base/rdma_user_ioctl.h
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl_cmds.h $targetdir_base/rdma_user_ioctl_cmds.h
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_user.h $targetdir_base/hfi/hfi1_user.h
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_ioctl.h $targetdir_base/hfi/hfi1_ioctl.h
+)
+
+# The postinst and prerm scripts are not needed for the -dev package as we are
+# installing headers directly to their final location. They are part of the
+# main package to manage kernel modules.
+mkdir $workdir/$devpkgfull/DEBIAN
+
+# make control file for dev package
+cat > $workdir/$devpkgfull/DEBIAN/control << CEOF
+Package: ${devpkgname}
+Version: ${pkgversion}-${pkgrelease}
+Architecture: all
+Maintainer: Dennis Dalessandro <dennis.dalessandro@cornelisnetworks.com>
+Description: Header files for Cornelis Omni-Path Architecture HFI drivers
+Depends: ${pkgname} (= ${pkgversion}-${pkgrelease})
+CEOF
+
+echo "Control file for $devpkgfull"
+echo "------------"
+cat $workdir/$devpkgfull/DEBIAN/control
+echo "------------"
+
+echo "Building debs"
 cp $filedir/hdr* $tardir/
 
-echo "Building deb"
+echo "Building deb files"
 dpkg-deb --build --root-owner-group $workdir/$pkgfull
+dpkg-deb --build --root-owner-group $workdir/$devpkgfull
 echo "Success"
 exit 0

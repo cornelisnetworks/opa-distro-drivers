@@ -13,6 +13,7 @@ use_nvidia=
 use_amd=
 build_arg=
 test_arg=
+basename=opxs-modules-dkms
 
 while [[ $# -gt 0 ]] ; do
 	case $1 in
@@ -45,8 +46,10 @@ if [[ $build_arg != "nobuild" ]]; then
 
 	if [[ $use_nvidia = y ]] ; then
 		gpuarg="-G"
+		basename+="-cuda"
 	elif [[ $use_amd = y ]] ; then
 		gpuarg="-A"
+		basename+="-rocm"
 	fi
 
 	echo "GPU build arguments are \"$gpuarg\""
@@ -70,7 +73,7 @@ if [[ $test_arg == "test" ]]; then
 	cd $tmpdir
 
 	source /etc/os-release
-	debname=` ls -t -1 *.deb | head -n 1`
+	debname=` ls -t -1 *.deb | grep -v dev`
 	echo "Using Ubuntu DEB: $debname"
 
 	echo "DEB Contents:"
@@ -107,7 +110,7 @@ if [[ $test_arg == "test" ]]; then
 	es=$?
 	if [[ $es -ne 0 ]]; then
 		echo -e "${RED}Failed to install package, status $es ${NC}"
-		sudo dpkg -r opxs-modules-dkms
+		sudo dpkg -r $basename
 		exit 1
 	else
 		echo -e "${GREEN}Package installed cleanly.${NC}"
@@ -124,7 +127,7 @@ if [[ $test_arg == "test" ]]; then
 	echo "Comparing verions..."
 	if [[ $h_new == $h_old ]]; then
 		echo -e "${RED}New HFI did not install!${NC}"
-		sudo dpkg -r opxs-modules-dkms
+		sudo dpkg -r $basename
 		exit 1
 	else
 		echo -e "${GREEN}HFI version update confirmed${NC}"
@@ -134,7 +137,7 @@ if [[ $test_arg == "test" ]]; then
 
 	if [[ $r_new == $r_old ]]; then
 		echo -e "${RED}New RDMAVT did not install!${NC}"
-		sudo dpkg -r opxs-modules-dkms
+		sudo dpkg -r $basename
 		exit 1
 	else
 		echo -e "${GREEN}RDMAVT version update confirmed${NC}"
@@ -197,7 +200,7 @@ if [[ $test_arg == "test" ]]; then
 
 	echo -e "\n--------------\n"
 	echo "Restoring original modules"
-	sudo dpkg -r opxs-modules-dkms
+	sudo dpkg -r $basename
 	rm -rf lib etc usr debian-binary *.zst *.srcversion
 	echo -e "${GREEN}Package testing successful.${NC}"
 	exit 0
