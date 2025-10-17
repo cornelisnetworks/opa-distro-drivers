@@ -5,6 +5,7 @@ kerneldir="./"
 
 # ridiculously long to encourage good names later
 pkgname="opxs-kernel-updates"
+devpkgname="${pkgname}-dev"
 
 set -e
 
@@ -195,24 +196,24 @@ fi
 pkgfull="$pkgname-$pkgversion-$pkgrelease"
 pkgfull+="_"
 pkgfull+=$pkgarch
+devpkgfull="$devpkgname-$pkgversion-$pkgrelease"
+devpkgfull+="_"
+devpkgfull+=$pkgarch
 
 echo "final package name is $workdir/$pkgfull"
+echo "final dev package name is $workdir/$devpkgfull"
 
 # setup deb files here
-echo "Creating deb files"
+echo "Creating deb files for $pkgfull"
 mkdir -p $workdir/$pkgfull/lib/modules/$DEFAULT_KERNEL_VERSION/extra/opxs-kernel-updates
 cp $tardir/hfi1/hfi1.ko $workdir/$pkgfull/lib/modules/$DEFAULT_KERNEL_VERSION/extra/opxs-kernel-updates
 cp $tardir/rdmavt/rdmavt.ko $workdir/$pkgfull/lib/modules/$DEFAULT_KERNEL_VERSION/extra/opxs-kernel-updates
-# copy necessary include files here
-mkdir -p $workdir/$pkgfull/usr/src/$pkgname/include/
-cp -r $tardir/include/* $workdir/$pkgfull/usr/src/$pkgname/include/
-# postinst and prerm scripts will take care of moving headers around
 mkdir -p $workdir/$pkgfull/etc/modprobe.d
 cp $filedir/$pkgname.conf $workdir/$pkgfull/etc/modprobe.d
 
 mkdir $workdir/$pkgfull/DEBIAN
 
-# make control file
+# make control file for main package
 cat > $workdir/$pkgfull/DEBIAN/control << CEOF
 Package: ${pkgname}
 Version: ${pkgversion}-${pkgrelease}
@@ -227,7 +228,7 @@ else
 echo "Depends: linux-image-${DEFAULT_KERNEL_VERSION}" >> $workdir/$pkgfull/DEBIAN/control
 fi
 
-echo "Control file"
+echo "Control file for $pkgfull"
 echo "------------"
 cat $workdir/$pkgfull/DEBIAN/control
 echo "------------"
@@ -235,7 +236,51 @@ echo "------------"
 cp $filedir/postinst $workdir/$pkgfull/DEBIAN
 cp $filedir/prerm $workdir/$pkgfull/DEBIAN
 
-echo "Building deb"
+# setup deb files for dev package
+echo "Creating deb files for $devpkgfull"
+
+# Install sanitized headers for user space development using the kernel's
+# headers_install.sh script. This is the same method used by the RPM spec file.
+(
+    # The destination for the final headers in the .deb package.
+    targetdir_base=$workdir/$devpkgfull/usr/include/uapi/rdma
+    mkdir -p $targetdir_base/hfi
+
+    # The location of the source headers from our build stage.
+    srcdir=$tardir
+
+    # The headers_install.sh script needs to be run from the kernel build directory.
+    cd $kernelsrc
+
+    # Install and sanitize each required header file.
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl.h $targetdir_base/rdma_user_ioctl.h
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/rdma_user_ioctl_cmds.h $targetdir_base/rdma_user_ioctl_cmds.h
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_user.h $targetdir_base/hfi/hfi1_user.h
+    sh ./scripts/headers_install.sh $srcdir/include/uapi/rdma/hfi/hfi1_ioctl.h $targetdir_base/hfi/hfi1_ioctl.h
+)
+
+# The postinst and prerm scripts are not needed for the -dev package as we are
+# installing headers directly to their final location. They are part of the
+# main package to manage kernel modules.
+mkdir $workdir/$devpkgfull/DEBIAN
+
+# make control file for dev package
+cat > $workdir/$devpkgfull/DEBIAN/control << CEOF
+Package: ${devpkgname}
+Version: ${pkgversion}-${pkgrelease}
+Architecture: ${pkgarch}
+Maintainer: Dennis Dalessandro <dennis.dalessandro@cornelisnetworks.com>
+Description: Header files for Cornelis Omni-Path Architecture HFI drivers
+Depends: ${pkgname} (= ${pkgversion}-${pkgrelease})
+CEOF
+
+echo "Control file for $devpkgfull"
+echo "------------"
+cat $workdir/$devpkgfull/DEBIAN/control
+echo "------------"
+
+echo "Building debs"
 dpkg-deb --build --root-owner-group $workdir/$pkgfull
+dpkg-deb --build --root-owner-group $workdir/$devpkgfull
 echo "Success"
 exit 0
