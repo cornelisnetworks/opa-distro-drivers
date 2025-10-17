@@ -217,7 +217,7 @@ cat > $workdir/$pkgfull/DEBIAN/control << CEOF
 Package: ${pkgname}
 Version: ${pkgversion}-${pkgrelease}
 Architecture: ${pkgarch}
-Maintainer: Dennis Dalessandro <dennis.dalessandro@cornelisnetworkscom>
+Maintainer: Dennis Dalessandro <dennis.dalessandro@cornelisnetworks.com>
 Description: Kernel modules for Cornelis Omni-Path Architecture HFI drivers
 CEOF
 if [[ $build_nvidia = y ]]; then
