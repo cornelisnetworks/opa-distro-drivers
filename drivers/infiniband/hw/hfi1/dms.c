@@ -38,13 +38,13 @@
 #define HFI1_DMS_STALE_POLL_TIME_NS          (100 * MS_IN_NS)
 
 // elapsed ns since last activity after which the tracker is considered "stale" and must request remote status
-#define HFI1_DMS_STALE_THRESHOLD_TIME_NS       (1 * SEC_IN_NS)
+#define HFI1_DMS_STALE_THRESHOLD_TIME_NS       (10 * SEC_IN_NS)
 
 // elapsed ns since last activity after which the tracker is considered "dead" and must be canceled; must be greater than stale threshold
-#define HFI1_DMS_DEAD_ELAPSED_NS               (10 * SEC_IN_NS)
+#define HFI1_DMS_DEAD_ELAPSED_NS               (100 * SEC_IN_NS)
 
 // elapsed ns since last activity after which a disabled tidset can be free'd
-#define HFI1_DMS_FABRIC_PACKET_MAX_LIFETIME_NS  (1 * SEC_IN_NS)
+#define HFI1_DMS_FABRIC_PACKET_MAX_LIFETIME_NS  (10 * SEC_IN_NS)
 
 #if HFI1_DMS_COUNTERS_ENABLE
 #define dms_rdtsc() rdtsc()
