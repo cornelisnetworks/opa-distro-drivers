@@ -619,6 +619,11 @@ static int cport_start(struct hfi1_devdata *dd, int to_secs)
 
 	ret = cport_send_req(dd, CH_OP_START, 0, &start, sizeof(start),
 			     (void **)&resp, &resp_len, to_secs * HZ);
+	if (ret == MSG_RSP_STATUS_SEQ_NO_ERROR) {
+		dd_dev_info(dd, "CPORT sequence error, retrying\n");
+		ret = cport_send_req(dd, CH_OP_START, 0, &start, sizeof(start),
+				     (void **)&resp, &resp_len, HZ);
+	}
 	if (ret) {
 		dd_dev_err(dd, "CPORT start failed %d\n", ret);
 	} else if (resp_len) {
