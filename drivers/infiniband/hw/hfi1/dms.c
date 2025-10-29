@@ -29,22 +29,27 @@
 #define HFI1_DMS_WORK_ITEM_MAX_RETRY_TIME_NS  (10000000000) //   10 s
 #define HFI1_DMS_ACCESS_STALL_MAX_RETRIES	(3)
 
-#define USEC_IN_NS (1000ull)
-#define MS_IN_NS   (1000ull * USEC_IN_NS)
-#define SEC_IN_NS  (1000ull * MS_IN_NS)
-#define MIN_IN_NS  (  60ull * SEC_IN_NS)
+#define USEC_IN_NS (1000l)
+#define MS_IN_NS   (1000l * USEC_IN_NS)
+#define SEC_IN_NS  (1000l * MS_IN_NS)
+#define MIN_IN_NS  (  60l * SEC_IN_NS)
 
 // elapsed ns between each "staleness check" poll
-#define HFI1_DMS_STALE_POLL_TIME_NS          (100 * MS_IN_NS)
+#define HFI1_DMS_STALE_POLL_TIME_NS          (10l * SEC_IN_NS)
 
 // elapsed ns since last activity after which the tracker is considered "stale" and must request remote status
-#define HFI1_DMS_STALE_THRESHOLD_TIME_NS       (10 * SEC_IN_NS)
+static long bulksvc_dms_stale_threshold_ns = 1000l * SEC_IN_NS;
+module_param(bulksvc_dms_stale_threshold_ns, long, S_IRUGO);
+MODULE_PARM_DESC(bulksvc_dms_stale_threshold_ns, "elapsed ns since last activity after which the tracker is considered 'stale' and must request remote status. Default is 1000s (1,000,000,000,000ns).");
 
-// elapsed ns since last activity after which the tracker is considered "dead" and must be canceled; must be greater than stale threshold
-#define HFI1_DMS_DEAD_ELAPSED_NS               (100 * SEC_IN_NS)
+// elapsed ns since last activity after which the tracker is considered "dead" and must be canceled; must be greater than stale threshold.  Default is "never", but can be overridden
+static long bulksvc_dms_dead_elapsed_ns = LONG_MAX;
+module_param(bulksvc_dms_dead_elapsed_ns, long, S_IRUGO);
+MODULE_PARM_DESC(bulksvc_dms_dead_elapsed_ns,
+	"Interval in nanoseconds per dms command/transaction after which the command must be cancelled.  Default is 'never', must be greater than bulksvc_dms_stale_threshold_ns.");
 
 // elapsed ns since last activity after which a disabled tidset can be free'd
-#define HFI1_DMS_FABRIC_PACKET_MAX_LIFETIME_NS  (10 * SEC_IN_NS)
+#define HFI1_DMS_FABRIC_PACKET_MAX_LIFETIME_NS  (100l * SEC_IN_NS)
 
 #if HFI1_DMS_COUNTERS_ENABLE
 #define dms_rdtsc() rdtsc()
@@ -795,6 +800,15 @@ int hfi1_dms_init(struct hfi1_dms *dms, struct hfi1_devdata *dd, struct hfi1_ctx
 	DMS_BUG_ON(num_rcds <= 0);
 	DMS_BUG_ON(sdma_engines == NULL);
 	DMS_BUG_ON(num_engines <= 0);
+
+	// Disallow bulksvc_dms_dead_elapsed_ns less than stale threshold
+	if (bulksvc_dms_dead_elapsed_ns <
+		bulksvc_dms_stale_threshold_ns) {
+		dd_dev_warn(dd, "DMS dead elapsed time %ld ns is less than stale threshold %ld ns, adjusting to threshold + 1\n",
+			    bulksvc_dms_dead_elapsed_ns,
+			    bulksvc_dms_stale_threshold_ns);
+		bulksvc_dms_dead_elapsed_ns = bulksvc_dms_stale_threshold_ns + 1;
+	}
 
 	*dms = (struct hfi1_dms){0}; // Initialize the dms structure to zero
 	dms->dd = dd;
@@ -3068,22 +3082,26 @@ void hfi1_dms_impl_reclaim_ahg(struct hfi1_dms *dms, struct sdma_engine *sde, st
 	}
 }
 
-u64 _tracker_age(union hfi1_dms_tracker const * const tracker, ktime_t const now)
+s64 _tracker_age(union hfi1_dms_tracker const * const tracker, ktime_t const now)
 {
 	return ktime_to_ns(ktime_sub(now, tracker->hdr.last_activity));
 }
 
 bool _tracker_is_stale(union hfi1_dms_tracker const * const tracker, ktime_t const now)
 {
-	return _tracker_age(tracker, now) > HFI1_DMS_STALE_THRESHOLD_TIME_NS;
+	return _tracker_age(tracker, now) > bulksvc_dms_stale_threshold_ns;
 }
 
 bool _tracker_is_dead(union hfi1_dms_tracker const * const tracker, ktime_t const now)
 {
-	return _tracker_age(tracker, now) > HFI1_DMS_DEAD_ELAPSED_NS;
+	bool res = _tracker_age(tracker, now) > bulksvc_dms_dead_elapsed_ns;
+	if (res) {
+		pr_debug("(%d) Tracker is dead  (l:%05hu r:%05hu); age = %llu\n", __LINE__, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, _tracker_age(tracker, now));
+	}
+	return res;
 }
 
-void hfi1_dms_poll_stale(struct hfi1_dms *dms, u64 const max_elapsed_ns)
+void hfi1_dms_poll_stale(struct hfi1_dms *dms)
 {
 	static int const err = -ETIMEDOUT;
 	
@@ -3230,7 +3248,7 @@ int hfi1_dms_poll(struct hfi1_dms *dms, ktime_t const now)
 
 	if (ktime_to_ns(ktime_sub(now, dms->last_stale_check)) > HFI1_DMS_STALE_POLL_TIME_NS) {
 		dms->last_stale_check = now;
-		hfi1_dms_poll_stale(dms, HFI1_DMS_STALE_THRESHOLD_TIME_NS);
+		hfi1_dms_poll_stale(dms);
 	}
 
 	// always drain/process data context even if protocol is stalled
