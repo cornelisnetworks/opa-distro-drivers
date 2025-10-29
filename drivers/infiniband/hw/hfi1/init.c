@@ -760,7 +760,7 @@ int start_cport(struct hfi1_devdata *dd)
 	ret = cport_start(dd);
 	if (ret)
 		cport_exit(dd);
-	return ret;
+	return (ret > 0 ? -EIO : ret);
 }
 
 static void stop_cport(struct hfi1_devdata *dd)
