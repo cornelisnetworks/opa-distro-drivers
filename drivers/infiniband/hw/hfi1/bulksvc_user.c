@@ -229,7 +229,14 @@ static int try_give_completion(struct hfi1_bulksvc_user_info *user_info, struct 
 	*entry = *cmpl;
 
 	atomic64_set_release(cmplq_record->tail, cmplq_tail + 1);
-	user_info->num_inflight--;
+
+	if(cmpl->type != HFI1_HFISVC_CQ_ENTRY_TYPE_NOTIFY) {
+		if(!user_info->num_inflight) {
+			pr_err("%s:%d:%s() wrapping num_inflight\n",
+				__FILENAME__, __LINE__, __func__);
+		}
+		user_info->num_inflight--;
+	}
 	return 0;
 }
 
