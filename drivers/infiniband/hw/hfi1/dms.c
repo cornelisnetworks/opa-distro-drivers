@@ -3214,6 +3214,7 @@ int hfi1_dms_poll(struct hfi1_dms *dms, ktime_t const now)
 		hfi1_dms_impl_reclaim_ahg(dms, dms->sdma_engines[i], &dms->sde_rsrcs[i]);
 	}
 
+	_sdma_waitlist_poll(dms);
 	_dms_drain_workqueue(dms);
 
 	if (ktime_to_ns(ktime_sub(now, dms->last_stale_check)) > HFI1_DMS_STALE_POLL_TIME_NS) {
