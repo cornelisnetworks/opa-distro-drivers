@@ -560,6 +560,17 @@ static void bulksvc_on_verbs_cmd_mr_dereg(struct hfi1_bulksvc * const svc,
 	};
 	int rc = hfi1_dms_unregister_access(&svc->dms, dms_key);
 	if (rc != 0) {
+		if (rc == -EAGAIN || rc == -EBUSY) {
+			unsigned long flags;
+			pr_warn("%s:%d:%s() DMS busy, postponing MR(%d) dereg: %d\n",
+		       __FILENAME__, __LINE__, __func__, mr_record->rkey, rc);
+			/* requeue */
+			spin_lock_irqsave(&svc->verbs_state.cmd_queue.lock, flags);
+			list_add_tail(&cmd->node, &svc->verbs_state.cmd_queue.list);
+			spin_unlock_irqrestore(&svc->verbs_state.cmd_queue.lock, flags);
+			hfi1_bulksvc_schedule(svc);
+			return;
+		}
 		pr_err("%s:%d:%s() Failed to deregister MR from DMS: %d\n",
 		       __FILENAME__, __LINE__, __func__, rc);
 
