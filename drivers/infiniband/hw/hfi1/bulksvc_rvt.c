@@ -364,34 +364,6 @@ static void bts_rdma_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
 	spin_unlock_irqrestore(&qp->s_lock, flags);
 }
 
-static void bts_mr_reg_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
-{
-}
-
-static void bts_mr_dereg_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl, struct hfi1_bulksvc_verbs_state* verbs_state)
-{
-	if (cmpl->cmd.status == -EBUSY) {
-		pr_warn("verbs dereg_mr returned EBUSY from dms\n");
-		// TODO for now, do not retry
-		bool const do_retry = false;
-		if (do_retry) {
-			pr_warn("re-attempting to deregister verbs MR from dms\n");
-			struct hfi1_bulksvc_verbs_cmd * cmd = cmpl->cmd.bts_cmd;
-			hfi1_bulksvc_verbs_cmd_get(cmd);
-			
-			unsigned long flags;
-			spin_lock_irqsave(&verbs_state->cmd_queue.lock, flags);
-			list_add_tail(&cmd->node, &verbs_state->cmd_queue.list);
-			spin_unlock_irqrestore(&verbs_state->cmd_queue.lock, flags);
-			struct hfi1_bulksvc *svc = container_of(verbs_state,
-								struct hfi1_bulksvc,
-								verbs_state);
-			hfi1_bulksvc_schedule(svc);
-		}
-
-	}
-}
-
 static void bts_access_complete(struct hfi1_bulksvc_verbs_cmpl *cmpl)
 {
 	struct hfi1_ibdev *verbs_dev;
@@ -465,11 +437,9 @@ void hfi1_bts_handle_verbs_cmpls(struct hfi1_bulksvc_verbs_state* state)
 					hfi1_bulksvc_verbs_cmpl_put(cmpl);
 					break;
 				case HFI1_BULKSVC_VERBS_CMD_OP_MR_REG:
-					bts_mr_reg_complete(cmpl);
 					hfi1_bulksvc_verbs_cmpl_put(cmpl);
 					break;
 				case HFI1_BULKSVC_VERBS_CMD_OP_MR_DEREG:
-					bts_mr_dereg_complete(cmpl, state);
 					hfi1_bulksvc_verbs_cmpl_put(cmpl);
 					break;
 				}
