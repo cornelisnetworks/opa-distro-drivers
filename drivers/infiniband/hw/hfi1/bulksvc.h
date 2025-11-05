@@ -86,6 +86,9 @@ struct hfi1_bulksvc {
 
 	int cpu; /* cpu to run on when scheduled */
 	int doorbell_msix_intr;
+
+	// If 0, nothing to do.  If 1, bulksvc should replace with an owning char* to debug output buffer
+	atomic64_t debug_info_buf_ptr;
 };
 
 /* setup data structures, define requirements */
@@ -120,5 +123,11 @@ int hfi1_bulksvc_enqueue_event(struct hfi1_bulksvc *svc, struct hfi1_bulksvc_eve
 /* Bulksvc doorbell handlers */
 irqreturn_t hfi1_bulksvc_doorbell_interrupt(int irq, void *data);
 irqreturn_t hfi1_bulksvc_doorbell_interrupt_thr(int irq, void *data);
+
+/* 
+ * Collects bulksvc info into human-readable output, must be called from bulksvc thread.  Will 
+ * be called if debug_info_buf_ptr == 1
+ */
+char* hfi1_bulksvc_prepare_debug_info(struct hfi1_bulksvc *svc);
 
 #endif          /* DEF_HFI1_BULKSVC_H */
