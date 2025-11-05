@@ -539,6 +539,11 @@ static void cport_mctxt_fn(struct work_struct *work)
 #ifdef CPORT_RCV_DEBUG
 	dd_dev_info(dd, "cport_mctxt_fn() %016llx\n", hdr.qw);
 #endif
+	if (hdr.len < sizeof(hdr) || hdr.len > sizeof(union mctxt_mem)) {
+		/* assume message is invalid  - cannot be processed */
+		ret = -EDOM;
+		goto fail;
+	}
 	i += sizeof(u64);
 	/* No need for atomics here, we are single threaded */
 	if (hdr.seq_no != cport->rseqno) {
