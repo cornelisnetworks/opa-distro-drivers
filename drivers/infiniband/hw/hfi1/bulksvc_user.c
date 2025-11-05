@@ -16,7 +16,8 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 	struct hfi1_bulksvc_user_info *bulksvc_user_info = kzalloc(sizeof(*bulksvc_user_info), GFP_KERNEL);
 	if (!bulksvc_user_info)
 		return NULL;
-	u64 num_overflow = 2 * (1 << bulksvc_user_queue_size_pages_log2) * PAGE_SIZE / sizeof(union hfi1_bulksvc_upd);
+	u64 const max_cmds_per_queue = (1 << bulksvc_user_queue_size_pages_log2) * PAGE_SIZE / CACHELINE_SIZE;
+	u64 num_overflow = 2 * max(BULKSVC_USER_MAX_NUM_CMDQS, BULKSVC_USER_MAX_NUM_CMPLQS) * max_cmds_per_queue;
 	union hfi1_bulksvc_upd *overflows = kmalloc_array(num_overflow, sizeof(union hfi1_bulksvc_upd), GFP_KERNEL);
 	if (!overflows) {
 		kfree(bulksvc_user_info);
@@ -51,7 +52,7 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 
 	bulksvc_user_info->num_cmplqs = 0;
 	bulksvc_user_info->num_cmdqs = 0;
-	bulksvc_user_info->max_inflight = num_overflow;
+	bulksvc_user_info->max_inflight = num_overflow + max_cmds_per_queue;
 
 	bulksvc_user_info->client_key = atomic_inc_return(&fd->dd->bulksvc->last_client_key);
 	pr_debug("assigned client key %u\n", bulksvc_user_info->client_key);
@@ -1120,38 +1121,51 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 		if (too_many_inflight || completions_overflowing)
 			continue;
 
-		// only calculate this once per user_info so that even if we get
-		// error completions, or things complete immediately, we don't
-		// just indefinitely drain these queues
-		u64 remaining_inflight = user_info->max_inflight - user_info->num_inflight;
-		for (int i = 0; i < user_info->num_cmdqs; ++i) {
+		u64 tails_cached[BULKSVC_USER_MAX_NUM_CMDQS];
+		for (int cmdq_index = 0; cmdq_index < user_info->num_cmdqs; ++cmdq_index) {
 			struct hfi1_bulksvc_queue_record *rec =
-				&user_info->cmdq_records[i];
-			if (!rec->active)
-				continue;
-			const u64 tail = atomic64_read_acquire(rec->tail);
-			u64 head = atomic64_read(rec->head);
-			const u64 max_cmds_to_process_for_user = remaining_inflight;
-			u64 processed_cmds_for_user = 0;
+				&user_info->cmdq_records[cmdq_index];
+			if (rec->active) {
+				tails_cached[cmdq_index] = atomic64_read_acquire(rec->tail);
+			} else {
+				tails_cached[cmdq_index] = 0;
+			}
+		}
 
-			while (head < tail && processed_cmds_for_user < max_cmds_to_process_for_user) {
-				struct hfi1_bulksvc_cmd const * const next =
+		// Round robin over all cmdqs for this user until we hit a limit
+		bool handled_any = true;
+		while (user_info->num_inflight < user_info->max_inflight && handled_any) {
+			handled_any = false;
+			for (int cmdq_index = 0; cmdq_index < user_info->num_cmdqs; ++cmdq_index) {
+				struct hfi1_bulksvc_queue_record *rec =
+					&user_info->cmdq_records[cmdq_index];
+				if (!rec->active)
+					continue;
+					
+				const u64 tail_cached = tails_cached[cmdq_index];
+				u64 head = atomic64_read(rec->head);
+				if (head >= tail_cached)
+					continue;
+
+				struct hfi1_bulksvc_cmd const * const next_cmd =
 					(struct hfi1_bulksvc_cmd const * const)
 					(rec->queue_buf_magic +
 					((head & rec->idx_mask) *
 					CACHELINE_SIZE));
-				// If a full command is not available, break
-				if ((head + next->hdr.num_blocks) > tail) {
-					break;
+					
+				// If it's a command of more than one block, and the full command is not available, continue
+				if ((head + next_cmd->hdr.num_blocks) > tail_cached) {
+					continue;
 				}
-				bulksvc_on_user_cmd(svc, user_info, next);
-				head += next->hdr.num_blocks;
-				processed_cmds_for_user += 1;
+				
+				bulksvc_on_user_cmd(svc, user_info, next_cmd);
+				head += next_cmd->hdr.num_blocks;
+				atomic64_set_release(rec->head, head);
+
 				user_info->num_inflight += 1;
-				remaining_inflight -= 1;
+				processed += 1;
+				handled_any = true;
 			}
-			atomic64_set_release(rec->head, head);
-			processed += processed_cmds_for_user;
 		}
 	}
 	mutex_unlock(&svc->user_info_lock);
