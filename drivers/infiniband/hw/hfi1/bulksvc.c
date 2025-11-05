@@ -573,6 +573,11 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 	if (svc->doorbell_msix_intr != CCE_NUM_MSIX_VECTORS)
 		msix_free_irq(dd, svc->doorbell_msix_intr);
 
+	u64 debug_info_ptr = atomic64_xchg(&svc->debug_info_buf_ptr, 0);
+	if (debug_info_ptr != 0 && debug_info_ptr != 1) {
+		kvfree((char*) debug_info_ptr);
+	}
+
 	kfree(svc);
 	dd->bulksvc = NULL;
 }
@@ -667,6 +672,13 @@ static void bulksvc_event_work(struct work_struct *work)
 		processed += hfi1_dms_poll(&svc->dms, now);
 		processed += hfi1_bulksvc_poll_user_cmds(svc);
 		processed += hfi1_bulksvc_poll_verbs_cmds(svc);
+		
+		if (atomic64_read(&svc->debug_info_buf_ptr) == 1) {
+			char const * const buf = hfi1_bulksvc_prepare_debug_info(svc);
+			atomic64_set(&svc->debug_info_buf_ptr, (u64) buf);
+			processed += 1;
+		}
+	
 	} while (iters < max_iters_per_work && processed != 0);
 
 	if (iters == max_iters_per_work && !svc->stop_scheduling)
@@ -954,4 +966,170 @@ static bool get_bulksvc_polling(struct hfi1_devdata *dd)
 		return false;
 
 	return bulksvc_polling_array[start];
+}
+
+char* hfi1_bulksvc_prepare_debug_info(struct hfi1_bulksvc * const svc)
+{
+	struct hfi1_dms * const dms = &svc->dms;
+
+	size_t const tot_size = 256 * PAGE_SIZE;
+	char* res = kvzalloc(tot_size, GFP_KERNEL);
+	if (!res) {
+		return NULL;
+	}
+
+	char* cursor = res;
+	char* end = res + tot_size;
+	// Fill in the debug info
+	cursor += snprintf(cursor, end - cursor, "DMS Debug Info:\n");
+	cursor += snprintf(cursor, end - cursor, "Number of SDMA Engines: %u\n", dms->num_engines);
+
+	for (int i = 0; i < HFI1_DMS_TIDSET_WAITER_TYPE_COUNT; ++i) {
+		cursor += snprintf(cursor, end - cursor, "tidset_waiters[%d]: head=%llu tail=%llu\n", i, dms->tidset_waiters[i].head, dms->tidset_waiters[i].tail);
+
+	}
+	cursor += snprintf(cursor, end - cursor, "Free TID Sets Stack Top: %u\n", dms->free_tid_sets_stack_top);
+
+	cursor += snprintf(cursor, end - cursor, "sdma_waiters: head=%p tail=%p\n", dms->sdma_waiters.waitlist.head, dms->sdma_waiters.waitlist.tail);
+
+	cursor += snprintf(cursor, end - cursor, "num sdma descs %u\n", dms->num_descs);
+
+	cursor += snprintf(cursor, end - cursor, "TX rift:\n");
+	for (int i = 0; i < HFI1_DMS_RIFT_IDX_SIZE; ++i) {
+		union hfi1_dms_tracker* tracker = dms->tx_rift.arr[i];
+		if (!tracker) {
+			continue;
+		} else if (tracker->tx.payload_remaining == 0) {
+			cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d - rift entry present but no remaining data\n",
+				i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->tx.op);
+
+			continue;
+		}
+		cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d total_payload=%u payload_remaining=%u xfer_start_byte_offset=%u\n", 
+			i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->tx.op, tracker->tx.total_payload, tracker->tx.payload_remaining, tracker->tx.xfer_start_byte_offset);
+
+		switch (tracker->tx.op) {
+			case HFI1_DMS_TX_TRACKER_OP_RDMA_WRITE:
+				cursor += snprintf(cursor, end - cursor, "\t\tWrite: mr=%p dms_key=%llu rx_offset=%llu flags=%u imm_data=%llu\n",
+					tracker->tx.write.mr, tracker->tx.write.dms_key.value, tracker->tx.write.rx_offset, tracker->tx.write.flags, tracker->tx.write.imm_data);
+
+				break;
+			case HFI1_DMS_TX_TRACKER_OP_RDMA_READ:
+				cursor += snprintf(cursor, end - cursor, "\t\tRead: access=%p flags=%u imm_data=%llu size_qw=%u rx_id=%u include_fixup_data=%u head_misalignment=%u\n",
+					tracker->tx.read.access, tracker->tx.read.start.flags, tracker->tx.read.start.imm_data, tracker->tx.read.start.size_qw, tracker->tx.read.start.rx_id, tracker->tx.read.start.include_fixup_data, tracker->tx.read.start.head_misalignment);
+
+				break;
+			default:
+				break;
+		}
+	}
+	cursor += snprintf(cursor, tot_size - (cursor - res), "RX rift:\n");
+	for (int i = 0; i < HFI1_DMS_RIFT_IDX_SIZE; ++i) {
+		union hfi1_dms_tracker* tracker = dms->rx_rift.arr[i];
+		if (!tracker) {
+			continue;
+		} else if (tracker->rx.payload_remaining == 0) {
+			cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d - rift entry present but no remaining data\n",
+				i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->rx.op);
+
+			continue;
+		}
+		cursor += snprintf(cursor, end - cursor, "\tTracker %d: local_rift_key=%u remote_rift_key=%u remote_lid=%u op=%d total_payload=%u payload_remaining=%u payload_requested=%u sbuf_offset=%u rbuf_offset=%llu\n", 
+			i, tracker->hdr.local_rift_key.value, tracker->hdr.remote_rift_key.value, tracker->hdr.remote_lid, tracker->rx.op, tracker->rx.total_payload, tracker->rx.payload_remaining, tracker->rx.payload_requested, tracker->rx.sbuf_offset, tracker->rx.rbuf_offset);
+
+		switch (tracker->rx.op) {
+			case HFI1_DMS_RX_TRACKER_OP_RDMA_READ:
+				cursor += snprintf(cursor, end - cursor, "\t\tRead: dms_key=%llu flags=%u imm_data=%llu\n", 
+					tracker->rx.read.dms_key.value, tracker->rx.read.flags, tracker->rx.read.imm_data);
+
+				break;
+			case HFI1_DMS_RX_TRACKER_OP_RDMA_WRITE:
+				cursor += snprintf(cursor, end - cursor, "\t\tWrite: access=%p flags=%u imm_data=%llu size=%u\n", 
+					tracker->rx.write.access, tracker->rx.write.start.flags, tracker->rx.write.start.imm_data, tracker->rx.write.start.size);
+
+				break;
+			default:
+				break;
+		}
+	}
+
+	struct rb_node *node;
+	struct hfi1_dms_client_state *client;
+
+	for (node = rb_first(&dms->client_rbtree); node; node = rb_next(node)) {
+		client = rb_entry(node, struct hfi1_dms_client_state, node);
+		cursor += snprintf(cursor, end - cursor, "Client: key=%u\n", client->key);
+
+
+		int active_in_fast = 0;
+		for (int i = 0; i < HFI1_DMS_MAX_ACCESS_FAST; ++i) {
+			if (client->access.arr[i]) {
+				active_in_fast++;
+			}
+		}
+		cursor += snprintf(cursor, end - cursor, "\tAccess Fast: count=%d\n", active_in_fast);
+
+
+		int active_in_rbt = 0;
+		struct rb_node *access_node;
+		for (access_node = rb_first(&client->access.rbt); access_node; access_node = rb_next(access_node)) {
+			active_in_rbt++;
+		}
+		cursor += snprintf(cursor, end - cursor, "\tAccess RBT: count=%d\n", active_in_rbt);
+
+	}
+	struct hfi1_bulksvc_user_info *user_info = NULL;
+	mutex_lock(&svc->user_info_lock);
+	list_for_each_entry(user_info, &svc->user_infos, list_entry) {
+		int num_mr = 0;
+		struct hfi1_bulksvc_user_mr_record *mr_record;
+		list_for_each_entry(mr_record, &user_info->user_mr_list, list_entry) {
+			num_mr++;
+		}
+		struct hfi1_bulksvc_user_mr_access_record *mr_access_record;
+		int num_mr_access = 0;
+		list_for_each_entry(mr_access_record, &user_info->active_access_list, list_entry) {
+			num_mr_access++;
+		}
+
+		cursor += snprintf(cursor, end - cursor, "User %d Info: num_inflight: %d num_completion_overflows: %d num_mr: %d num_mr_access: %d\n", user_info->client_key, user_info->num_inflight, user_info->num_completion_overflows, num_mr, num_mr_access);
+
+		for (int i = 0; i < user_info->num_cmplqs; ++i) {
+			cursor += snprintf(cursor, end - cursor, "\tCMPLQ %d: head=%llu tail=%llu\n", i, atomic64_read(user_info->cmplq_records[i].head), atomic64_read(user_info->cmplq_records[i].tail));
+
+		}
+		for (int i = 0; i < user_info->num_cmdqs; ++i) {
+			cursor += snprintf(cursor, end - cursor, "\tCMDQ %d: head=%llu tail=%llu\n", i, atomic64_read(user_info->cmdq_records[i].head), atomic64_read(user_info->cmdq_records[i].tail));
+		}
+	}
+	mutex_unlock(&svc->user_info_lock);
+
+	int rx_rift_target = 0;
+	struct hfi1_dms_dlist_element* curd = dms->rx_rift.type[HFI1_DMS_XFER_TYPE_TARGET].waitlist.head;
+	while (curd != NULL) {
+		rx_rift_target++;
+		curd = curd->next;
+	}
+	int rx_rift_initiator = 0;
+	curd = dms->rx_rift.type[HFI1_DMS_XFER_TYPE_INITIATOR].waitlist.head;
+	while (curd != NULL) {
+		rx_rift_initiator++;
+		curd = curd->next;
+	}
+	int tx_rift_target = 0;
+	curd = dms->tx_rift.type[HFI1_DMS_XFER_TYPE_TARGET].waitlist.head;
+	while (curd != NULL) {
+		tx_rift_target++;
+		curd = curd->next;
+	}
+	int tx_rift_initiator = 0;
+	curd = dms->tx_rift.type[HFI1_DMS_XFER_TYPE_INITIATOR].waitlist.head;
+	while (curd != NULL) {
+		tx_rift_initiator++;
+		curd = curd->next;
+	}
+	cursor += snprintf(cursor, end - cursor, "Rift Waitlists: RX Target=%d RX Initiator=%d TX Target=%d TX Initiator=%d\n",
+		rx_rift_target, rx_rift_initiator, tx_rift_target, tx_rift_initiator);
+
+	return res;
 }
