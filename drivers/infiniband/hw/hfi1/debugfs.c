@@ -31,6 +31,7 @@
 #include <linux/atomic.h>
 #include "mem_region.h"
 #include "file_ops.h"
+#include "bulksvc.h" 
 
 static struct dentry *hfi1_dbg_root;
 
@@ -1395,6 +1396,93 @@ static void add_port_files(struct dentry *root, struct hfi1_pportdata *ppd,
 	}
 }
 
+static int bulksvc_dbg_open(struct inode *in, struct file *fp)
+{
+	simple_open(in, fp);
+	struct hfi1_devdata *dd = fp->private_data;
+
+	atomic64_t* debug_info_ptr = &dd->bulksvc->debug_info_buf_ptr;
+
+	u64 new = 1;
+	u64 prev = atomic64_xchg(debug_info_ptr, new);
+	if (prev != 0 && prev != 1) {
+		// There's a race, it will eventually resolve, clear out possibly stale info
+		kvfree((void*)prev);
+	}
+
+	char* info_buf = NULL;
+	prev = atomic64_read(debug_info_ptr);
+	while (!info_buf) {
+		if (prev == 1) {
+			// Refresh and try again
+			prev = atomic64_read(debug_info_ptr);
+			continue;
+		}
+		if (prev == 0) {
+			// Someone else snagged our info, flag for refresh
+			prev = atomic64_xchg(debug_info_ptr, 1);
+			continue;
+		}
+		// We have reasonably up-to-date info, try to snag
+		prev = atomic64_xchg(debug_info_ptr, 0);
+		if (prev != 0 && prev != 1) {
+			// Got it
+			info_buf = (char*)prev;
+		} else {
+			// Lost race, continue looping
+		}
+		
+	}
+
+	fp->private_data = info_buf;
+
+	return 0;
+}
+
+static int bulksvc_dbg_release(struct inode *in, struct file *fp)
+{
+	char* bulksvc_info = fp->private_data;
+	if (bulksvc_info)
+		kvfree(bulksvc_info);
+	fp->private_data = NULL;
+	return 0;
+}
+
+static ssize_t bulksvc_dbg_read(struct file *file, char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	char* bulksvc_info = file->private_data;
+	if (!bulksvc_info)
+		return 0;
+
+	size_t info_len = strlen(bulksvc_info);
+
+	loff_t pos = *ppos;
+
+	if (pos == info_len)
+		return 0;
+
+	bulksvc_info += pos;
+
+	if (pos < 0 || !count || pos >= info_len)
+		return -EINVAL;
+
+	count = count < (info_len - pos) ? count : info_len - pos;
+
+	if (copy_to_user(buf, bulksvc_info, count))
+		return -EFAULT;
+
+	*ppos += count;
+	return count;
+}
+
+static const struct file_operations _bulksvc_dbg_ops = {
+	.open = bulksvc_dbg_open,
+	.release = bulksvc_dbg_release,
+	.read = bulksvc_dbg_read,
+	.llseek = default_llseek,
+};
+
 void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 {
 	char name[sizeof("port0counters") + 1];
@@ -1454,6 +1542,8 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 	}
 
 	hfi1_fault_init_debugfs(ibd);
+
+	debugfs_create_file("bulksvc_dbg", 0444, root, dd, &_bulksvc_dbg_ops);
 }
 
 void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd)
