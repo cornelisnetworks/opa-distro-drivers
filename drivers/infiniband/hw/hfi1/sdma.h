@@ -731,7 +731,7 @@ static inline void sdma_set_map_type(struct sdma_txreq *tx,
 	int offset = (i * SDMA_MAP_BITS) % BITS_PER_LONG;
 	unsigned long shftmask = SDMA_MAP_MASK << offset;
 	unsigned long *mw = &tx->map_type[w];
-	unsigned long new = type << offset;
+	unsigned long new = (long)type << offset;
 
 	/* Per-desc SDMA_MAP_BITS-sized field must never cross word boundary */
 	static_assert(BITS_PER_LONG % SDMA_MAP_BITS == 0);
