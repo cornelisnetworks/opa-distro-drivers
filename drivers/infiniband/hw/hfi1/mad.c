@@ -5192,7 +5192,6 @@ static void print_mad_ret(struct hfi1_devdata *dd, u32 port, struct ib_mad *out_
 
 #define OPA_ATTRIB_ID_MCTP_OVER_MAD	cpu_to_be16(0xff30)
 #define OPA_ATTRIB_MOD_MCTP_INCOMING	cpu_to_be32(0x0001)
-#define CH_LEN_MAX (2048 - 8) // XXX from cport.c, MCTXT size - header
 /*
  * Send a MAD to CPORT over MCTXT as a pass-through.
  * We always use 9B for now.
@@ -5203,10 +5202,9 @@ static int cport_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, 
 	int size = len + MAD_9B_OFFSET;
 	int ret;
 
-	if (size > CH_LEN_MAX) {
-		/* too big for MCTXT - truncate */
+	if (size > OPA_MGMT_MAD_SIZE) {
 #ifdef CPORT_MAD_TRACE
-		dd_dev_info(dd, "MCTXT MAD length %d > %d, error\n", size, CH_LEN_MAX);
+		dd_dev_info(dd, "MCTXT MAD length %d > %d, error\n", size, OPA_MGMT_MAD_SIZE);
 		/* dump only enough for identification */
 		print_hex_dump(KERN_INFO, "MCTXT MAD ", DUMP_PREFIX_OFFSET,
 			       16, 1, mad, 64, false);
@@ -5240,18 +5238,16 @@ int cport_send_recv_mad(struct hfi1_devdata *dd, u8 sb,
 	long to;
 
 	to = cport_mad_to <= 0 ? MAX_SCHEDULE_TIMEOUT : cport_mad_to * HZ;
-	/* XXX - enforce that the MAD fits into a single MCTXT message */
-	if (size > CH_LEN_MAX) {
+	if (size > OPA_MGMT_MAD_SIZE) {
 		/* too big for MCTXT - truncate */
 #ifdef CPORT_MAD_TRACE
-		dd_dev_info(dd, "MCTXT MAD length %d > %d, truncating\n", size, CH_LEN_MAX);
+		dd_dev_info(dd, "MCTXT MAD length %d > %d, truncating\n", size, OPA_MGMT_MAD_SIZE);
 		/* dump only enough for identification */
 		print_hex_dump(KERN_INFO, "MCTXT MAD ", DUMP_PREFIX_OFFSET,
-				16, 1, mad, 64, false);
+			       16, 1, mad, 64, false);
 #endif
-		size = CH_LEN_MAX;
+		size = 2048;
 	}
-
 	buf = kzalloc(size, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
