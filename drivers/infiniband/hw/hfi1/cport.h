@@ -225,14 +225,6 @@ typedef int (*cport_handler)(struct hfi1_devdata *dd, u8 op, u8 sideband,
 int cport_register_cb(struct hfi1_devdata *dd, u8 op_start, u8 op_end, cport_handler func);
 
 /*
- * Prepare a response payload for 'len' bytes of payload from callback.
- *
- * Returns NULL on error, including 'len' out of bounds. Returned pointer
- * is not disposable directly.
- */
-void *cport_resp_alloc(void *handle, int len);
-
-/*
  * Set static buffer for response payload of 'len' bytes from callback.
  *
  * Buffer may be disposed of immediately on return. If 'len' exceeds
