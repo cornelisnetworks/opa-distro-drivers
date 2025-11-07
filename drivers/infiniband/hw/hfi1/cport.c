@@ -86,6 +86,9 @@ union cport_header {
 
 #define CPORT_HDR_DEF	0x0000007ec0000000ul
 #define CPORT_HDR_LEN	48	/* bit position of length in CPORT_HDR_DEF */
+#define CPORT_HDR_SEQ	28	/* bit position of SEQ_NO */
+#define CPORT_HDR_EOM	30	/* bit position of EOM */
+#define CPORT_HDR_SOM	31	/* bit position of SOM */
 
 #define CPORT_IN_SCRATCH	(JKR_ASIC_CFG_SCRATCH + 0)
 #define CPORT_OUT_SCRATCH	(JKR_ASIC_CFG_SCRATCH + sizeof(u64))
@@ -111,29 +114,23 @@ union mctxt_mem {
 };
 
 /*
- * The maximum length of a CPORT message payload (cport_header.len).
- * The MCTXT is 2K each direction, and payload length excludes header.
- */
-#define CH_LEN_MAX	(sizeof(union mctxt_mem) - sizeof(union cport_header))
-
-/*
  * The common structure used to implement CPORT messages in hfi1.
  */
 struct cport_work {
 	struct work_struct work;
 	struct kref kref;
 	int flags;
+	u8 n_mctxts; /* len of mctxt_mem req/rsp arrays */
+	u8 mctxts_done; /* number of mctxs sent/received */
 	long timeout;
 	struct semaphore *sem; /* only valid in send, if request w/response */
 	struct hfi1_devdata *dd; /* only valid in recv context */
-	union mctxt_mem req;
-	union mctxt_mem rsp;	/* only used for request w/response */
+	union mctxt_mem *req;
+	union mctxt_mem *rsp;	/* only used for request w/response */
 };
 
 #define CW_FLAG_SEND		0x01	/* struct originated in send */
 #define CW_FLAG_RECV		0x02	/* struct originated in receive */
-#define CW_FLAG_RQ_ALLOC	0x04	/* request payload was kalloc'ed */
-#define CW_FLAG_RS_ALLOC	0x08	/* response payload was kalloc'ed */
 
 /*
  * Suspected lost interrupt, try to recover if possible.
@@ -192,7 +189,9 @@ static void cwrelease(struct kref *kref)
 {
 	struct cport_work *cw = container_of(kref, struct cport_work, kref);
 
-	/* TODO: any more tear-down? */
+	kfree(cw->req);
+	kfree(cw->rsp);
+
 	kfree(cw);
 }
 
@@ -207,7 +206,22 @@ static struct cport_work *cwalloc(int flag)
 
 	if (!cw)
 		return NULL;
+
 	cw->flags = flag;
+	cw->n_mctxts = 1;
+	cw->req = kzalloc(sizeof(*cw->req), GFP_KERNEL);
+	if (!cw->req) {
+		kfree(cw);
+		return NULL;
+	}
+
+	cw->rsp = kzalloc(sizeof(*cw->rsp), GFP_KERNEL);
+	if (!cw->rsp) {
+		kfree(cw->req);
+		kfree(cw);
+		return NULL;
+	}
+
 	kref_init(&cw->kref);
 	return cw;
 }
@@ -215,10 +229,52 @@ static struct cport_work *cwalloc(int flag)
 /* set "external" (non-alloc) response payload */
 static void pld_rsp_set(struct cport_work *cw, void *pld, int len)
 {
-	if (len > CH_LEN_MAX)
-		len = CH_LEN_MAX;
-	memcpy(&cw->rsp.qw[1], pld, len);
-	cw->rsp.hdr.len = len + sizeof(cw->rsp.hdr);
+	memcpy(&cw->rsp->qw[1], pld, len);
+	cw->rsp->hdr.len = len + sizeof(cw->rsp->hdr);
+}
+
+static int cw_pad_size(struct cport_work *msg, u32 size)
+{
+	union mctxt_mem *new_reqs, *new_rsps;
+	u8 new_ctxts;
+
+	/* already large enough */
+	if (size <= msg->n_mctxts * (sizeof(*new_reqs)))
+		return 0;
+
+	/* round up to next mctxt buffer len */
+	new_ctxts = (size + (sizeof(*new_reqs) - 1)) / sizeof(*new_reqs);
+	new_reqs = krealloc(msg->req, new_ctxts * sizeof(*new_reqs),
+			    GFP_KERNEL);
+	if (!new_reqs)
+		return -ENOMEM;
+	msg->req = new_reqs;
+
+	new_rsps = krealloc(msg->rsp, new_ctxts * sizeof(*new_reqs),
+			    GFP_KERNEL);
+	if (!new_rsps)
+		return -ENOMEM;
+
+	msg->rsp = new_rsps;
+	msg->n_mctxts = new_ctxts;
+
+	return 0;
+}
+
+static int cwcopy(struct cport_work *msg, void *from, u32 offset,
+		  u32 len, bool req)
+{
+	union mctxt_mem *mc;
+	int ret;
+
+	ret = cw_pad_size(msg, offset + len);
+	if (ret)
+		return ret;
+
+	mc = req ? msg->req : msg->rsp;
+	memcpy(((u8 *)mc) + offset, from, len);
+
+	return 0;
 }
 
 /*
@@ -236,7 +292,7 @@ void *cport_send_req_nb(struct hfi1_devdata *dd, u8 op, u8 sideband, void *paylo
 	struct cport_work *msg;
 	u32 idx;
 
-	if (!dd->cport || len > CH_LEN_MAX)
+	if (!dd->cport)
 		return ERR_PTR(-EINVAL);
 
 	msg = cwalloc(CW_FLAG_SEND);
@@ -244,7 +300,11 @@ void *cport_send_req_nb(struct hfi1_devdata *dd, u8 op, u8 sideband, void *paylo
 		return ERR_PTR(-ENOMEM);
 	msg->dd = dd;
 	msg->timeout = timeout;
-	memcpy(&msg->req.qw[1], payload, len);
+	ret = cwcopy(msg, payload, sizeof(union cport_header), len, true);
+	if (ret) {
+		cwput(msg);
+		return ERR_PTR(ret);
+	}
 	ret = xa_alloc_cyclic(&dd->cport->tid_xa, &idx, msg, cport_tid_limit,
 			      &dd->cport->tid_next, GFP_KERNEL);
 	if (ret < 0) {
@@ -254,12 +314,12 @@ void *cport_send_req_nb(struct hfi1_devdata *dd, u8 op, u8 sideband, void *paylo
 #ifdef CPORT_XA_DEBUG
 	dd_dev_info(dd, "CPORT tid is %04x\n", idx);
 #endif
-	msg->req.hdr.op_code = op;
-	msg->req.hdr.sideband = sideband;
-	msg->req.hdr.is_req = 1;
-	msg->req.hdr.no_rsp = 0;
-	msg->req.hdr.tid = idx;
-	msg->req.hdr.len = len + sizeof(msg->req.hdr);
+	msg->req->hdr.op_code = op;
+	msg->req->hdr.sideband = sideband;
+	msg->req->hdr.is_req = 1;
+	msg->req->hdr.no_rsp = 0;
+	msg->req->hdr.tid = idx;
+	msg->req->hdr.len = len + sizeof(msg->req->hdr);
 	msg->sem = wait;
 	cwget(msg);	/* extra ref so not freed after send */
 	INIT_WORK(&msg->work, cport_send_req_fn);
@@ -281,15 +341,15 @@ int cport_send_comp(struct hfi1_devdata *dd, void *handle,
 	int ret;
 	int len;
 
-	*rsp_len = len = msg->rsp.hdr.len - sizeof(msg->rsp.hdr);
+	*rsp_len = len = msg->rsp->hdr.len - sizeof(msg->rsp->hdr);
 	if (rsp_pld) {
 		ptr = kzalloc(len, GFP_KERNEL);
 		if (!ptr)
 			return -ENOMEM;
-		memcpy(ptr, &msg->rsp.qw[1], len);
+		memcpy(ptr, &msg->rsp[0].qw[1], len);
 		*rsp_pld = ptr;
 	}
-	ret = msg->rsp.hdr.sts;
+	ret = msg->rsp->hdr.sts;
 	cwput(msg);
 	return ret;
 }
@@ -304,7 +364,7 @@ void cport_send_cancel(struct hfi1_devdata *dd, void *handle)
 	struct cport_work *msg = handle;
 
 	cancel_work(&msg->work);	/* cport_send() drops ref on all paths */
-	xa_erase(&dd->cport->tid_xa, msg->req.hdr.tid);
+	xa_erase(&dd->cport->tid_xa, msg->req->hdr.tid);
 	cwput(msg);
 }
 
@@ -339,10 +399,10 @@ int cport_send_req(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, i
 
 		ints = read_csr(dd, JKR_MCTXT_PF0_INT_STATUS);
 		dd_dev_err(dd, "CPORT request wait interrupted %016llx (%d) [%02llx]\n",
-			   msg->req.hdr.qw, ret, ints);
+			   msg->req->hdr.qw, ret, ints);
 #else
 		dd_dev_err(dd, "CPORT request wait interrupted %016llx (%d)\n",
-			   msg->req.hdr.qw, ret);
+			   msg->req->hdr.qw, ret);
 #endif
 		cport_send_cancel(dd, msg);
 		lost_mctxt_intr(dd); /* attempt recovery */
@@ -354,20 +414,25 @@ int cport_send_req(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, i
 int cport_send_notif(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, int len)
 {
 	struct cport_work *msg;
+	int ret;
 
-	if (!dd->cport || len > CH_LEN_MAX)
+	if (!dd->cport)
 		return -EINVAL;
 
 	msg = cwalloc(CW_FLAG_SEND);
 	if (!msg)
 		return -ENOMEM;
 	msg->dd = dd;
-	memcpy(&msg->req.qw[1], payload, len);
-	msg->req.hdr.len = len + sizeof(msg->req.hdr);
-	msg->req.hdr.op_code = op;
-	msg->req.hdr.sideband = sideband;
-	msg->req.hdr.is_req = 1;
-	msg->req.hdr.no_rsp = 1;
+	ret = cwcopy(msg, payload, sizeof(union cport_header), len, true);
+	if (ret) {
+		cwput(msg);
+		return ret;
+	}
+	msg->req->hdr.len = len + sizeof(msg->req->hdr);
+	msg->req->hdr.op_code = op;
+	msg->req->hdr.sideband = sideband;
+	msg->req->hdr.is_req = 1;
+	msg->req->hdr.no_rsp = 1;
 	INIT_WORK(&msg->work, cport_send_req_fn);
 	queue_work(dd->hfi1_wq, &msg->work);
 	return 0;
@@ -388,8 +453,8 @@ static int cport_send_rsp(struct cport_work *msg, int sts)
 	struct hfi1_devdata *dd = msg->dd;
 
 	/* rsp.hdr.len and rsp.qw[1..] already setup, also rsp.op_code/rsp.tid */
-	msg->rsp.hdr.is_req = 0;
-	msg->rsp.hdr.sts = sts;
+	msg->rsp->hdr.is_req = 0;
+	msg->rsp->hdr.sts = sts;
 	INIT_WORK(&msg->work, cport_send_rsp_fn);
 	queue_work(dd->hfi1_wq, &msg->work);
 	return 0;
@@ -397,12 +462,14 @@ static int cport_send_rsp(struct cport_work *msg, int sts)
 
 static void cport_send(struct cport_work *msg, bool req)
 {
-	int len;
-	u64 *ptr;
-	u32 i;
-	int ret;
+	union mctxt_mem *mc = req ? msg->req : msg->rsp;
 	struct hfi1_devdata *dd = msg->dd;
-	union mctxt_mem *mc = req ? &msg->req : &msg->rsp;
+	u32 csr_i, tot_len, len_sent;
+	u64 cport_hdr;
+	u8 seq_no;
+	u64 *ptr;
+	int ret, mcxt_len;
+
 
 	/* sleep until OutboxEmpty... */
 	if (msg->timeout > 0 && msg->timeout != MAX_SCHEDULE_TIMEOUT)
@@ -411,27 +478,66 @@ static void cport_send(struct cport_work *msg, bool req)
 		ret = down_killable(&dd->cport->outbox);
 	if (ret) {
 		dd_dev_err(dd, "CPORT Send OUTBOX_EMPTY killed %016llx (%d)\n",
-			   msg->req.hdr.qw, ret);
+			   msg->req->hdr.qw, ret);
 		cwput(msg);
 		lost_mctxt_intr(dd); /* attempt recovery */
 		return;	/* no way to report error to caller */
 	}
-	mc->hdr.seq_no = atomic_fetch_inc(&dd->cport->seqno);
+
+	/* sequential under lock, check if there are unfinished messages */
+	if (dd->cport->incomplete_mctxt_msg_tx &&
+	    dd->cport->incomplete_mctxt_msg_tx != msg) {
+		/* give up empty outbox, the incomplete msg must finish next */
+		up(&dd->cport->outbox);
+		/* reschedule this work until next time */
+		queue_work(dd->hfi1_wq, &msg->work);
+		return;
+	}
+
 #ifdef CPORT_SND_DEBUG
 	dd_dev_info(dd, "MCTXT sent %016llx\n", mc->hdr.qw);
 #endif
-	len = mc->hdr.len; /* msg len == pkt len, >= sizeof(u64) */
-	ptr = &mc->qw[0];
+	tot_len = mc->hdr.len;
+	len_sent = msg->mctxts_done * sizeof(union mctxt_mem);
+	ptr = &mc[msg->mctxts_done].qw[0];
+	seq_no = msg->mctxts_done;
+	mcxt_len = min_t(int, (int)(tot_len - len_sent), sizeof(union mctxt_mem));
 	/* NOTE: "CPORT IN" is our output */
-	i = JKR_MCTXT_CPORT_IN;
-	write_csr(dd, CPORT_IN_SCRATCH, CPORT_HDR_DEF | ((u64)len << CPORT_HDR_LEN));
-	/* since buffer is full MCTXT, last bytes can be sent as qword. */
-	while (len > 0) {
-		write_csr(dd, i, *ptr++);
-		i += sizeof(u64);
-		len -= sizeof(u64);
+	csr_i = JKR_MCTXT_CPORT_IN;
+	cport_hdr = CPORT_HDR_DEF;
+	cport_hdr |= ((u64)mcxt_len << CPORT_HDR_LEN);
+
+	cport_hdr |= (((u64)seq_no & 0x3) << CPORT_HDR_SEQ);
+
+	/* CPORT_HDR_DEF sets SOM/EOM, clear if not */
+	if (msg->mctxts_done)
+		cport_hdr &= ~((u64)1 << CPORT_HDR_SOM);
+	else
+		mc->hdr.seq_no = atomic_fetch_inc(&dd->cport->seqno);
+
+	if (msg->mctxts_done + 1 < msg->n_mctxts)
+		cport_hdr &= ~((u64)1 << CPORT_HDR_EOM);
+
+	write_csr(dd, CPORT_IN_SCRATCH, cport_hdr);
+	while (mcxt_len > 0) {
+		write_csr(dd, csr_i, *ptr++);
+		csr_i += sizeof(u64);
+		mcxt_len -= sizeof(u64);
 	}
 	write_csr(dd, JKR_MCTXT_CPORT_INT_STATUS, JKR_MCTXT_INT_INBOX_FULL);
+
+	/* did we complete the message? */
+	if (++msg->mctxts_done < msg->n_mctxts) {
+		dd->cport->incomplete_mctxt_msg_tx = msg;
+		queue_work(dd->hfi1_wq, &msg->work); /* reschedule the remaining sends */
+
+		return;
+	}
+
+	dd->cport->incomplete_mctxt_msg_tx = NULL;
+	/* reset mctxts_done for response parsing */
+	if (req)
+		msg->mctxts_done = 0;
 	cwput(msg); /* may or may not free memory */
 }
 
@@ -484,25 +590,25 @@ static void cport_req_fn(struct work_struct *work)
 	void *pld;
 	int pll;
 
-	pll = msg->req.hdr.len - sizeof(msg->req.hdr);
-	pld = &msg->req.qw[1];
-	msg->rsp.hdr.qw = msg->req.hdr.qw;
+	pll = msg->req->hdr.len - sizeof(msg->req->hdr);
+	pld = &msg->req->qw[1];
+	msg->rsp->hdr.qw = msg->req->hdr.qw;
 	/* default to no payload in response (if any) */
-	msg->rsp.hdr.len = sizeof(msg->req.hdr);
-	func = msg->dd->cport->handlers[msg->req.hdr.op_code];
+	msg->rsp->hdr.len = sizeof(msg->req->hdr);
+	func = msg->dd->cport->handlers[msg->req->hdr.op_code];
 	if (func)
-		ret = func(msg->dd, msg->req.hdr.op_code, msg->req.hdr.sideband,
+		ret = func(msg->dd, msg->req->hdr.op_code, msg->req->hdr.sideband,
 			   pld, pll, msg);
 	else
-		ret = inval_req(msg->dd, msg->req.hdr.op_code, msg->req.hdr.sideband,
+		ret = inval_req(msg->dd, msg->req->hdr.op_code, msg->req->hdr.sideband,
 				pld, pll, msg);
-	if (msg->req.hdr.no_rsp) {
+	if (msg->req->hdr.no_rsp) {
 		cwput(msg);
 		if (ret)
 			dd_dev_err(msg->dd, "Op %d %02x failed (%d)\n",
-				   msg->req.hdr.op_code, msg->req.hdr.sideband, ret);
+				   msg->req->hdr.op_code, msg->req->hdr.sideband, ret);
 	} else {
-		/* msg->rsp.qw[*] and msg->rsp.hdr.len have been updated */
+		/* msg->rsp->qw[*] and msg->rsp->hdr.len have been updated */
 		ret = cport_send_rsp(msg, ret);
 		if (ret)
 			dd_dev_err(msg->dd, "Response send failed (%d)\n", ret);
@@ -520,8 +626,10 @@ static void cport_mctxt_fn(struct work_struct *work)
 	struct hfi1_cport *cport = container_of(work, struct hfi1_cport, mctxt_work);
 	struct hfi1_devdata *dd = cport->dd;
 	int ret = 0;
+	u8 is_start, is_end;
 	int len;
 	u64 *ptr;
+	u64 mhdr;
 	u32 i;
 	struct cport_work *msg;
 	union cport_header hdr;
@@ -530,16 +638,36 @@ static void cport_mctxt_fn(struct work_struct *work)
 	 * CPORT output MCTXT is our input.
 	 */
 	i = JKR_MCTXT_CPORT_OUT;
-	/*
-	 * This header ignored:
-	 * mhdr = read_csr(dd, CPORT_OUT_SCRATCH);
-	 * assert(mhdr.PKT_LEN_BYTES == hdr.len);
-	 */
-	hdr.qw = read_csr(dd, i);
+
+	mhdr = read_csr(dd, CPORT_OUT_SCRATCH);
+	len = (mhdr >> CPORT_HDR_LEN) & 0xfff;
+	len = min_t(int, len, sizeof(union mctxt_mem));
+	is_start = (mhdr >> CPORT_HDR_SOM) & 1;
+	is_end = (mhdr >> CPORT_HDR_EOM) & 1;
+	if (is_start) {
+		hdr.qw = read_csr(dd, i);
+	} else if (cport->incomplete_mctxt_msg_rx) {
+		msg = cport->incomplete_mctxt_msg_rx;
+		if (msg->flags & CW_FLAG_RECV) {
+			ptr = &msg->req[msg->mctxts_done++].qw[0];
+			hdr.qw = msg->req->hdr.qw;
+		} else {
+			ptr = &msg->rsp[msg->mctxts_done++].qw[0];
+			hdr.qw = msg->rsp->hdr.qw;
+		}
+		dd_dev_info(dd, "%s: got continuation of %u\n",
+			    __func__, hdr.seq_no);
+		/* skip all the start-message parsing/allocation */
+		goto copy;
+	} else {
+		/* this is bad, just skip the message */
+		dd_dev_warn(dd, "cport sent unexpected non-start packet\n");
+		goto fail;
+	}
 #ifdef CPORT_RCV_DEBUG
 	dd_dev_info(dd, "cport_mctxt_fn() %016llx\n", hdr.qw);
 #endif
-	if (hdr.len < sizeof(hdr) || hdr.len > sizeof(union mctxt_mem)) {
+	if (hdr.len < sizeof(hdr)) {
 		/* assume message is invalid  - cannot be processed */
 		ret = -EDOM;
 		goto fail;
@@ -558,7 +686,10 @@ static void cport_mctxt_fn(struct work_struct *work)
 			ret = -ENOMEM;
 			goto fail; /* drop message, with error */
 		}
-		ptr = &msg->req.qw[0];
+		ret = cw_pad_size(msg, hdr.len);
+		if (ret)
+			goto fail;
+		ptr = &msg->req->qw[msg->mctxts_done++];
 	} else {
 		/*
 		 * Responses already have a 'msg', extra ref was already taken.
@@ -570,12 +701,16 @@ static void cport_mctxt_fn(struct work_struct *work)
 			ret = -ESRCH;
 			goto fail; /* drop message, with error */
 		}
-		ptr = &msg->rsp.qw[0];
-		/* assert msg->req.hdr ~= hdr */
+		ret = cw_pad_size(msg, hdr.len);
+		if (ret)
+			goto fail;
+		ptr = &msg->rsp->qw[msg->mctxts_done++];
+		/* assert msg->req->hdr ~= hdr */
 	}
 	*ptr++ = hdr.qw;
+	len -= sizeof(hdr);
+copy:
 	/* now copy payload into chosen buffer */
-	len = hdr.len - sizeof(hdr);
 	while (len > 0) {
 		*ptr++ = read_csr(dd, i);
 		i += sizeof(u64);
@@ -589,6 +724,17 @@ static void cport_mctxt_fn(struct work_struct *work)
 #ifdef CPORT_RCV_DEBUG
 	dd_dev_info(dd, "cport_mctxt_fn() set CPORT OUTBOX_EMPTY\n");
 #endif
+	/*
+	 * if we do not contain the end of the message then we need to wait
+	 * until next mailbox
+	 */
+	if (!is_end) {
+		cport->incomplete_mctxt_msg_rx = msg;
+		dd_dev_info(dd, "%s: expecting continuation of %u\n",
+			    __func__, hdr.seq_no);
+		return;
+	}
+	cport->incomplete_mctxt_msg_rx = NULL;
 
 	/* responses don't require any more work here - just wakeup requester */
 	if (!hdr.is_req) {
@@ -598,6 +744,10 @@ static void cport_mctxt_fn(struct work_struct *work)
 	}
 	/* TODO: can we just process the CPORT request in this thread? */
 	msg->dd = dd;
+
+	/* reset mctxts for response parsing */
+	msg->mctxts_done = 0;
+
 	/* dispatch 'msg' request */
 	INIT_WORK(&msg->work, cport_req_fn);
 	/* don't care about locality */
@@ -647,24 +797,14 @@ void is_cport_int(struct hfi1_devdata *dd, unsigned int source)
  * API for handling notifications from CPORT
  */
 
-void *cport_resp_alloc(void *handle, int len)
-{
-	struct cport_work *msg = handle;
-
-	if (!msg || len <= 0 || len > CH_LEN_MAX)
-		return NULL;
-	msg->rsp.hdr.len = len + sizeof(msg->rsp.hdr);
-	return &msg->rsp.qw[1];
-}
-
 int cport_resp_set(void *handle, void *payload, int len)
 {
 	struct cport_work *msg = handle;
 
-	if (!msg || !payload || len <= 0 || len > CH_LEN_MAX)
+	if (!msg || !payload || len <= 0)
 		return -EINVAL;
-	msg->rsp.hdr.len = len + sizeof(msg->rsp.hdr);
-	memcpy(&msg->rsp.qw[1], payload, len);
+	msg->rsp->hdr.len = len + sizeof(msg->rsp->hdr);
+	memcpy(&msg->rsp->qw[1], payload, len);
 	return 0;
 }
 

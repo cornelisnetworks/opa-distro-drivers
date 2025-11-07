@@ -1407,6 +1407,8 @@ struct hfi1_cport {
 	struct xarray trap_xa;		/* handlers for MCTXT TRAPs */
 	struct hfi1_psc psc;		/* used only by TRAP128 */
 	struct timer_list lost_int_timer;
+	void *incomplete_mctxt_msg_rx;	/* when cport sends multi-packet msg */
+	void *incomplete_mctxt_msg_tx;	/* when driver send multi-packet msg */
 	cport_handler handlers[256];
 };
 
