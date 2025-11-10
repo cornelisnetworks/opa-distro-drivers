@@ -13836,11 +13836,21 @@ static bool hardware_pidx_available(struct hfi1_devdata *dd, int pidx)
 		return true;
 
 	/* dual port JKR has all ports available */
-	if (dd->pcidev->subsystem_device == PCI_SUBDEVICE_CN5000_DUAL_PORT)
+	if (dd->pcidev->subsystem_device == PCI_SUBDEVICE_CN5000_DUAL_PORT ||
+	    dd->pcidev->subsystem_device == PCI_SUBDEVICE_CN5000_DUAL_PORT_PS)
 		return true;
 
-	/* single port JKR only has port 2 available */
-	return pidx == 1;
+	/* port swapped single port JKR only uses the first port */
+	if (dd->pcidev->subsystem_device == PCI_SUBDEVICE_CN5000_SINGLE_PORT_PS &&
+	    pidx == 0)
+		return true;
+
+	/* single port JKR only uses the second port */
+	if (dd->pcidev->subsystem_device == PCI_DEVICE_ID_CORNELIS_CN5000 &&
+	    pidx == 1)
+		return true;
+
+	return false;
 }
 
 /*

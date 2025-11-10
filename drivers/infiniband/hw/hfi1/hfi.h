@@ -2710,6 +2710,8 @@ extern struct mutex hfi1_mutex;
 #define PCI_VENDOR_ID_CORNELIS 0x434e
 #define PCI_DEVICE_ID_CORNELIS_CN5000 0x0001
 #define PCI_SUBDEVICE_CN5000_DUAL_PORT 0x0002
+#define PCI_SUBDEVICE_CN5000_SINGLE_PORT_PS 0x0003 /* PS = Port Swap */
+#define PCI_SUBDEVICE_CN5000_DUAL_PORT_PS 0x0004
 
 /* create a ULL mask out of the given number of bits */
 #define MASK_ULL(bits) ((1ull << (bits)) - 1)
