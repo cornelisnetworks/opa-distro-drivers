@@ -524,11 +524,10 @@ static int iowait_sleep(
 	} else {
 		spin_unlock_irqrestore(&qp->s_lock, flags);
 		/*
-		 * Silently drop by faking success:
-		 * o drop the extra reference taken in hfi1_verbs_send_dma()
-		 * o return 0 ("success")
+		 * Return a unique error so the caller can identify the
+		 * unqueued case.
 		 */
-		hfi1_put_txreq(tx);
+		ret = -EIO;
 	}
 	return ret;
 eagain:
