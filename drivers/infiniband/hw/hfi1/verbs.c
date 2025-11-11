@@ -596,16 +596,18 @@ static void verbs_sdma_complete(
 	struct verbs_txreq *tx =
 		container_of(cookie, struct verbs_txreq, txreq);
 	struct rvt_qp *qp = tx->qp;
+	enum ib_wc_status ib_status = status == SDMA_TXREQ_S_OK ?
+					IB_WC_SUCCESS : IB_WC_GENERAL_ERR;
 
 	spin_lock(&qp->s_lock);
 	if (tx->wqe) {
-		rvt_send_complete(qp, tx->wqe, IB_WC_SUCCESS,
+		rvt_send_complete(qp, tx->wqe, ib_status,
 				  RVT_QP_LOCK_STATE_S);
 	} else if (qp->ibqp.qp_type == IB_QPT_RC) {
 		struct hfi1_opa_header *hdr;
 
 		hdr = &tx->phdr.hdr;
-		if (unlikely(status == SDMA_TXREQ_S_ABORTED))
+		if (unlikely(status != SDMA_TXREQ_S_OK))
 			hfi1_rc_verbs_aborted(qp, hdr);
 		hfi1_rc_send_complete(qp, hdr);
 	}
@@ -630,30 +632,6 @@ void hfi1_wait_kmem(struct rvt_qp *qp)
 		trace_hfi1_qpsleep(qp, RVT_S_WAIT_KMEM);
 		rvt_get_qp(qp);
 	}
-}
-
-static int wait_kmem(struct hfi1_ibdev *dev,
-		     struct rvt_qp *qp,
-		     struct hfi1_pkt_state *ps)
-{
-	unsigned long flags;
-	int ret = 0;
-
-	spin_lock_irqsave(&qp->s_lock, flags);
-	if (ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK) {
-		/* take a new txreq reference */
-		hfi1_get_txreq(ps->s_txreq);
-		write_seqlock(&dev->iowait_lock);
-		list_add_tail(&ps->s_txreq->txreq.list,
-			      &ps->wait->tx_head);
-		hfi1_wait_kmem(qp);
-		write_sequnlock(&dev->iowait_lock);
-		hfi1_qp_unbusy(qp, ps->wait);
-		ret = -EBUSY;
-	}
-	spin_unlock_irqrestore(&qp->s_lock, flags);
-
-	return ret;
 }
 
 /*
@@ -817,7 +795,6 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	u32 hdrwords = ps->s_txreq->hdr_dwords;
 	u32 len = ps->s_txreq->s_cur_size;
 	u32 plen;
-	struct hfi1_ibdev *dev = ps->dev;
 	struct hfi1_pportdata *ppd = ps->ppd;
 	struct hfi1_devdata *dd = ppd->dd;
 	struct verbs_txreq *tx;
@@ -873,8 +850,20 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		}
 		tx->wqe = qp->s_wqe;
 		ret = build_verbs_tx_desc(tx->sde, len, tx, ahg_info, pbc);
-		if (unlikely(ret))
+		if (unlikely(ret)) {
+			/*
+			 * Drop this transmit with an error.  Expect that
+			 * whatever caused the build error will occur again,
+			 * so do not attempt to retry.  If a retry is attempted,
+			 * then tx would need to be cleaned first - tx may not
+			 * be fully constructed.  tx will be cleaned when
+			 * deallocated.
+			 */
+			verbs_sdma_complete(&tx->txreq, SDMA_TXREQ_S_SENDERROR);
+			/* return 0 so the next transmit is attempted */
+			ret = 0;
 			goto bail_build;
+		}
 	}
 	/*
 	 * sdma_send_txreq() does not know about verbs_txreq and may transfer
@@ -916,18 +905,16 @@ bail_ecomm:
 		ret = 0;
 	} else {
 		/*
-		 * An unexpected error has occurred.  Drop the txreq.  Remove
-		 * the extra reference taken above.
+		 * An unexpected error has occurred.  Complete the tx with an
+		 * error.  The complete will remove the reference.  A call to
+		 * sdma_txclean() will occur when the structure is deallocated.
+		 *
+		 * Return 0 so the next transmit is attempted.
 		 */
-		hfi1_put_txreq(tx);
+		tx->txreq.complete(&tx->txreq, SDMA_TXREQ_S_SENDERROR);
+		ret = 0;
 	}
-	/* put ps's reference */
-	hfi1_put_txreq(tx);
-	ps->s_txreq = NULL;
-	return ret;
 bail_build:
-	/* wait_kmem() may take a reference to ps->s_txreq */
-	ret = wait_kmem(dev, qp, ps);
 	/* put ps's reference */
 	hfi1_put_txreq(ps->s_txreq);
 	ps->s_txreq = NULL;
