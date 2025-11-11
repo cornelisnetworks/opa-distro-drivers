@@ -996,6 +996,24 @@ static void verbs_pio_complete(void *arg, int code)
 		iowait_drain_wakeup(&priv->s_iowait);
 }
 
+static void hfi1_verbs_complete_tx(struct rvt_qp *qp,
+				   struct hfi1_pkt_state *ps,
+				   int wc_status)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&qp->s_lock, flags);
+	if (qp->s_wqe) {
+		rvt_send_complete(qp, qp->s_wqe, wc_status,
+				  RVT_QP_LOCK_STATE_S);
+	} else if (qp->ibqp.qp_type == IB_QPT_RC) {
+		if (unlikely(wc_status != IB_WC_SUCCESS))
+			hfi1_rc_verbs_aborted(qp, &ps->s_txreq->phdr.hdr);
+		hfi1_rc_send_complete(qp, &ps->s_txreq->phdr.hdr);
+	}
+	spin_unlock_irqrestore(&qp->s_lock, flags);
+}
+
 int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			u64 pbc)
 {
@@ -1009,7 +1027,6 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	struct hfi1_devdata *dd = ppd->dd;
 	u32 *hdr;
 	u8 sc5;
-	unsigned long flags = 0;
 	struct send_context *sc;
 	struct pio_buf *pbuf;
 	int wc_status = IB_WC_SUCCESS;
@@ -1085,22 +1102,25 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			 * go out to so just complete it with an error or else a
 			 * ULP or the core may be stuck waiting.
 			 */
-			hfi1_cdbg(
-				PIO,
-				"alloc failed. state not active, completing");
+			hfi1_cdbg(PIO, "alloc failed with error, completing");
 			wc_status = IB_WC_GENERAL_ERR;
 			goto pio_bail;
-		} else {
-			/*
-			 * This is a normal occurrence. The PIO buffs are full
-			 * up but we are still happily sending, well we could be
-			 * so lets continue to queue the request.
-			 */
-			hfi1_cdbg(PIO, "alloc failed. state active, queuing");
-			ret = pio_wait(qp, sc, ps, RVT_S_WAIT_PIO);
-			/* txreq may or may not be queued - done either way */
-			goto bail;
 		}
+
+		/*
+		 * This is a normal occurrence. The PIO buffers are all busy.
+		 * Queue the tx request.
+		 */
+		ret = pio_wait(qp, sc, ps, RVT_S_WAIT_PIO);
+		if (ret == 0) {
+			/* not able to queue - complete tx with an error */
+			wc_status = IB_WC_GENERAL_ERR;
+			hfi1_cdbg(PIO, "alloc failed, unable to queue, completing");
+			goto pio_bail;
+		}
+		/* tx is queued - return an error to stop processing */
+		hfi1_cdbg(PIO, "alloc failed, queued");
+		goto bail;
 	}
 
 	if (dwords == 0) {
@@ -1130,17 +1150,7 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	trace_pio_output_ibhdr(dd, &ps->s_txreq->phdr.hdr, ib_is_sc5(sc5), 0);
 
 pio_bail:
-	spin_lock_irqsave(&qp->s_lock, flags);
-	if (qp->s_wqe) {
-		rvt_send_complete(qp, qp->s_wqe, wc_status,
-				  RVT_QP_LOCK_STATE_S);
-	} else if (qp->ibqp.qp_type == IB_QPT_RC) {
-		if (unlikely(wc_status == IB_WC_GENERAL_ERR))
-			hfi1_rc_verbs_aborted(qp, &ps->s_txreq->phdr.hdr);
-		hfi1_rc_send_complete(qp, &ps->s_txreq->phdr.hdr);
-	}
-	spin_unlock_irqrestore(&qp->s_lock, flags);
-
+	hfi1_verbs_complete_tx(qp, ps, wc_status);
 	ret = 0;
 
 bail:
@@ -1352,6 +1362,10 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 	}
 	if (sr == dd->process_dma_send && iowait_pio_pending(&priv->s_iowait)) {
 		ret = pio_wait(qp, ps->s_txreq->psc, ps, HFI1_S_WAIT_PIO_DRAIN);
+		if (ret == 0) {
+			/* not able to queue - complete tx with an error */
+			hfi1_verbs_complete_tx(qp, ps, IB_WC_GENERAL_ERR);
+		}
 		/* queued or not, ps is done with s_txreq */
 		hfi1_put_txreq(ps->s_txreq);
 		ps->s_txreq = NULL;
