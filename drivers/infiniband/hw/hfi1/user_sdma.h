@@ -93,7 +93,6 @@ struct hfi1_user_sdma_pkt_q {
 	struct iowait busy;
 	enum pkt_q_sdma_state state;
 	wait_queue_head_t wait;
-	unsigned long unpinned;
 	struct pinning_state pinning_state;
 	atomic_t n_locked;
 };
