@@ -63,6 +63,10 @@ int sdma_yield = 1000;	/* how often to yield when in thrd intr handler */
 module_param_named(sdma_yield, sdma_yield, int, S_IWUSR | S_IRUGO);
 MODULE_PARM_DESC(sdma_yield, "How long to run threaded SDMA irq without yield, mS");
 
+int rcvwcb = -1;	/* RcvIportCtrl.RcvWcb setting */
+module_param(rcvwcb, int, S_IRUGO);
+MODULE_PARM_DESC(rcvwcb, "Receive DMA write coalesce boundary (0=64, 1=128, 2=256, 3=512), default: WFR=0, other=3");
+
 /* Other driver tunables */
 uint rcv_intr_dynamic = 1; /* enable dynamic mode for rcv int mitigation*/
 static ushort crc_14b_sideband = 1;
@@ -6726,6 +6730,8 @@ void handle_sma_message(struct work_struct *work)
 }
 
 /*
+ * Clear first, then set.  This allows for multi-bit fields to be set.
+ *
  * Performs same action on loopback RcvIportCtrl register if SRIOV.
  */
 static void adjust_rcvctrl(struct hfi1_pportdata *ppd, u64 add, u64 clear)
@@ -6736,14 +6742,14 @@ static void adjust_rcvctrl(struct hfi1_pportdata *ppd, u64 add, u64 clear)
 
 	spin_lock_irqsave(&dd->rcvctrl_lock, flags);
 	rcvctrl = read_iport_csr(dd, ppd->hw_pidx, dd->params->rcv_iport_ctrl_reg);
-	rcvctrl |= add;
 	rcvctrl &= ~clear;
+	rcvctrl |= add;
 	write_iport_csr(dd, ppd->hw_pidx, dd->params->rcv_iport_ctrl_reg, rcvctrl);
 	if (dd->is_sriov) {
 		rcvctrl = read_iport_csr(dd, loopback_pidx(ppd),
 					 dd->params->rcv_iport_ctrl_reg);
-		rcvctrl |= add;
 		rcvctrl &= ~clear;
+		rcvctrl |= add;
 		write_iport_csr(dd, loopback_pidx(ppd),
 				dd->params->rcv_iport_ctrl_reg, rcvctrl);
 	}
@@ -6758,6 +6764,17 @@ static inline void add_rcvctrl(struct hfi1_pportdata *ppd, u64 add)
 static inline void clear_rcvctrl(struct hfi1_pportdata *ppd, u64 clear)
 {
 	adjust_rcvctrl(ppd, 0, clear);
+}
+
+static void set_wcb(struct hfi1_pportdata *ppd, int wcb)
+{
+	u64 set;
+
+	/* reject anything out of range, fields are the same for all chips */
+	if ((wcb & JKR_RCV_IPORT_CTRL_RCV_WCB_MASK) != wcb)
+		return;
+	set = (u64)wcb << JKR_RCV_IPORT_CTRL_RCV_WCB_SHIFT;
+	adjust_rcvctrl(ppd, set, JKR_RCV_IPORT_CTRL_RCV_WCB_SMASK);
 }
 
 /*
@@ -15911,6 +15928,50 @@ done:
 	return ret;
 }
 
+/*
+ * Adjust RcvIportCtrl.RcvWcb, the write coalescing boundary for RX_DMA.
+ *
+ * Use the module parameter as a starting point.  Tune this setting to the
+ * largest size <= PCIe Max Payload Size (MPS).  It is invalid to have
+ * RcvWcb > MPS.
+ *
+ * It is expected that PCIe MPS is not adjusted after this function is called,
+ * both internally and externally.
+ */
+static void adjust_wcb(struct hfi1_devdata *dd)
+{
+	int mps = pcie_get_mps(dd->pcidev);
+	int local_wcb = rcvwcb;
+	int top;
+	int def;
+	int pidx;
+
+	/* WFR has a different default and range */
+	if (dd->params->chip_type == CHIP_WFR) {
+		def = 0;
+		top = 2;
+	} else {
+		def = 3;
+		top = 3;
+	}
+
+	/* force this instance of rcvwcb in the range 0..top, inclusive */
+	if (local_wcb < 0 || local_wcb > top)
+		local_wcb = def;
+	/* reduce local_wcb until it is <= MPS */
+	while (local_wcb != 0) {
+		int sz = 64 << local_wcb; /* convert to a size */
+
+		if (sz <= mps)
+			break;
+		local_wcb--;
+	}
+
+	/* wcb is required to be the same on all ports */
+	for (pidx = 0; pidx < dd->num_pports; pidx++)
+		set_wcb(&dd->pport[pidx], local_wcb);
+}
+
 static int init_rxe(struct hfi1_devdata *dd)
 {
 	u64 val;
@@ -15935,17 +15996,8 @@ static int init_rxe(struct hfi1_devdata *dd)
 	if (ret)
 		goto done;
 
-	/*
-	 * make sure RcvCtrl.RcvWcb <= PCIe Device Control
-	 * Register Max_Payload_Size (PCI_EXP_DEVCTL in Linux PCIe config
-	 * space, PciCfgCap2.MaxPayloadSize in HFI).  There is only one
-	 * invalid configuration: RcvCtrl.RcvWcb set to its max of 256 and
-	 * Max_PayLoad_Size set to its minimum of 128.
-	 *
-	 * Presently, RcvCtrl.RcvWcb is not modified from its default of 0
-	 * (64 bytes).  Max_Payload_Size is possibly modified upward in
-	 * tune_pcie_caps() which is called after this routine.
-	 */
+	/* set the DMA receive coalesce size */
+	adjust_wcb(dd);
 
 	for (i = 0; i < dd->num_pports; i++) {
 		struct hfi1_portrsrcs *pr = &dd->rsrcs.ppr[i];
