@@ -34,6 +34,7 @@ static bool sys_tid_invalidate(struct mmu_interval_notifier *mni,
 static bool sys_cover_invalidate(struct mmu_interval_notifier *mni,
 				 const struct mmu_notifier_range *range,
 				 unsigned long cur_seq);
+static void sys_unnotify(struct tid_user_buf *tbuf);
 
 /*
  * Still takes a tid_user_buf, not system_tid_user_buf since
@@ -329,12 +330,12 @@ static int sys_pin_pages(struct hfi1_filedata *fd, struct tid_user_buf *tbuf)
 {
 	struct system_tid_user_buf *sbuf =
 		container_of(tbuf, struct system_tid_user_buf, common);
+	int ret;
 
 	if (WARN_ON(fd->use_mn != tbuf->use_mn))
 		return -EINVAL;
 
 	if (tbuf->use_mn) {
-		int ret;
 
 		ret = mmu_interval_notifier_insert(&sbuf->notifier, current->mm, tbuf->vaddr,
 						   sbuf->npages * PAGE_SIZE, &tid_cover_ops);
@@ -343,7 +344,11 @@ static int sys_pin_pages(struct hfi1_filedata *fd, struct tid_user_buf *tbuf)
 		sbuf->mmu_seq = mmu_interval_read_begin(&sbuf->notifier);
 	}
 
-	return pin_rcv_pages(fd, sbuf);
+	ret = pin_rcv_pages(fd, sbuf);
+	if (ret <= 0 && tbuf->use_mn)
+		sys_unnotify(tbuf);
+
+	return ret;
 }
 
 static void sys_unpin_pages(struct hfi1_filedata *fd,
