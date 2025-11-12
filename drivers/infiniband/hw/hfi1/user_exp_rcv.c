@@ -379,8 +379,11 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 
 	pinned = tidbuf->ops->pin_pages(fd, tidbuf);
 	if (pinned <= 0) {
+		dd_dev_warn_ratelimited(dd,
+					"%s: Failed to pin %lu bytes (%d)\n",
+					__func__, tidbuf->length, pinned);
 		ret = (pinned < 0) ? pinned : -ENOSPC;
-		goto fail_unpin;
+		goto fail_free;
 	}
 
 	/* Cannot program TIDs for < EXP_TID_ADDR_SIZE pages */
@@ -589,6 +592,7 @@ fail_unpin:
 	tidbuf->ops->unnotify(tidbuf);
 	if (pinned > 0)
 		tidbuf->ops->unpin_pages(fd, tidbuf, 0, pinned);
+fail_free:
 	tidbuf->ops->free(tidbuf);
 	kfree(tidlist);
 	return ret;
