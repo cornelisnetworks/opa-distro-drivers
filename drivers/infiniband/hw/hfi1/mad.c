@@ -5215,7 +5215,7 @@ int cport_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len
 	memcpy(buf + MAD_9B_OFFSET, mad, size - MAD_9B_OFFSET);
 	/* XXX hard-code DETH.SrcQP=2 for firmware */
 	((struct ib_header *)buf)->u.oth.u.ud.deth[1] = cpu_to_be32(2);
-	ret = cport_send_notif(dd, CH_OP_MAD_9B, sb, buf, size);
+	ret = cport_send_notif(dd, CH_OP_MAD_9B, sb, buf, size, cport_adm_to * HZ);
 	kfree(buf);
 	return ret;
 }
