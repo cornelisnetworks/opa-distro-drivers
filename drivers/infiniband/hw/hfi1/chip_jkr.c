@@ -204,7 +204,8 @@ int jkr_mid_per_chip_init(struct hfi1_devdata *dd)
 	int ret;
 
 	dd->base_guid = 0xabcd;	/* on success, a valid value is set */
-	ret = cport_send_req(dd, CH_OP_WHO, 0, NULL, 0, (void **)&who, &resp_len, HZ);
+	ret = cport_send_req(dd, CH_OP_WHO, 0, NULL, 0, (void **)&who, &resp_len,
+			     cport_adm_to * HZ);
 	if (ret) {
 		dd_dev_err(dd, "CPORT who failed %d\n", ret);
 	} else if (resp_len == sizeof(*who)) {

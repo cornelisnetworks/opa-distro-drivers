@@ -536,7 +536,8 @@ int cport_read_temp(struct hfi1_devdata *dd, struct cport_temp *gen_temp)
 	gen_temp->qsfp1_valid = 0;
 	gen_temp->qsfp2_valid = 0;
 
-	ret = cport_send_req(dd, CH_OP_HOW, 0, NULL, 0, (void **)&how, &resp_len, HZ);
+	ret = cport_send_req(dd, CH_OP_HOW, 0, NULL, 0, (void **)&how, &resp_len,
+			     cport_adm_to * HZ);
 	if (ret) {
 		dd_dev_err(dd, "CPORT how failed %d\n", ret);
 		goto done;

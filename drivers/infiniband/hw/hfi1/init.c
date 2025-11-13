@@ -599,7 +599,7 @@ struct cport_trap_reg {
 };
 
 /* send, or resend, START message */
-static int cport_start(struct hfi1_devdata *dd)
+static int cport_start(struct hfi1_devdata *dd, int to_secs)
 {
 	struct cport_start_payload start = {0};
 	u64 *resp = NULL;
@@ -610,7 +610,7 @@ static int cport_start(struct hfi1_devdata *dd)
 	start.trap_ena = dd->cport->traps;
 
 	ret = cport_send_req(dd, CH_OP_START, 0, &start, sizeof(start),
-			     (void **)&resp, &resp_len, HZ);
+			     (void **)&resp, &resp_len, to_secs * HZ);
 	if (ret)
 		dd_dev_err(dd, "CPORT start failed %d\n", ret);
 	else if (resp_len)
@@ -652,7 +652,7 @@ int register_cport_trap(struct hfi1_devdata *dd, struct cport_trap_status traps,
 	trap_val.dw |= cur_traps.dw;
 	if (trap_val.dw != cur_traps.dw) {
 		dd->cport->traps = trap_val.traps;
-		ret = cport_start(dd);
+		ret = cport_start(dd, cport_adm_to);
 	}
 	return ret;
 }
@@ -683,7 +683,7 @@ int deregister_cport_trap(struct hfi1_devdata *dd, cport_trap_handler func)
 	cur_traps.traps = dd->cport->traps;
 	if (trap_val.dw != cur_traps.dw) {
 		dd->cport->traps = trap_val.traps;
-		cport_start(dd);
+		cport_start(dd, cport_adm_to);
 	}
 
 	return 0;
@@ -699,7 +699,7 @@ static void clearall_cport_trap(struct hfi1_devdata *dd)
 		return;
 
 	dd->cport->traps = no_traps;
-	cport_start(dd);
+	cport_start(dd, cport_adm_to);
 	cport_register_cb(dd, CH_OP_TRAP, CH_OP_TRAP, NULL);
 	xa_lock_irq(&dd->cport->trap_xa);
 	/* there should be none left, but make certain */
@@ -728,7 +728,8 @@ static int handle_cport_trap(struct hfi1_devdata *dd, u8 op, u8 sideband,
 
 	/* clear-down the traps we got */
 	repress.trap_sts = traps->trap_sts;
-	ret = cport_send_notif(dd, CH_OP_TRAP_REPRESS, 0, &repress, sizeof(repress));
+	ret = cport_send_notif(dd, CH_OP_TRAP_REPRESS, 0, &repress, sizeof(repress),
+			       cport_adm_to * HZ);
 	if (ret)
 		dd_dev_warn(dd, "CPORT TRAP_REPRESS failed: %d\n", ret);
 #ifdef CPORT_TRAP_DEBUG
@@ -745,25 +746,7 @@ static int handle_cport_trap(struct hfi1_devdata *dd, u8 op, u8 sideband,
 	return 0;
 }
 
-int start_cport(struct hfi1_devdata *dd)
-{
-	int ret;
-
-	ret = cport_init(dd);
-	if (ret || !dd->cport)
-		return ret;
-
-	cport_register_cb(dd, CH_OP_TRAP, CH_OP_TRAP, handle_cport_trap);
-
-	dd->cport->opts.bare_metal = 1;
-
-	ret = cport_start(dd);
-	if (ret)
-		cport_exit(dd);
-	return (ret > 0 ? -EIO : ret);
-}
-
-static void stop_cport(struct hfi1_devdata *dd)
+static void cport_stop(struct hfi1_devdata *dd)
 {
 	struct cport_stop_payload stop = {0};
 	u64 *resp = NULL;
@@ -774,7 +757,7 @@ static void stop_cport(struct hfi1_devdata *dd)
 		return;
 
 	ret = cport_send_req(dd, CH_OP_STOP, 0, &stop, sizeof(stop),
-			     (void **)&resp, &resp_len, HZ);
+			     (void **)&resp, &resp_len, cport_adm_to * HZ);
 	if (ret)
 		dd_dev_err(dd, "CPORT stop failed %d\n", ret);
 	else if (resp_len)
@@ -782,6 +765,39 @@ static void stop_cport(struct hfi1_devdata *dd)
 	else
 		dd_dev_info(dd, "CPORT stopped\n");
 	kfree(resp);
+}
+
+int start_cport(struct hfi1_devdata *dd)
+{
+	int ret;
+
+	ret = cport_init(dd);
+	if (ret || !dd->cport)
+		return ret;
+
+	/*
+	 * Do a STOP to ensure the device is properly cleaned up.
+	 * This may cause firmware to be unresponsive for awhile,
+	 * so increase the timeout for the subsequent START.
+	 */
+	cport_stop(dd);
+
+	cport_register_cb(dd, CH_OP_TRAP, CH_OP_TRAP, handle_cport_trap);
+
+	dd->cport->opts.bare_metal = 1;
+
+	ret = cport_start(dd, 3 * cport_adm_to);
+	if (ret)
+		cport_exit(dd);
+	return (ret > 0 ? -EIO : ret);
+}
+
+static void stop_cport(struct hfi1_devdata *dd)
+{
+	if (!dd->cport)
+		return;
+
+	cport_stop(dd);
 
 	cport_exit(dd);
 }
