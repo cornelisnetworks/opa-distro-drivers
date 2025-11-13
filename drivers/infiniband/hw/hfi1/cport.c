@@ -14,6 +14,14 @@
 #include "chip_jkr.h"
 #include "cport.h"
 
+uint cport_adm_to = 1;
+module_param_named(cport_adm_to, cport_adm_to, uint, 0644);
+MODULE_PARM_DESC(cport_adm_to, "cport admin msg timeout, seconds (0 = infinite)");
+
+static bool cport_mctxt_recovery = true;
+module_param_named(cport_mctxt_recovery, cport_mctxt_recovery, bool, 0644);
+MODULE_PARM_DESC(cport_mctxt_recovery, "Attempt recovery of MCTXT state");
+
 static void cport_send_req_fn(struct work_struct *work);
 static void cport_send_rsp_fn(struct work_struct *work);
 
@@ -411,7 +419,8 @@ int cport_send_req(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, i
 	return cport_send_comp(dd, msg, rsp_pld, rsp_len);
 }
 
-int cport_send_notif(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, int len)
+int cport_send_notif(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, int len,
+		     long timeout)
 {
 	struct cport_work *msg;
 	int ret;
@@ -423,6 +432,7 @@ int cport_send_notif(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload,
 	if (!msg)
 		return -ENOMEM;
 	msg->dd = dd;
+	msg->timeout = timeout;
 	ret = cwcopy(msg, payload, sizeof(union cport_header), len, true);
 	if (ret) {
 		cwput(msg);
@@ -952,6 +962,17 @@ int cport_init(struct hfi1_devdata *dd)
 
 	cport_register_cb(dd, CH_OP_PING, CH_OP_PING, echo_req);
 
+	if (cport_mctxt_recovery) {
+		u64 is, ie;
+		is = read_csr(dd, JKR_MCTXT_PF0_INT_STATUS);
+		ie = read_csr(dd, JKR_MCTXT_PF0_INT_ENABLE);
+		if (!(is & JKR_MCTXT_INT_OUTBOX_EMPTY) && ie) {
+			dd_dev_warn(dd, "recovering CPORT MCTXT state\n");
+			write_csr(dd, JKR_MCTXT_PF0_INT_ENABLE, 0);
+			write_csr(dd, JKR_MCTXT_PF0_INT_STATUS, JKR_MCTXT_INT_OUTBOX_EMPTY);
+		}
+	}
+
 #ifdef CONFIG_HFI_CPORT_POLLING
 	cport->poll_th = kthread_create_on_node(cport_poll, dd, dd->node, "cport_poll");
 	if (!cport->poll_th)
@@ -970,9 +991,10 @@ int cport_init(struct hfi1_devdata *dd)
 
 	/*
 	 * Must reset/resync sequence numbers as CPORT is strictly enforcing
-	 * sequence number order.
+	 * sequence number order. Use a timeout to allow easier cleanup should
+	 * init fail.
 	 */
-	cport_send_notif(dd, CH_OP_PING, 0, NULL, 0);
+	cport_send_notif(dd, CH_OP_PING, 0, NULL, 0, cport_adm_to * HZ);
 	return 0;
 
 err1:
