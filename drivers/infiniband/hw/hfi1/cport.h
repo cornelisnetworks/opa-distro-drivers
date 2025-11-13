@@ -10,6 +10,8 @@
  * "Public" software interfaces (inside driver only).
  */
 
+extern uint cport_adm_to;
+
 /*
  * Op-codes for requests (and associated responses).
  * CPORT firmware must have the same definitions.
@@ -192,13 +194,15 @@ int cport_send_req(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, i
  * CPORT Notification interface.
  *
  * A notification is defined as a request that has no response.
- * This is implicitly non-blocking.
+ * This is implicitly non-blocking. timeout is applied to the
+ * send wait for OUTBOX_EMPTY.
  *
  * The caller may dispose of 'payload' immediately on return.
  *
  * Returns 0 if the request was successfully queued.
  */
-int cport_send_notif(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, int len);
+int cport_send_notif(struct hfi1_devdata *dd, u8 op, u8 sideband, void *payload, int len,
+		     long timeout);
 
 /**************************************
  * API for notifications from CPORT
