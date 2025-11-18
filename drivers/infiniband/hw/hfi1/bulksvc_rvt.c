@@ -199,7 +199,7 @@ void verbs_bulksvc_enqueue(struct hfi1_qp_priv *qpriv, struct verbs_txreq *tx,
 	hfi1_get_txreq(tx);
 	tx->wqe = wqe; // wqe is what we really will need later
 
-	tx->bts_cmd = hfi1_bulksvc_verbs_cmd_rdma_create(qpriv->bulksvc_qp_info, tx);
+	tx->bts_cmd = hfi1_bulksvc_verbs_cmd_rdma_create(qpriv->bulksvc_qp_info, qp, tx);
 	if (!tx->bts_cmd) {
 		printk(KERN_ERR "vBTS failed to allocate cmd\n");
 		hfi1_put_txreq(tx);

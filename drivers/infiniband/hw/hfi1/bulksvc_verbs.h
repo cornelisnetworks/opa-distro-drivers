@@ -21,6 +21,7 @@ enum hfi1_bulksvc_verbs_write_flags {
 
 struct hfi1_bulksvc_verbs_rdma_cmd {
 	struct hfi1_bulksvc_qp_info *qp_info;
+	struct rvt_qp* qp;
 	struct verbs_txreq* txreq;
 };
 
@@ -123,6 +124,7 @@ void hfi1_bulksvc_qp_info_put(struct hfi1_bulksvc_qp_info *qp_info);
 
 struct hfi1_bulksvc_verbs_cmd * hfi1_bulksvc_verbs_cmd_rdma_create(
 				 struct hfi1_bulksvc_qp_info *qp_info,
+				 struct rvt_qp* qp,
 				 struct verbs_txreq *txreq);
 struct hfi1_bulksvc_verbs_cmd * hfi1_bulksvc_verbs_cmd_mr_reg_create(
 				 struct rvt_mregion *mr);
