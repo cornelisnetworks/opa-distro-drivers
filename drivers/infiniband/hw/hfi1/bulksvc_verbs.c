@@ -562,7 +562,7 @@ static void bulksvc_on_verbs_cmd_mr_dereg(struct hfi1_bulksvc * const svc,
 	if (rc != 0) {
 		if (rc == -EAGAIN || rc == -EBUSY) {
 			unsigned long flags;
-			pr_warn("%s:%d:%s() DMS busy, postponing MR(%d) dereg: %d\n",
+			dd_dev_dbg(svc->dd, "%s:%d:%s() DMS busy, postponing MR(%d) dereg: %d\n",
 		       __FILENAME__, __LINE__, __func__, mr_record->rkey, rc);
 			/* requeue */
 			spin_lock_irqsave(&svc->verbs_state.cmd_queue.lock, flags);
@@ -669,6 +669,7 @@ void hfi1_bulksvc_qp_info_put(struct hfi1_bulksvc_qp_info *qp_info)
 
 struct hfi1_bulksvc_verbs_cmd* hfi1_bulksvc_verbs_cmd_rdma_create(
 				 struct hfi1_bulksvc_qp_info *qp_info,
+				 struct rvt_qp* qp,
 				 struct verbs_txreq *txreq)
 {
 	struct hfi1_bulksvc_verbs_cmd *cmd = kzalloc(sizeof(*cmd), GFP_ATOMIC);
@@ -683,6 +684,8 @@ struct hfi1_bulksvc_verbs_cmd* hfi1_bulksvc_verbs_cmd_rdma_create(
 
 	hfi1_get_txreq(txreq);
 	cmd->rdma.txreq = txreq;
+	rvt_get_qp(qp);
+	cmd->rdma.qp = qp;
 	hfi1_bulksvc_qp_info_get(qp_info);
 	cmd->rdma.qp_info = qp_info;
 	return cmd;
@@ -737,6 +740,7 @@ static void hfi1_bulksvc_verbs_cmd_destroy(struct kref *refcount)
 	switch (cmd->op) {
 		case HFI1_BULKSVC_VERBS_CMD_OP_RDMA:
 			hfi1_bulksvc_qp_info_put(cmd->rdma.qp_info);
+			rvt_put_qp(cmd->rdma.qp);
 			hfi1_put_txreq(cmd->rdma.txreq);
 			break;
 		case HFI1_BULKSVC_VERBS_CMD_OP_MR_REG:
