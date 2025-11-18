@@ -774,6 +774,7 @@ void qp_priv_free(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 		mutex_lock(&priv->bulksvc_qp_info->verbs_state->qp_infos_lock);
 		list_del_init(&priv->bulksvc_qp_info->node);
 		mutex_unlock(&priv->bulksvc_qp_info->verbs_state->qp_infos_lock);
+		priv->bulksvc_qp_info->qp_priv = NULL;
 		hfi1_bulksvc_qp_info_put(priv->bulksvc_qp_info);
 		priv->bulksvc_qp_info = NULL;
 	}
