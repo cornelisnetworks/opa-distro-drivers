@@ -1330,7 +1330,7 @@ int hfi1_dms_unregister_access(struct hfi1_dms *dms, union hfi1_dms_key dms_key)
 	}
 
 	if (access->active_count > 0) {
-		dd_dev_warn(dms->dd, "Attempt to unregister access with dms_key %llu while it is active.\n", dms_key.value);
+		dd_dev_dbg(dms->dd, "Attempt to unregister access with dms_key %llu while it is active.\n", dms_key.value);
 		return -EBUSY;
 	}
 
