@@ -6332,21 +6332,30 @@ static int cport_umad_handler(struct hfi1_devdata *dd, u8 op, u8 sideband,
 	wc.vendor_err = OPA_WC_MCTXT_UMAD;
 	wc.qp = &qp0->ibqp;
 	wc.src_qp = 0;	/* MCTXT has no QP, so just use 0 */
-	if (op == CH_OP_UMAD_16B) {
-		pkey = hfi1_16B_get_pkey(payload);
+	/*
+	 * Check for firmware update MADs and always use pkey index 0.
+	 */
+	if (mad->base_version == OPA_MGMT_BASE_VERSION &&
+	    mad->mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE &&
+	    mad->attr_id == OPA_ATTRIB_ID_MCTP_OVER_MAD) {
+		wc.pkey_index = 0;
 	} else {
-		struct ib_header *hdr = payload;
-		struct ib_other_headers *ohdr;
-		u8 lnh = ib_get_lnh(hdr);
+		if (op == CH_OP_UMAD_16B) {
+			pkey = hfi1_16B_get_pkey(payload);
+		} else {
+			struct ib_header *hdr = payload;
+			struct ib_other_headers *ohdr;
+			u8 lnh = ib_get_lnh(hdr);
 
-		if (lnh == HFI1_LRH_GRH)
-			ohdr = &hdr->u.l.oth;
-		else
-			ohdr = &hdr->u.oth;
-		pkey = ib_bth_get_pkey(ohdr);
+			if (lnh == HFI1_LRH_GRH)
+				ohdr = &hdr->u.l.oth;
+			else
+				ohdr = &hdr->u.oth;
+			pkey = ib_bth_get_pkey(ohdr);
+		}
+		rc = hfi1_lookup_pkey_idx(&ppd->ibport_data, pkey); /* should never fail */
+		wc.pkey_index = rc < 0 ? 0 : rc;
 	}
-	rc = hfi1_lookup_pkey_idx(&ppd->ibport_data, pkey); /* should never fail */
-	wc.pkey_index = rc < 0 ? 0 : rc;
 	if (mad->mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE) {
 		/* TODO: should these just always come from the payload header? */
 		if (mad->base_version == OPA_MGMT_BASE_VERSION) {
