@@ -1037,7 +1037,7 @@ static struct rvt_qp *qp_from_number(struct hfi1_bulksvc *svc, u64 app_context)
 }
 
 static void bts_send_cq(struct rvt_qp *qp, u64 wr_id, u32 byte_len,
-			enum ib_wc_opcode wr_opcode, int wr_send_flags,
+			enum ib_wr_opcode wr_opcode, int wr_send_flags,
 			enum ib_wc_status status)
 {
 	unsigned long lflags;
@@ -1091,7 +1091,7 @@ struct direct_rdma_cmpl_cookie {
 	struct direct_rdma_sge_info* sge_info;
 	struct rvt_qp *qp;
 	u64 wr_id;
-	enum ib_wc_opcode wr_opcode;
+	enum ib_wr_opcode wr_opcode;
 	u32 byte_len;
 	int wr_send_flags;
 };
