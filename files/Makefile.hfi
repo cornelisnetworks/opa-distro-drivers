@@ -25,7 +25,7 @@ hfi1-y := affinity.o aspm.o  chip.o device.o driver.o efivar.o eprom.o \
 	pio_copy.o platform.o qp.o qsfp.o rc.o ruc.o sdma.o sysfs.o trace.o \
 	uc.o ud.o user_exp_rcv.o exp_rcv.o user_pages.o user_sdma.o verbs.o \
 	verbs_txreq.o vnic_main.o vnic_sdma.o tid_rdma.o opfn.o iowait.o \
-	ipoib_main.o ipoib_tx.o msix.o ipoib_rx.o netdev_rx.o \
+	ipoib_main.o ipoib_tx.o msix.o ipoib_rx.o netdev_rx.o sriov.o vf2pf.o \
 	chip_jkr.o chip_gen.o cport.o diag.o pinning.o tid_system.o uverbs.o \
 	bulksvc.o bulksvc_user.o dms.o mem_region.o bulksvc_rvt.o bulksvc_verbs.o
 hfi1-$(CONFIG_DEBUG_FS) += debugfs.o
