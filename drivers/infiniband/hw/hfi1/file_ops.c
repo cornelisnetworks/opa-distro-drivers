@@ -2267,7 +2267,8 @@ int create_bulksvc_queue(struct hfi1_devdata *dd, struct hfi1_bulksvc_user_info*
 
 	if (*num >= max_queues) {
 		rc = -ENOSPC;
-		dd_dev_info(dd, "tried to get bulksvc queue, but no more available\n");
+		dd_dev_dbg(dd, "failed to get bulksvc queue, exceeds max %u\n",
+			   max_queues);
 		goto out;
 	}
 
