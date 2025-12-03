@@ -37,6 +37,16 @@ struct hfi1_bulksvc_user_mr_access_record {
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 };
 
+union hfi1_bulksvc_userctxt_cmd_data {
+	u64 raw;
+};
+
+struct hfi1_bulksvc_userctxt_cmd_entry {
+	struct list_head node;
+	union hfi1_bulksvc_userctxt_cmd_data data;
+	struct hfi1_bulksvc_cmd cmd; // variably-sized
+};
+
 struct hfi1_bulksvc_user_info {
 	// Held by the user file handle, as well as active dms ops
 	struct kref refcount;
@@ -52,6 +62,10 @@ struct hfi1_bulksvc_user_info {
 	struct hfi1_bulksvc_queue_record
 		cmdq_records[BULKSVC_USER_MAX_NUM_CMDQS];
 	u8 num_cmdqs; /* number of cmdq records in use */
+
+	struct list_head userctxt_cmdq; // hfi1_bulksvc_userctxt_cmd_entry
+	struct mutex userctxt_cmdq_lock;
+
 	union hfi1_bulksvc_upd *completion_overflows; /* shared overflow queue for all completions */
 	struct hfi1_bulksvc_queue_record **completion_overflow_records; /* the completion queue record associated with a particular completion */
 	u32 completion_overflows_size; /* size of the array above */

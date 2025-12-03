@@ -93,7 +93,7 @@ void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info)
 	pr_debug("destroying user info\n");
 
 
-/** TODO: this will be fixed in a follow up patch, but for now 
+/** TODO: this will be fixed in a follow up patch, but for now
  * if we actually error here we can potentially "hang" the boxes
  * by printing 16k+ error lines. The boxes don't actually hang but we
  * can't reload the driver or do anything useful during that time
@@ -307,9 +307,11 @@ static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_ins
 static void user_mr_record_destroy_and_remove(struct kref* ref)
 {
 	struct hfi1_bulksvc_user_mr_record *mr_record = container_of(ref, struct hfi1_bulksvc_user_mr_record, refcount);
-	
-	hfi1_mem_region_put(mr_record->hfi1_mr);
 	list_del(&mr_record->list_entry);
+
+	hfi1_mem_region_put(mr_record->hfi1_mr);
+	mr_record->hfi1_mr = NULL;
+
 	kfree(mr_record);
 }
 
@@ -640,7 +642,7 @@ static void bulksvc_on_cmd_dma_access_once(struct hfi1_bulksvc * const svc,
 			.access_key = cmd->access_key,
 		}},
 		HFI1_DMS_ACCESS_TYPE_EPHEMERAL, NULL);
-		
+
 	if (rc < 0) {
 		cmpl.status = (u32)rc;
 		user_mr_record_put(mr_record);
@@ -726,9 +728,9 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 		goto exit;
 	}
 
-	struct hfi1_bulksvc_user_mr_access_record * access_record = 
+	struct hfi1_bulksvc_user_mr_access_record *access_record =
 		lookup_user_mr_access_record(user_info, cmd->access_key);
-	
+
 	if (access_record) {
 		pr_err("%s:%d:%s() access key %u already exists\n",
 		       __FILENAME__, __LINE__, __func__, cmd->access_key);
@@ -1054,8 +1056,14 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 static void bulksvc_on_user_cmd(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_user_info * const user_info,
-	struct hfi1_bulksvc_cmd const * const cmd)
+	struct hfi1_bulksvc_cmd const * const cmd,
+	union hfi1_bulksvc_userctxt_cmd_data *userctxt_data)
 {
+	if (WARN_ON(userctxt_data && userctxt_data->raw != 0)) {
+		dd_dev_err(svc->dd, "%s:%d:%s() unexpected userctxt_data for cmd op %u\n",
+			   __FILENAME__, __LINE__, __func__, cmd->hdr.op);
+		return;
+	}
 	switch (cmd->hdr.op) {
 	case HFI1_BULKSVC_CMD_REG_DMA_BUFFER:
 		bulksvc_on_cmd_reg_dma_buffer(svc, user_info,
@@ -1144,6 +1152,7 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 
 		// Round robin over all cmdqs for this user until we hit a limit
 		bool handled_any = true;
+		mutex_lock(&user_info->userctxt_cmdq_lock);
 		while (user_info->num_inflight < user_info->max_inflight && handled_any) {
 			handled_any = false;
 			for (int cmdq_index = 0; cmdq_index < user_info->num_cmdqs; ++cmdq_index) {
@@ -1151,7 +1160,7 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 					&user_info->cmdq_records[cmdq_index];
 				if (!rec->active)
 					continue;
-					
+
 				const u64 tail_cached = tails_cached[cmdq_index];
 				u64 head = atomic64_read(rec->head);
 				if (head >= tail_cached)
@@ -1162,13 +1171,13 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 					(rec->queue_buf_magic +
 					((head & rec->idx_mask) *
 					CACHELINE_SIZE));
-					
+
 				// If it's a command of more than one block, and the full command is not available, continue
 				if ((head + next_cmd->hdr.num_blocks) > tail_cached) {
 					continue;
 				}
-				
-				bulksvc_on_user_cmd(svc, user_info, next_cmd);
+
+				bulksvc_on_user_cmd(svc, user_info, next_cmd, NULL);
 				head += next_cmd->hdr.num_blocks;
 				atomic64_set_release(rec->head, head);
 
@@ -1176,7 +1185,24 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 				processed += 1;
 				handled_any = true;
 			}
+			if (!list_empty(&user_info->userctxt_cmdq)) {
+				struct hfi1_bulksvc_userctxt_cmd_entry *entry =
+					list_first_entry(&user_info->userctxt_cmdq,
+							 struct hfi1_bulksvc_userctxt_cmd_entry,
+							 node);
+
+				bulksvc_on_user_cmd(svc, user_info, &entry->cmd, &entry->data);
+
+				list_del(&entry->node);
+				kfree(entry);
+
+				user_info->num_inflight += 1;
+				processed += 1;
+				handled_any = true;
+			}
+
 		}
+		mutex_unlock(&user_info->userctxt_cmdq_lock);
 	}
 	mutex_unlock(&svc->user_info_lock);
 	return processed;

@@ -89,6 +89,7 @@
 #define HFI1_IOCTL_BULKSVC_GET_CMDQ _IOR(RDMA_IOCTL_MAGIC, 0xF2, struct hfi1_bulksvc_queue_info)
 #define HFI1_IOCTL_BULKSVC_CLIENT_INIT _IOR(RDMA_IOCTL_MAGIC, 0xF3, struct hfi1_bulksvc_client_init)
 #define HFI1_IOCTL_BULKSVC_DOORBELL			_IOW(RDMA_IOCTL_MAGIC, 0xF4, __u32)
+#define HFI1_IOCTL_BULKSVC_SYNCCMD			_IOW(RDMA_IOCTL_MAGIC, 0xF6, __u32)
 
 #ifdef NVIDIA_GPU_DIRECT
 #define HFI1_IOCTL_SDMA_CACHE_EVICT     _IOWR(RDMA_IOCTL_MAGIC, 0xFD, struct hfi1_sdma_gpu_cache_evict_params)
