@@ -421,6 +421,16 @@ struct hfi1_bulksvc_cmd_dma_access_disable {
 
 #define HFI1_BULKSVC_MR_FLAG_MODE_VADDR (1u << 0)
 
+enum hfi1_hfisvc_client_hmem_iface {
+	HFI1_HFISVC_HMEM_IFACE_SYSTEM	= 0,
+	HFI1_HFISVC_HMEM_IFACE_CUDA,
+	HFI1_HFISVC_HMEM_IFACE_ROCR,
+	HFI1_HFISVC_HMEM_IFACE_ZE,
+	HFI1_HFISVC_HMEM_IFACE_NEURON,
+	HFI1_HFISVC_HMEM_IFACE_SYNAPSEAI,
+	HFI1_HFISVC_HMEM_IFACE_DMABUF,
+};
+
 struct hfi1_bulksvc_cmd_mr_open {
 	__u64 app_context;
 	__u64 vaddr;
