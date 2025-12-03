@@ -9,7 +9,7 @@
 #include "dms.h"
 #include "bulksvc_user.h"
 #include "bulksvc_verbs.h"
-#include "linux/irqreturn.h"
+#include <linux/irqreturn.h>
 
 struct rsm_map_table;
 

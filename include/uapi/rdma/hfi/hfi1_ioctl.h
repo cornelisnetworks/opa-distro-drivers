@@ -382,7 +382,8 @@ enum hfi1_methods_dv2 {
 	HFI1_METHOD_BULKSVC_GET_CMPLQ = (1U << UVERBS_ID_NS_SHIFT),
 	HFI1_METHOD_BULKSVC_GET_CMDQ,
 	HFI1_METHOD_BULKSVC_CLIENT_INIT,
-	HFI1_METHOD_BULKSVC_DOORBELL
+	HFI1_METHOD_BULKSVC_DOORBELL,
+	HFI1_METHOD_BULKSVC_SYNCCMD,
 };
 
 /*
@@ -701,5 +702,10 @@ struct hfi1_bulksvc_client_init {
 	__u32 fast_doorbell_mmap_size;
 };
 #define HFI1_HFISVC_CLIENT_FLAG_DOORBELL (1u << 0)
+
+enum hfi1_bulksvc_synccmd {
+	/* no cmd */
+	HFI1_ATTR_BULKSVC_SYNCCMD = (1U << UVERBS_ID_NS_SHIFT),
+};
 
 #endif /* _LINUX__HFI1_IOCTL_H */
