@@ -47,6 +47,7 @@ if [[ $build_arg == "norpm" ]]; then
 	rm -rf $tmpdir
 
 	mkdir -p $tmpdir/drivers
+	mkdir -p $tmpdir/include
 
 	cp -r drivers/* $tmpdir/drivers
 	if [[ $? -ne 0 ]]; then
@@ -54,20 +55,27 @@ if [[ $build_arg == "norpm" ]]; then
 		exit 1
 	fi
 
+	cp -r include/* $tmpdir/include
+	if [[ $? -ne 0 ]]; then
+		echo "Failed to copy driver files"
+		exit 1
+	fi
+
 	cd $tmpdir/drivers/infiniband/sw/rdmavt
-	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) NOSTDINC_FLAGS="-nostdinc -I/tmp/tmpbuild/include -I/tmp/tmpbuild/include/uapi -isystem $(gcc -print-file-name=include)" modules
 	if [[ $? -ne 0 ]]; then
 		exit $?
 	fi
 
 	cd ../../hw/hfi1
-	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) NOSTDINC_FLAGS="-nostdinc -I/tmp/tmpbuild/include -I/tmp/tmpbuild/include/uapi -isystem $(gcc -print-file-name=include)" modules
 	if [[ $? -ne 0 ]]; then
 		exit $?
 	fi
 	echo ""
 	echo "RDMAVT ($tmpdir/drivers/infiniband/sw/rdmavt/rdmavt.ko) Srcversion:"
 	modinfo $tmpdir/drivers/infiniband/sw/rdmavt/rdmavt.ko | grep srcversion
+	echo ""
 	echo "HFI1 ($tmpdir/drivers/infiniband/hw/hfi1/hfi1.ko) Srcversion:"
 	modinfo $tmpdir/drivers/infiniband/hw/hfi1/hfi1.ko | grep srcversion
 
