@@ -86,6 +86,7 @@ static int create_bulksvc_cmdq(struct hfi1_filedata *fd, unsigned long arg,
 				 u32 len);
 static int ioctl_init_bulksvc_client(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 static int ioctl_bulksvc_doorbell(struct hfi1_filedata *fd, unsigned long arg, u32 len);
+static int ioctl_bulksvc_synccmd(struct hfi1_filedata *fd, unsigned long arg, u32 len);
 
 static const struct file_operations hfi1_file_ops = {
 	.owner = THIS_MODULE,
@@ -210,14 +211,15 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 		fd->bulksvc_user_info &&
 		(cmd == HFI1_IOCTL_BULKSVC_GET_CMDQ ||
 		 cmd == HFI1_IOCTL_BULKSVC_GET_CMPLQ ||
-		 cmd == HFI1_IOCTL_BULKSVC_DOORBELL);
+		 cmd == HFI1_IOCTL_BULKSVC_DOORBELL ||
+		 cmd == HFI1_IOCTL_BULKSVC_SYNCCMD);
 
-	bool const allowed_uctxt_context = 
+	bool const allowed_uctxt_context =
 		uctxt &&
 		(cmd != HFI1_IOCTL_BULKSVC_CLIENT_INIT &&
 		 cmd != HFI1_IOCTL_BULKSVC_GET_CMDQ &&
 		 cmd != HFI1_IOCTL_BULKSVC_GET_CMPLQ);
-		
+
 	if (!allowed_init_ioctl && !allowed_uctxt_context && !allowed_bulksvc_ioctl) {
 		return -EINVAL;
 	}
@@ -307,6 +309,9 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 		break;
 	case HFI1_IOCTL_BULKSVC_DOORBELL:
 		ret = ioctl_bulksvc_doorbell(fd, arg, _IOC_SIZE(cmd));
+		break;
+	case HFI1_IOCTL_BULKSVC_SYNCCMD:
+		ret = ioctl_bulksvc_synccmd(fd, arg, _IOC_SIZE(cmd));
 		break;
 	default:
 		return -EINVAL;
@@ -441,7 +446,7 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 	/*
 	 * vm_pgoff is used as a buffer selector cookie.  Always mmap from
 	 * the beginning.
-	 */ 
+	 */
 	vma->vm_pgoff = 0;
 	flags = vma->vm_flags;
 
@@ -676,7 +681,7 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 	}
 
 	vm_flags_reset(vma, flags);
-	mmap_cdbg(ctxt, subctxt, type, mapio, vmf, memaddr, memvirt, memdma, 
+	mmap_cdbg(ctxt, subctxt, type, mapio, vmf, memaddr, memvirt, memdma,
 		  memlen, vma);
 	if (vmf) {
 		vma->vm_pgoff = PFN_DOWN(memaddr);
@@ -783,11 +788,11 @@ int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type, struct vm_are
 			goto done;
 		}
 	}
-		
+
 	u8 const current_present = is_cmplq ?
 		info->num_cmplqs :
 		info->num_cmdqs;
-	
+
 	u8 const idx = qid;
 	if (idx >= current_present) {
 		mutex_unlock(&info->queue_records_lock);
@@ -836,7 +841,7 @@ int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type, struct vm_are
 	vma->vm_pgoff = PFN_DOWN(memaddr);
 	vma->vm_ops = &vm_ops;
 	ret = 0;
-	
+
 done:
 	return ret;
 }
@@ -2435,6 +2440,67 @@ static int ioctl_bulksvc_doorbell(struct hfi1_filedata *fd, unsigned long arg, u
 	}
 
 	hfi1_bulksvc_schedule(svc);
+
+	return 0;
+}
+
+static int ioctl_bulksvc_synccmd(struct hfi1_filedata *fd, unsigned long arg, u32 len)
+{
+	if (WARN_ON(!fd || !fd->dd || !fd->dd->bulksvc)) {
+		pr_err("Bulksvc not enabled\n");
+		return -EINVAL;
+	}
+
+	if (!fd->bulksvc_user_info) {
+		pr_err("Bulksvc client not initialized\n");
+		return -EALREADY;
+	}
+
+	struct hfi1_bulksvc_cmd * const __user cmd_user = (struct hfi1_bulksvc_cmd __user *)arg;
+
+	struct hfi1_bulksvc_cmd_hdr hdr;
+	if (copy_from_user(&hdr, &cmd_user->hdr, sizeof(hdr))) {
+		pr_err("failed to copy bulksvc cmd hdr from user\n");
+		return -EFAULT;
+	}
+
+	struct hfi1_bulksvc_cmd * cmd = kzalloc(hdr.num_blocks * CACHELINE_SIZE, GFP_KERNEL);
+
+	if (copy_from_user(cmd, cmd_user,
+			   hdr.num_blocks * CACHELINE_SIZE)) {
+		pr_err("failed to copy bulksvc cmd from user\n");
+		return -EFAULT;
+	}
+
+	int ret = do_bulksvc_synccmd(fd, cmd);
+
+	kfree(cmd);
+	return ret;
+}
+
+int do_bulksvc_synccmd(struct hfi1_filedata *fd,
+			struct hfi1_bulksvc_cmd *cmd)
+{
+	struct hfi1_bulksvc_userctxt_cmd_entry *entry;
+	u64 size_to_alloc = sizeof(*entry) - sizeof(entry->cmd) + (cmd->hdr.num_blocks * CACHELINE_SIZE);
+	entry = kzalloc(size_to_alloc, GFP_KERNEL);
+	if (!entry) {
+		pr_err("failed to allocate bulksvc synccmd entry\n");
+		return -ENOMEM;
+	}
+
+	memcpy(&entry->cmd, cmd, (cmd->hdr.num_blocks * CACHELINE_SIZE));
+
+	switch (entry->cmd.hdr.op) {
+	// Currently reject all opcodes passed as synccmds
+	default:
+		kfree(entry);
+		return -EINVAL;
+	}
+
+	mutex_lock(&fd->bulksvc_user_info->userctxt_cmdq_lock);
+	list_add_tail(&entry->node, &fd->bulksvc_user_info->userctxt_cmdq);
+	mutex_unlock(&fd->bulksvc_user_info->userctxt_cmdq_lock);
 
 	return 0;
 }
