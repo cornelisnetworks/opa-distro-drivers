@@ -32,6 +32,8 @@ int create_bulksvc_queue(struct hfi1_devdata* dd, struct hfi1_bulksvc_user_info*
 			 struct hfi1_bulksvc_queue_info ** output_info);
 int init_bulksvc_client(struct hfi1_filedata *fd,
 			struct hfi1_bulksvc_client_init *out);
+int do_bulksvc_synccmd(struct hfi1_filedata *fd,
+		       struct hfi1_bulksvc_cmd *cmd);
 int do_bulksvc_doorbell_mmap(struct hfi1_filedata *fd, struct vm_area_struct *vma);
 int do_bulksvc_mmap(struct hfi1_bulksvc_user_info* info, int type,
 		    struct vm_area_struct *vma);

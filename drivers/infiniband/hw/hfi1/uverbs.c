@@ -529,6 +529,42 @@ static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_DOORBELL)(
 	return 0;
 }
 
+static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_SYNCCMD)(struct uverbs_attr_bundle *attrs)
+{
+	struct hfi1_filedata *fd = fd_from_attrs(attrs);
+	int ret;
+
+	if (!fd->bulksvc_user_info || !fd->dd->bulksvc) {
+		return -EINVAL;
+	}
+
+	struct hfi1_bulksvc_cmd_hdr hdr;
+	ret = uverbs_copy_from_or_zero(&hdr, attrs, HFI1_ATTR_BULKSVC_SYNCCMD);
+	if (ret != 0) {
+		pr_err("failed to copy bulksvc cmd hdr from user, rc %d\n", ret);
+		return ret;
+	}
+
+	struct hfi1_bulksvc_cmd *cmd = kzalloc(hdr.num_blocks * CACHELINE_SIZE, GFP_KERNEL);
+	if (!cmd) {
+		pr_err("failed to allocate bulksvc synccmd\n");
+		return -ENOMEM;
+	}
+
+	ret = _uverbs_copy_from_or_zero(cmd, attrs, HFI1_ATTR_BULKSVC_SYNCCMD,
+				hdr.num_blocks * CACHELINE_SIZE);
+	if (ret != 0) {
+		pr_err("failed to copy bulksvc cmd from user, rc %d, \n", ret);
+		kfree(cmd);
+		return ret;
+	}
+
+	ret =  do_bulksvc_synccmd(fd, cmd);
+
+	kfree(cmd);
+	return ret;
+}
+
 
 
 DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_ASSIGN_CTXT,
@@ -649,6 +685,13 @@ DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_BULKSVC_DOORBELL,
 	/* no rsp */
 	);
 
+DECLARE_UVERBS_NAMED_METHOD(HFI1_METHOD_BULKSVC_SYNCCMD,
+	/* no rsp */
+	UVERBS_ATTR_PTR_IN(HFI1_ATTR_BULKSVC_SYNCCMD,
+			    UVERBS_ATTR_MIN_SIZE(sizeof(struct hfi1_bulksvc_cmd_hdr)),
+			    UA_MANDATORY),
+	);
+
 DECLARE_UVERBS_GLOBAL_METHODS(HFI1_OBJECT_DV0,
 	&UVERBS_METHOD(HFI1_METHOD_ASSIGN_CTXT),
 	&UVERBS_METHOD(HFI1_METHOD_CTXT_INFO),
@@ -671,7 +714,8 @@ DECLARE_UVERBS_GLOBAL_METHODS(HFI1_OBJECT_DV2,
 	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_GET_CMPLQ),
 	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_GET_CMDQ),
 	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_CLIENT_INIT),
-	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_DOORBELL));
+	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_DOORBELL),
+	&UVERBS_METHOD(HFI1_METHOD_BULKSVC_SYNCCMD));
 
 const struct uapi_definition hfi1_ib_defs[] = {
 	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(HFI1_OBJECT_DV0),
