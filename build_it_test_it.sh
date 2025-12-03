@@ -15,12 +15,13 @@ test_arg=
 while [[ $# -gt 0 ]] ; do
 	case $1 in
 	nobuild) build_arg=$1 ;;
+	norpm) build_arg=$1 ;;
 	nvidia) use_nvidia=y ;;
 	amd) use_amd=y ;;
 	test|notest) test_arg=$1 ;;
 	*)
 		echo "Unrecognized argument \"$1\"" >&2
-		echo "Usage: $0 [nobuild] [nvidia] [amd] [test|notest]" >&2
+		echo "Usage: $0 [nobuild]|[norpm] [nvidia]|[amd] [test|notest]" >&2
 		exit 2
 		;;
 	esac
@@ -31,6 +32,49 @@ sdir=$PWD
 tmpdir="/tmp/tmpbuild"
 
 export MVERSION="dev-build"
+
+if [[ $build_arg == "norpm" ]]; then
+	if [[ $use_nvidia = y ]] ; then
+		echo "GPU builds not supported in norpm mode"
+		exit 1
+	fi
+
+	if [[ $use_amd = y ]] ; then
+		echo "GPU builds not supported in norpm mode"
+		exit 1
+	fi
+
+	rm -rf $tmpdir
+
+	mkdir -p $tmpdir/drivers
+
+	cp -r drivers/* $tmpdir/drivers
+	if [[ $? -ne 0 ]]; then
+		echo "Failed to copy driver files"
+		exit 1
+	fi
+
+	cd $tmpdir/drivers/infiniband/sw/rdmavt
+	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+	if [[ $? -ne 0 ]]; then
+		exit $?
+	fi
+
+	cd ../../hw/hfi1
+	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+	if [[ $? -ne 0 ]]; then
+		exit $?
+	fi
+	echo ""
+	echo "RDMAVT ($tmpdir/drivers/infiniband/sw/rdmavt/rdmavt.ko) Srcversion:"
+	modinfo $tmpdir/drivers/infiniband/sw/rdmavt/rdmavt.ko | grep srcversion
+	echo "HFI1 ($tmpdir/drivers/infiniband/hw/hfi1/hfi1.ko) Srcversion:"
+	modinfo $tmpdir/drivers/infiniband/hw/hfi1/hfi1.ko | grep srcversion
+
+
+	exit 0
+fi
+
 
 if [[ $build_arg != "nobuild" ]]; then
 	rm -rf $tmpdir
