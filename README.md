@@ -15,3 +15,8 @@ support.
 Check out the branch which corresponds to your distro above. This "master"
 branch contains no useful code and is merely a place we hang scripts/build
 helpers and this README.
+
+To do a quick in-place compile of the .ko file against the running kernel
+simply change to the hfi1 or rdmavt src dir and run:
+
+make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
