@@ -583,10 +583,10 @@ void hfi1_dms_impl_tracker_block_free(struct hfi1_dms *dms);
 int hfi1_dms_impl_ahg_header_block_alloc(struct hfi1_dms *dms);
 void hfi1_dms_impl_ahg_header_block_free(struct hfi1_dms *dms);
 
-int hfi1_dms_access_block_new(struct hfi1_dms *dms);
-struct hfi1_dms_access * hfi1_dms_access_freelist_pop(struct hfi1_dms *dms);
+static int hfi1_dms_access_block_new(struct hfi1_dms *dms);
+static struct hfi1_dms_access * hfi1_dms_access_freelist_pop(struct hfi1_dms *dms);
 
-struct hfi1_dms_sdma_tracker * _sdma_tracker_new(struct hfi1_dms *dms, hfi1_dms_sdma_inject_fn inject,
+static struct hfi1_dms_sdma_tracker * _sdma_tracker_new(struct hfi1_dms *dms, hfi1_dms_sdma_inject_fn inject,
 		struct hfi1_dms_sdma_info const *info, u64 xfer_bytes);
 
 union hfi1_dms_tracker * hfi1_dms_impl_tracker_new(struct hfi1_dms *dms, hfi1_dms_rift_key_t local_rift_key,
@@ -655,7 +655,7 @@ static void _noop_handle_packet(struct hfi1_packet *packet);
 int hfi1_dms_impl_handle_data_request_packet(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 void hfi1_dms_impl_handle_ack(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr, enum hfi1_dms_msg_type const type);
 
-void _order_domain_continue_data_request(struct hfi1_dms *dms, struct hfi1_dms_order_domain *domain);
+static void _order_domain_continue_data_request(struct hfi1_dms *dms, struct hfi1_dms_order_domain *domain);
 void hfi1_dms_handle_data_start_ordered(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 void hfi1_dms_handle_data(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr);
 
@@ -690,17 +690,17 @@ static enum hfi1_dms_rift_err _rift_key_error(hfi1_dms_rift_key_t const key);
 static enum hfi1_dms_xfer_type _rift_key_type_opposite(hfi1_dms_rift_key_t const key);
 
 void _rift_init(struct hfi1_dms_rift * rift);
-union hfi1_dms_tracker * _rift_search(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const remote_rift_key);
+static union hfi1_dms_tracker * _rift_search(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const remote_rift_key);
 bool _rift_available(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s);
-int _rift_reserve(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, hfi1_dms_rift_key_t *key);
-void _rift_assign(struct hfi1_dms_rift *rift, union hfi1_dms_tracker *tracker, hfi1_dms_rift_key_t const key);
-union hfi1_dms_tracker * _rift_lookup(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key);
-void _rift_release(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key);
-void _rift_cancel(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key);
-void _rift_waitlist_add(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, struct hfi1_dms_dlist_element * waiter);
-struct hfi1_dms_dlist_element * _rift_waitlist_pop(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t);
-struct hfi1_dms_dlist_element * _rift_waitlist_peek(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t);
-bool _rift_allocate(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, union hfi1_dms_tracker *tracker);
+static int _rift_reserve(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, hfi1_dms_rift_key_t *key);
+static void _rift_assign(struct hfi1_dms_rift *rift, union hfi1_dms_tracker *tracker, hfi1_dms_rift_key_t const key);
+static union hfi1_dms_tracker * _rift_lookup(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key);
+static void _rift_release(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key);
+static void _rift_cancel(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key);
+static void _rift_waitlist_add(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, struct hfi1_dms_dlist_element * waiter);
+static struct hfi1_dms_dlist_element * _rift_waitlist_pop(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t);
+static struct hfi1_dms_dlist_element * _rift_waitlist_peek(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t);
+static bool _rift_allocate(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, union hfi1_dms_tracker *tracker);
 
 void _ring_init(struct hfi1_dms_ring *ring, u32 arr_size_lg2, u32 max_size);
 
@@ -728,15 +728,15 @@ void _order_domain_free(struct hfi1_dms *dms, struct hfi1_dms_order_domain *doma
 struct hfi1_dms_order_domain * _order_domain_create(struct hfi1_dms *dms, u64 const key);
 void _order_domain_rb_remove(struct hfi1_dms *dms, struct hfi1_dms_order_domain *domain);
 
-struct hfi1_dms_sdma_tracker * _sdma_waiters_pop(struct hfi1_dms_sdma_waiters *sdma_waiters);
+static struct hfi1_dms_sdma_tracker * _sdma_waiters_pop(struct hfi1_dms_sdma_waiters *sdma_waiters);
 
-struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_pop(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
-struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_peek(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
-struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_next(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
-void _sdma_engine_waitlist_append(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, struct hfi1_dms_sdma_tracker * waiter);
-int _sdma_engine_waitlist_add(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, hfi1_dms_sdma_inject_fn inject, struct hfi1_dms_sdma_info const *info, u64 xfer_bytes);
-void _sdma_engine_waitlist_poll(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
-void _sdma_engine_waitlist_poll_all(struct hfi1_dms *dms);
+static struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_pop(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
+static struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_peek(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
+static struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_next(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
+static void _sdma_engine_waitlist_append(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, struct hfi1_dms_sdma_tracker * waiter);
+static int _sdma_engine_waitlist_add(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, hfi1_dms_sdma_inject_fn inject, struct hfi1_dms_sdma_info const *info, u64 xfer_bytes);
+static void _sdma_engine_waitlist_poll(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx);
+static void _sdma_engine_waitlist_poll_all(struct hfi1_dms *dms);
 
 static void _pio_waitlist_initialize(struct hfi1_dms *dms);
 static void _pio_waitlist_finalize(struct hfi1_dms *dms);
@@ -744,16 +744,16 @@ static void _pio_waitlist_finalize(struct hfi1_dms *dms);
 int _inject_cmd_pio(struct hfi1_dms *dms, union hfi1_dms_proto_cmd *cmd);
 int _inject_cmd_sdma(struct hfi1_dms *dms, union hfi1_dms_proto_cmd * cmd, enum hfi1_dms_sdma_engine_idx const engine_idx);
 
-union hfi1_dms_cmd_data_request hfi1_dms_cmd_data_request_make(struct hfi1_dms *dms, u32 tid_info, u32 sbuf_offset,
+static union hfi1_dms_cmd_data_request hfi1_dms_cmd_data_request_make(struct hfi1_dms *dms, u32 tid_info, u32 sbuf_offset,
 		hfi1_dms_rift_key_t tx_rift_key, u32 src_lid, u32 read_size_qw, u8 head_misalignment, u8 tail_misalignment);
 
-void hfi1_dms_impl_data_packet_header_make(struct hfi1_dms *dms, union hfi1_dms_proto_cmd_data *cmd, u32 nbytes, u32 dlid, u8 rx, u32 tid_info, hfi1_dms_rift_key_t tx_rift_key,
+static void hfi1_dms_impl_data_packet_header_make(struct hfi1_dms *dms, union hfi1_dms_proto_cmd_data *cmd, u32 nbytes, u32 dlid, u8 rx, u32 tid_info, hfi1_dms_rift_key_t tx_rift_key,
 		u64 head, u64 tail, enum hfi1_dms_sdma_type sdma_type);
 
-int _dms_rx_rift_continue_write_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker);
-int _dms_tx_rift_continue_read_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker);
-int _dms_tx_rift_continue_write_data(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker);
-int _dms_rx_rift_continue_read_data(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker);
+static int _dms_rx_rift_continue_write_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker);
+static int _dms_tx_rift_continue_read_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker);
+static int _dms_tx_rift_continue_write_data(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker);
+static int _dms_rx_rift_continue_read_data(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker);
 
 /** For now just use the same functions
  * but TODO: make these receive type specific
@@ -1027,7 +1027,7 @@ union hfi1_dms_tracker * _order_domain_head(struct hfi1_dms *dms, struct hfi1_dm
 	return _rift_lookup(&dms->rift, _rift_keyring_head(&domain->sdma.wait));
 }
 
-bool _order_domain_front(struct hfi1_dms_order_domain *domain, hfi1_dms_rift_key_t const rift_key)
+static bool _order_domain_front(struct hfi1_dms_order_domain *domain, hfi1_dms_rift_key_t const rift_key)
 {
 	return (_rift_keyring_head(&domain->sdma.wait).value == rift_key.value);
 }
@@ -1229,7 +1229,7 @@ void _order_domain_rb_remove(struct hfi1_dms *dms, struct hfi1_dms_order_domain 
 	_order_domain_free(dms, domain);
 }
 
-struct hfi1_dms_client_state * hfi1_dms_client_rbtree_search(struct hfi1_dms *dms, u32 client_key)
+static struct hfi1_dms_client_state * hfi1_dms_client_rbtree_search(struct hfi1_dms *dms, u32 client_key)
 {
 	struct rb_root *root = &dms->client_rbtree;
 	struct rb_node *node = root->rb_node;
@@ -1249,7 +1249,7 @@ struct hfi1_dms_client_state * hfi1_dms_client_rbtree_search(struct hfi1_dms *dm
 	return NULL;
 }
 
-int hfi1_dms_client_rbtree_insert(struct hfi1_dms *dms, u32 client_key, struct hfi1_dms_client_state * client)
+static int hfi1_dms_client_rbtree_insert(struct hfi1_dms *dms, u32 client_key, struct hfi1_dms_client_state * client)
 {
 	struct rb_root *root = &dms->client_rbtree;
 	struct rb_node **new = &(root->rb_node), *parent = NULL;
@@ -1275,7 +1275,7 @@ int hfi1_dms_client_rbtree_insert(struct hfi1_dms *dms, u32 client_key, struct h
 	return 0;
  }
 
-void hfi1_dms_client_rbtree_remove(struct hfi1_dms *dms, struct hfi1_dms_client_state *client)
+static void hfi1_dms_client_rbtree_remove(struct hfi1_dms *dms, struct hfi1_dms_client_state *client)
 {
 	/* this and insert should have locking, or some garauntee on serialization */
 	rb_erase(&client->node, &dms->client_rbtree);
@@ -1310,7 +1310,7 @@ int hfi1_dms_create_client_key(struct hfi1_dms *dms, u32 client_key)
 	return 0;
 }
 
-struct hfi1_dms_access * hfi1_dms_access_rbtree_search(struct hfi1_dms_client_state *client, u32 access_key)
+static struct hfi1_dms_access * hfi1_dms_access_rbtree_search(struct hfi1_dms_client_state *client, u32 access_key)
 {
 	struct rb_root *root = &client->access.rbt;
 	struct rb_node *node = root->rb_node;
@@ -1330,7 +1330,7 @@ struct hfi1_dms_access * hfi1_dms_access_rbtree_search(struct hfi1_dms_client_st
 	return NULL;
 }
 
-int hfi1_dms_access_rbtree_insert(struct hfi1_dms_client_state *client, u32 access_key, struct hfi1_dms_access *access)
+static int hfi1_dms_access_rbtree_insert(struct hfi1_dms_client_state *client, u32 access_key, struct hfi1_dms_access *access)
 {
 	struct rb_root *root = &client->access.rbt;
 	struct rb_node **new = &(root->rb_node), *parent = NULL;
@@ -1356,13 +1356,13 @@ int hfi1_dms_access_rbtree_insert(struct hfi1_dms_client_state *client, u32 acce
 	return 0;
 }
 
- void hfi1_dms_access_freelist_push(struct hfi1_dms *dms, struct hfi1_dms_access *access)
+static void hfi1_dms_access_freelist_push(struct hfi1_dms *dms, struct hfi1_dms_access *access)
 {
 	// PRE - not active ...
 	hfi1_dms_impl_dlist_push(&dms->access.freelist, &access->element);
 }
 
-struct hfi1_dms_access *hfi1_dms_access_freelist_pop(struct hfi1_dms *dms)
+static struct hfi1_dms_access *hfi1_dms_access_freelist_pop(struct hfi1_dms *dms)
 {
 	struct hfi1_dms_dlist_element * element;
 	element = hfi1_dms_impl_dlist_pop(&dms->access.freelist);
@@ -1372,7 +1372,7 @@ struct hfi1_dms_access *hfi1_dms_access_freelist_pop(struct hfi1_dms *dms)
 	return container_of(element, struct hfi1_dms_access, element);
 }
 
-int hfi1_dms_access_block_new(struct hfi1_dms *dms)
+static int hfi1_dms_access_block_new(struct hfi1_dms *dms)
 {
 	int i;
 	// allocate a bunch more
@@ -1387,7 +1387,7 @@ int hfi1_dms_access_block_new(struct hfi1_dms *dms)
 	return 0;
 }
 
-struct hfi1_dms_access * hfi1_dms_access_new(struct hfi1_dms *dms)
+static struct hfi1_dms_access * hfi1_dms_access_new(struct hfi1_dms *dms)
 {
 	struct hfi1_dms_access *access;
 
@@ -1407,7 +1407,7 @@ struct hfi1_dms_access * hfi1_dms_access_new(struct hfi1_dms *dms)
 	return access;
 }
 
-int hfi1_dms_access_assign(struct hfi1_dms *dms, union hfi1_dms_key dms_key, struct hfi1_dms_access *access)
+static int hfi1_dms_access_assign(struct hfi1_dms *dms, union hfi1_dms_key dms_key, struct hfi1_dms_access *access)
 {
 	u64 const client_key = dms_key.client;
 	u64 const access_key = dms_key.access;
@@ -1454,7 +1454,7 @@ void hfi1_dms_release_client_key(struct hfi1_dms *dms, u32 client_key)
 	// consider decrementing last_client_key
 }
 
-int hfi1_dms_access_remove(struct hfi1_dms *dms, struct hfi1_dms_access * access)
+static int hfi1_dms_access_remove(struct hfi1_dms *dms, struct hfi1_dms_access * access)
 {
 	// FIXME - There must be a faster/better way to remove access from the rbtree since we already have pointers to it ....
 
@@ -1480,7 +1480,7 @@ int hfi1_dms_access_remove(struct hfi1_dms *dms, struct hfi1_dms_access * access
 	return 0;
 }
 
-struct hfi1_dms_access * hfi1_dms_access_lookup(struct hfi1_dms *dms, union hfi1_dms_key dms_key, struct hfi1_dms_client_state **client_out)
+static struct hfi1_dms_access * hfi1_dms_access_lookup(struct hfi1_dms *dms, union hfi1_dms_key dms_key, struct hfi1_dms_client_state **client_out)
 {
 	WARN_ON(client_out == NULL);
 	struct hfi1_dms_access * access = NULL;
@@ -1522,7 +1522,7 @@ void hfi1_dms_access_completion_fn_noop(union hfi1_dms_completion_cookie *cookie
 	(void) status;
 }
 
-void hfi1_dms_impl_access_initialize(struct hfi1_dms_access *access, enum hfi1_dms_access_type access_type, struct hfi1_dms_mr *mr, u64 offset, u32 size, union hfi1_dms_key dms_key, struct hfi1_dms_access_completion const *completion)
+static void hfi1_dms_impl_access_initialize(struct hfi1_dms_access *access, enum hfi1_dms_access_type access_type, struct hfi1_dms_mr *mr, u64 offset, u32 size, union hfi1_dms_key dms_key, struct hfi1_dms_access_completion const *completion)
 {
 	access->node = (struct rb_node){ 0 };
 	access->element = (struct hfi1_dms_dlist_element){ 0 };
@@ -1602,7 +1602,7 @@ int hfi1_dms_unregister_access(struct hfi1_dms *dms, union hfi1_dms_key dms_key)
 	return 0;
 }
 
-int access_xfer_begin(struct hfi1_dms *dms, struct hfi1_dms_access * access)
+static int access_xfer_begin(struct hfi1_dms *dms, struct hfi1_dms_access * access)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!access);
@@ -1615,7 +1615,7 @@ int access_xfer_begin(struct hfi1_dms *dms, struct hfi1_dms_access * access)
 	return 0;
 }
 
-void access_xfer_end(struct hfi1_dms *dms, struct hfi1_dms_access * access, u16 flags, u64 imm_data, int status)
+static void access_xfer_end(struct hfi1_dms *dms, struct hfi1_dms_access * access, u16 flags, u64 imm_data, int status)
 {
 	int ret;
 
@@ -1635,15 +1635,7 @@ void access_xfer_end(struct hfi1_dms *dms, struct hfi1_dms_access * access, u16 
 	}
 }
 
-void access_xfer_cancel(struct hfi1_dms *dms, struct hfi1_dms_access * access) {
-	DMS_BUG_ON(!dms);
-	DMS_BUG_ON(!access);
-	DMS_BUG_ON(access->active_count == 0);
-
-	access->active_count -= 1;
-}
-
-void _tracker_timestamp_init(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker)
+static void _tracker_timestamp_init(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tracker);
@@ -1653,7 +1645,7 @@ void _tracker_timestamp_init(struct hfi1_dms *dms, union hfi1_dms_tracker *track
 	tracker->hdr.remote_status_pending = false;
 }
 
-void _tracker_timestamp_first(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker)
+static void _tracker_timestamp_first(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tracker);
@@ -1661,7 +1653,7 @@ void _tracker_timestamp_first(struct hfi1_dms *dms, union hfi1_dms_tracker *trac
 	tracker->hdr.last_activity = dms->now;
 }
 
-void _tracker_timestamp_update(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker)
+static void _tracker_timestamp_update(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tracker);
@@ -1714,7 +1706,7 @@ bool _rift_key_side_tx(hfi1_dms_rift_key_t const key)
 	return !_rift_key_side_rx(key);
 }
 
-enum hfi1_dms_xfer_side _rift_key_side(hfi1_dms_rift_key_t const key)
+static enum hfi1_dms_xfer_side _rift_key_side(hfi1_dms_rift_key_t const key)
 {
 	return _rift_key_side_rx(key) ? HFI1_DMS_XFER_SIDE_RX : HFI1_DMS_XFER_SIDE_TX;
 }
@@ -1771,7 +1763,7 @@ void _rift_init(struct hfi1_dms_rift * rift)
 	}
 }
 
-union hfi1_dms_tracker * _rift_search(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const remote_rift_key)
+static union hfi1_dms_tracker * _rift_search(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const remote_rift_key)
 {
 	// search the local rift for a local tracker that is paired with the remote tracker
 	// with the specified remote rift key.
@@ -1806,7 +1798,7 @@ bool _rift_available(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t
 	return (rift->type[t].side[s].stack_top > 0);
 }
 
-int _rift_reserve(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, hfi1_dms_rift_key_t *key)
+static int _rift_reserve(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, hfi1_dms_rift_key_t *key)
 {
 	DMS_BUG_ON(!rift);
 	DMS_BUG_ON(!key);
@@ -1818,7 +1810,7 @@ int _rift_reserve(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, e
 	return 0;
 }
 
-void _rift_assign(struct hfi1_dms_rift *rift, union hfi1_dms_tracker *tracker, hfi1_dms_rift_key_t const key)
+static void _rift_assign(struct hfi1_dms_rift *rift, union hfi1_dms_tracker *tracker, hfi1_dms_rift_key_t const key)
 {
 	static u16 const sz = HFI1_DMS_ARRAY_SIZE(rift->arr);
 	u16 const idx = _rift_key_index(key);
@@ -1830,7 +1822,7 @@ void _rift_assign(struct hfi1_dms_rift *rift, union hfi1_dms_tracker *tracker, h
 	rift->arr[idx] = tracker;
 }
 
-union hfi1_dms_tracker * _rift_lookup(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key)
+static union hfi1_dms_tracker * _rift_lookup(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key)
 {
 	static u16 const sz = HFI1_DMS_ARRAY_SIZE(rift->arr);
 	u16 const idx = _rift_key_index(key);
@@ -1846,7 +1838,7 @@ union hfi1_dms_tracker * _rift_lookup(struct hfi1_dms_rift *rift, hfi1_dms_rift_
 	return tracker;
 }
 
-void _rift_release(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key)
+static void _rift_release(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key)
 {
 	DMS_BUG_ON(!rift);
 	DMS_BUG_ON(_rift_key_error(key));
@@ -1862,14 +1854,14 @@ void _rift_release(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key)
 	rift->type[t].side[s].stack[rift->type[t].side[s].stack_top++] = key;
 }
 
-void _rift_cancel(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key)
+static void _rift_cancel(struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const key)
 {
 	u16 const gen = _rift_key_generation(key);
 	hfi1_dms_rift_key_t const new_key = _rift_key_create(gen+1, _rift_key_index(key));
 	_rift_release(rift, new_key);
 }
 
-void _rift_waitlist_add(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, struct hfi1_dms_dlist_element * waiter)
+static void _rift_waitlist_add(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, struct hfi1_dms_dlist_element * waiter)
 {
 	DMS_BUG_ON(!rift);
 	DMS_BUG_ON(!waiter);
@@ -1877,19 +1869,19 @@ void _rift_waitlist_add(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type cons
 	hfi1_dms_impl_dlist_append(&rift->type[t].waitlist, waiter);
 }
 
-struct hfi1_dms_dlist_element * _rift_waitlist_pop(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t)
+static struct hfi1_dms_dlist_element * _rift_waitlist_pop(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t)
 {
 	DMS_BUG_ON(!rift);
 	return hfi1_dms_impl_dlist_pop(&rift->type[t].waitlist);
 }
 
-struct hfi1_dms_dlist_element * _rift_waitlist_peek(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t)
+static struct hfi1_dms_dlist_element * _rift_waitlist_peek(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t)
 {
 	DMS_BUG_ON(!rift);
 	return rift->type[t].waitlist.head;
 }
 
-bool _rift_allocate(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, union hfi1_dms_tracker *tracker)
+static bool _rift_allocate(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t, enum hfi1_dms_xfer_side const s, union hfi1_dms_tracker *tracker)
 {
 	int ret;
 	hfi1_dms_rift_key_t key;
@@ -1923,7 +1915,7 @@ bool _rift_allocate(struct hfi1_dms_rift *rift, enum hfi1_dms_xfer_type const t,
 	return true;
 }
 
-struct hfi1_dms_sdma_tracker * _sdma_waiters_pop(struct hfi1_dms_sdma_waiters *sdma_waiters)
+static struct hfi1_dms_sdma_tracker * _sdma_waiters_pop(struct hfi1_dms_sdma_waiters *sdma_waiters)
 {
 	struct hfi1_dms_dlist_element *element;
 	element = hfi1_dms_impl_dlist_pop(&sdma_waiters->waitlist);
@@ -1933,7 +1925,7 @@ struct hfi1_dms_sdma_tracker * _sdma_waiters_pop(struct hfi1_dms_sdma_waiters *s
 	return container_of(element, struct hfi1_dms_sdma_tracker, hdr.dlist);
 }
 
-struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_pop(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
+static struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_pop(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
 {
 	DMS_BUG_ON(!dms);
 	struct hfi1_dms_sdma_tracker *waiter = (struct hfi1_dms_sdma_tracker *) hfi1_dms_impl_dlist_pop(&dms->sdma_waiters[engine_idx].waitlist);
@@ -1942,13 +1934,13 @@ struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_pop(struct hfi1_dms *dms, e
 	return waiter;
 }
 
-struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_peek(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
+static struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_peek(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
 {
 	DMS_BUG_ON(!dms);
 	return (struct hfi1_dms_sdma_tracker *) dms->sdma_waiters[engine_idx].waitlist.head;
 }
 
-void _sdma_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_sdma_tracker * sdma_tracker)
+static void _sdma_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_sdma_tracker * sdma_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!sdma_tracker);
@@ -1956,7 +1948,7 @@ void _sdma_tracker_free(struct hfi1_dms *dms, struct hfi1_dms_sdma_tracker * sdm
 	hfi1_dms_impl_dlist_push(&dms->trackers.free, &sdma_tracker->hdr.dlist);
 }
 
-struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_next(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
+static struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_next(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
 {
 	DMS_BUG_ON(!dms);
 
@@ -1968,13 +1960,13 @@ struct hfi1_dms_sdma_tracker * _sdma_engine_waitlist_next(struct hfi1_dms *dms, 
 	return NULL;
 }
 
-void _sdma_engine_waitlist_append(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, struct hfi1_dms_sdma_tracker * waiter)
+static void _sdma_engine_waitlist_append(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, struct hfi1_dms_sdma_tracker * waiter)
 {
 	hfi1_dms_impl_dlist_append(&dms->sdma_waiters[engine_idx].waitlist, &waiter->hdr.dlist);
 	dms->sdma_waiter_count += 1;
 }
 
-int _sdma_engine_waitlist_add(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx,
+static int _sdma_engine_waitlist_add(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx,
 		hfi1_dms_sdma_inject_fn inject, struct hfi1_dms_sdma_info const *info, u64 xfer_bytes)
 {
 	DMS_BUG_ON(!dms);
@@ -1989,7 +1981,7 @@ int _sdma_engine_waitlist_add(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_id
 	return 0;
 }
 
-void _sdma_engine_waitlist_poll(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
+static void _sdma_engine_waitlist_poll(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx)
 {
 	struct hfi1_dms_sdma_tracker * waiter = _sdma_engine_waitlist_peek(dms, engine_idx);
 	while (waiter) {
@@ -1998,7 +1990,7 @@ void _sdma_engine_waitlist_poll(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_
 	}
 }
 
-void _sdma_engine_waitlist_poll_all(struct hfi1_dms *dms)
+static void _sdma_engine_waitlist_poll_all(struct hfi1_dms *dms)
 {
 	DMS_BUG_ON(!dms);
 	if (dms->sdma_waiter_count == 0) {
@@ -2012,7 +2004,7 @@ void _sdma_engine_waitlist_poll_all(struct hfi1_dms *dms)
 	_sdma_engine_waitlist_poll(dms, HFI1_DMS_SDMA_ENGINE_IDX_ANY);
 }
 
-int _sdma_waiter_create_and_append(struct hfi1_dms *dms, struct hfi1_dms_sdma_waiters *waiters, hfi1_dms_sdma_inject_fn inject_fn, struct hfi1_dms_sdma_info const *info, u64 xfer_bytes)
+static int _sdma_waiter_create_and_append(struct hfi1_dms *dms, struct hfi1_dms_sdma_waiters *waiters, hfi1_dms_sdma_inject_fn inject_fn, struct hfi1_dms_sdma_info const *info, u64 xfer_bytes)
 {
 	struct hfi1_dms_sdma_tracker * waiter = _sdma_tracker_new(dms, inject_fn, info, xfer_bytes);
 	if (!waiter) {
@@ -2022,7 +2014,7 @@ int _sdma_waiter_create_and_append(struct hfi1_dms *dms, struct hfi1_dms_sdma_wa
 	return 0;
 }
 
-void _sdma_inject(struct hfi1_dms *dms, hfi1_dms_sdma_inject_fn inject_fn, struct hfi1_dms_sdma_info const *info, u64 xfer_bytes)
+static void _sdma_inject(struct hfi1_dms *dms, hfi1_dms_sdma_inject_fn inject_fn, struct hfi1_dms_sdma_info const *info, u64 xfer_bytes)
 {
 	DMS_BUG_ON(!_rift_key_side_tx(info->local_rift_key));
 
@@ -2087,7 +2079,7 @@ void _sdma_inject(struct hfi1_dms *dms, hfi1_dms_sdma_inject_fn inject_fn, struc
 	return;
 }
 
-int _sdma_inject_data_fn(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, struct hfi1_dms_sdma_info const * info)
+static int _sdma_inject_data_fn(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, struct hfi1_dms_sdma_info const * info)
 {
 	u64 head, tail;
 	int ret = -1;
@@ -2136,7 +2128,7 @@ int _sdma_inject_data_fn(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx con
 	return ret;
 }
 
-int hfi1_dms_impl_inject_data_start_ordered(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+static int hfi1_dms_impl_inject_data_start_ordered(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
 {
 	// same as regular "data start" except no tid stuff
 	int i;
@@ -2174,7 +2166,7 @@ int hfi1_dms_impl_inject_data_start_ordered(struct hfi1_dms *dms, struct hfi1_dm
 #endif
 }
 
-int _dms_tx_rift_continue_read_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+static int _dms_tx_rift_continue_read_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tx_tracker);
@@ -2250,7 +2242,7 @@ int _dms_tx_rift_continue_read_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tr
 	return 0;
 }
 
-int hfi1_dms_impl_inject_write_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+static int hfi1_dms_impl_inject_write_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tx_tracker);
@@ -2263,7 +2255,7 @@ int hfi1_dms_impl_inject_write_start(struct hfi1_dms *dms, struct hfi1_dms_tx_tr
 		return _inject_cmd_pio(dms, (union hfi1_dms_proto_cmd *)&cmd);
 }
 
-int _dms_tx_rift_continue_write_data(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
+static int _dms_tx_rift_continue_write_data(struct hfi1_dms *dms, struct hfi1_dms_tx_tracker *tx_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tx_tracker);
@@ -2324,7 +2316,7 @@ int _dms_tx_rift_continue_write_data(struct hfi1_dms *dms, struct hfi1_dms_tx_tr
 #endif
 }
 
-void _dms_rift_poll(struct hfi1_dms *dms)
+static void _dms_rift_poll(struct hfi1_dms *dms)
 {
 	int ret;
 	struct hfi1_dms_dlist_element *waiter;
@@ -2415,7 +2407,7 @@ int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, union hfi1_dms_key d
 	return 0;
 }
 
-union hfi1_dms_cmd_nack hfi1_dms_cmd_nack_make(struct hfi1_dms *dms, enum hfi1_dms_msg_type msg_type, enum hfi1_dms_err_type err_type, u32 dlid, hfi1_dms_rift_key_t rift_key)
+static union hfi1_dms_cmd_nack hfi1_dms_cmd_nack_make(struct hfi1_dms *dms, enum hfi1_dms_msg_type msg_type, enum hfi1_dms_err_type err_type, u32 dlid, hfi1_dms_rift_key_t rift_key)
 {
 	DMS_BUG_ON(!dms);
 
@@ -2438,7 +2430,7 @@ union hfi1_dms_cmd_nack hfi1_dms_cmd_nack_make(struct hfi1_dms *dms, enum hfi1_d
 	return cmd;
 }
 
-void _inject_nack(struct hfi1_dms *dms, enum hfi1_dms_msg_type msg_type, enum hfi1_dms_err_type reason, u32 dlid, hfi1_dms_rift_key_t rift_key)
+static void _inject_nack(struct hfi1_dms *dms, enum hfi1_dms_msg_type msg_type, enum hfi1_dms_err_type reason, u32 dlid, hfi1_dms_rift_key_t rift_key)
 {
 	union hfi1_dms_cmd_nack nack_cmd = hfi1_dms_cmd_nack_make(dms, msg_type, reason, dlid, rift_key);
 	int ret = _inject_cmd_pio(dms, (union hfi1_dms_proto_cmd *)&nack_cmd);
@@ -2447,7 +2439,7 @@ void _inject_nack(struct hfi1_dms *dms, enum hfi1_dms_msg_type msg_type, enum hf
 	}
 }
 
-union hfi1_dms_cmd_status hfi1_dms_cmd_status_make(struct hfi1_dms *dms, u32 dlid, hfi1_dms_rift_key_t rx_rift_key, hfi1_dms_rift_key_t tx_rift_key, enum hfi1_dms_status_type type, u32 data)
+static union hfi1_dms_cmd_status hfi1_dms_cmd_status_make(struct hfi1_dms *dms, u32 dlid, hfi1_dms_rift_key_t rx_rift_key, hfi1_dms_rift_key_t tx_rift_key, enum hfi1_dms_status_type type, u32 data)
 {
 	DMS_BUG_ON(!dms);
 
@@ -2470,7 +2462,7 @@ union hfi1_dms_cmd_status hfi1_dms_cmd_status_make(struct hfi1_dms *dms, u32 dli
 	return cmd;
 }
 
-int hfi1_dms_impl_inject_status(struct hfi1_dms *dms, u32 dlid, hfi1_dms_rift_key_t rx_rift_key, hfi1_dms_rift_key_t tx_rift_key, enum hfi1_dms_status_type type, u32 data)
+static int hfi1_dms_impl_inject_status(struct hfi1_dms *dms, u32 dlid, hfi1_dms_rift_key_t rx_rift_key, hfi1_dms_rift_key_t tx_rift_key, enum hfi1_dms_status_type type, u32 data)
 {
 	DMS_BUG_ON(!dms);
 
@@ -2480,7 +2472,7 @@ int hfi1_dms_impl_inject_status(struct hfi1_dms *dms, u32 dlid, hfi1_dms_rift_ke
 	return _inject_cmd_pio(dms, (union hfi1_dms_proto_cmd *)&cmd);
 }
 
-union hfi1_dms_cmd_read_start hfi1_dms_cmd_read_start_make(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker const * const rx_tracker, s32 tid_set, u32 tid_set_nbytes)
+static union hfi1_dms_cmd_read_start hfi1_dms_cmd_read_start_make(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker const * const rx_tracker, s32 tid_set, u32 tid_set_nbytes)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
@@ -2548,7 +2540,7 @@ union hfi1_dms_proto_cmd_write_start hfi1_dms_proto_cmd_write_start_make(struct 
 	return cmd;
 }
 
-union hfi1_dms_proto_cmd_ack hfi1_dms_proto_cmd_ack_make(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, u32 dlid, hfi1_dms_rift_key_t tx_rift_key, u16 flags, u64 imm_data)
+static union hfi1_dms_proto_cmd_ack hfi1_dms_proto_cmd_ack_make(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, u32 dlid, hfi1_dms_rift_key_t tx_rift_key, u16 flags, u64 imm_data)
 {
 	union hfi1_dms_proto_cmd_ack * tmpl;
 	union hfi1_dms_proto_cmd_ack cmd;
@@ -2575,7 +2567,7 @@ union hfi1_dms_proto_cmd_ack hfi1_dms_proto_cmd_ack_make(struct hfi1_dms *dms, s
 	return cmd;
 }
 
-int hfi1_dms_impl_inject_read_start_ordered(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker)
+static int hfi1_dms_impl_inject_read_start_ordered(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker)
 {
 	DMS_BUG_ON(!rx_tracker->hdr.ordered);
 
@@ -2608,7 +2600,7 @@ int hfi1_dms_impl_inject_read_start_ordered(struct hfi1_dms *dms, struct hfi1_dm
 	return _inject_cmd_pio(dms, (union hfi1_dms_proto_cmd *)&cmd);
 }
 
-int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, u32 tid_set)
+static int hfi1_dms_impl_inject_read_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker, u32 tid_set)
 {
 	u32 tid_info;
 	union hfi1_dms_cmd_read_start cmd;
@@ -2669,7 +2661,7 @@ void _ring_init(struct hfi1_dms_ring *ring, u32 arr_size_lg2, u32 max_size)
 	ring->max_size = max_size;
 }
 
-u32 _ring_max_size(struct hfi1_dms_ring *ring)
+static u32 _ring_max_size(struct hfi1_dms_ring *ring)
 {
 	DMS_BUG_ON(!ring);
 	return ring->max_size;
@@ -2681,50 +2673,39 @@ u32 _ring_size(struct hfi1_dms_ring *ring)
 	return ring->tail - ring->head;
 }
 
-u32 _ring_free(struct hfi1_dms_ring *ring)
+static u32 _ring_free(struct hfi1_dms_ring *ring)
 {
 	return _ring_max_size(ring) - _ring_size(ring);
 }
 
-bool _ring_empty(struct hfi1_dms_ring *ring)
+static bool _ring_empty(struct hfi1_dms_ring *ring)
 {
 	DMS_BUG_ON(!ring);
 	return ring->head == ring->tail;
 }
 
-u32 _ring_tail(struct hfi1_dms_ring *ring)
+static u32 _ring_tail(struct hfi1_dms_ring *ring)
 {
 	DMS_BUG_ON(!ring);
 	DMS_BUG_ON(_ring_empty(ring));
 	return (ring->tail - 1) & ring->mask;
 }
 
-u32 _ring_head(struct hfi1_dms_ring *ring)
+static u32 _ring_head(struct hfi1_dms_ring *ring)
 {
 	DMS_BUG_ON(!ring);
 	DMS_BUG_ON(_ring_empty(ring));
 	return ring->head & ring->mask;
 }
 
-u32 _ring_index(struct hfi1_dms_ring *ring, u32 pos)
+static u32 _ring_index(struct hfi1_dms_ring *ring, u32 pos)
 {
 	DMS_BUG_ON(pos > _ring_size(ring));
 	return (ring->head + pos) & ring->mask;
 }
 
-int _ring_peek(struct hfi1_dms_ring *ring, u32 *out)
-{
-	DMS_BUG_ON(!ring);
-	DMS_BUG_ON(!out);
-	if (_ring_empty(ring))
-		return -1;
-
-	*out = _ring_head(ring);
-	return 0;
-}
-
 // adds the element to the ring, then returns the _index_ of that element
-u32 _ring_produce(struct hfi1_dms_ring *ring)
+static u32 _ring_produce(struct hfi1_dms_ring *ring)
 {
 	DMS_BUG_ON(_ring_free(ring) == 0);
 	return (ring->tail++) & ring->mask;
@@ -2842,7 +2823,7 @@ bool _rift_keyring_remove(struct hfi1_dms_rift_keyring *keyring, hfi1_dms_rift_k
 	return cancel > 0;
 }
 
-bool _dms_tidset_waiter_remove(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type, struct hfi1_dms_rx_tracker *rx_tracker)
+static bool _dms_tidset_waiter_remove(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type, struct hfi1_dms_rx_tracker *rx_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
@@ -2852,16 +2833,7 @@ bool _dms_tidset_waiter_remove(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter
 	return _rift_keyring_remove(waiters, rx_tracker->hdr.local_rift_key);
 }
 
-bool _dms_tidset_waiter_empty(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
-{
-	DMS_BUG_ON(!dms);
-	DMS_BUG_ON(type >= HFI1_DMS_TIDSET_WAITER_TYPE_COUNT);
-	struct hfi1_dms_rift_keyring *waiters = &dms->tidset_waiters[type];
-
-	return _rift_keyring_empty(waiters);
-}
-
-void _dms_tidset_waiter_add(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type, struct hfi1_dms_rx_tracker *rx_tracker)
+static void _dms_tidset_waiter_add(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type, struct hfi1_dms_rx_tracker *rx_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
@@ -2872,7 +2844,7 @@ void _dms_tidset_waiter_add(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_ty
 	_rift_keyring_add(waiters, rx_tracker->hdr.local_rift_key);
 }
 
-struct hfi1_dms_rx_tracker * _dms_tidset_waiter_peek(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
+static struct hfi1_dms_rx_tracker * _dms_tidset_waiter_peek(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(type >= HFI1_DMS_TIDSET_WAITER_TYPE_COUNT);
@@ -2888,7 +2860,7 @@ struct hfi1_dms_rx_tracker * _dms_tidset_waiter_peek(struct hfi1_dms *dms, enum 
 	return &tracker->rx;
 }
 
-struct hfi1_dms_rx_tracker * _dms_tidset_waiter_next(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
+static struct hfi1_dms_rx_tracker * _dms_tidset_waiter_next(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(type >= HFI1_DMS_TIDSET_WAITER_TYPE_COUNT);
@@ -2899,28 +2871,7 @@ struct hfi1_dms_rx_tracker * _dms_tidset_waiter_next(struct hfi1_dms *dms, enum 
 	return _dms_tidset_waiter_peek(dms, type);
 }
 
-struct hfi1_dms_rx_tracker * _dms_tidset_waiter_head(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
-{
-	return _dms_tidset_waiter_peek(dms, type);
-}
-
-struct hfi1_dms_rx_tracker * _dms_tidset_waiter_tail(struct hfi1_dms *dms, enum hfi1_dms_tidset_waiter_type type)
-{
-	DMS_BUG_ON(!dms);
-	DMS_BUG_ON(type >= HFI1_DMS_TIDSET_WAITER_TYPE_COUNT);
-	struct hfi1_dms_rift_keyring *waiters = &dms->tidset_waiters[type];
-
-	if (_rift_keyring_empty(waiters))
-		return NULL;
-
-	hfi1_dms_rift_key_t const key = _rift_keyring_tail(waiters);
-	DMS_BUG_ON(!_rift_key_side_rx(key));
-
-	union hfi1_dms_tracker *tracker = _rift_lookup(&dms->rift, key);
-	return &tracker->rx;
-}
-
-void _dms_tidset_waiters_poll(struct hfi1_dms *dms)
+static void _dms_tidset_waiters_poll(struct hfi1_dms *dms)
 {
 	struct hfi1_dms_rx_tracker *rx_tracker;
 	u32 tid_set;
@@ -3001,7 +2952,7 @@ void _dms_tidset_waiters_poll(struct hfi1_dms *dms)
 	}
 }
 
-void _tidset_free_then_poll_waiters(struct hfi1_dms *dms, u32 tid_set)
+static void _tidset_free_then_poll_waiters(struct hfi1_dms *dms, u32 tid_set)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(tid_set >= HFI1_DMS_TID_SET_IDX_COUNT);
@@ -3021,7 +2972,7 @@ void _tidset_free_then_poll_waiters(struct hfi1_dms *dms, u32 tid_set)
 	}
 }
 
-int _dms_rx_rift_continue_read_data(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker)
+static int _dms_rx_rift_continue_read_data(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
@@ -3085,7 +3036,7 @@ int _dms_rx_rift_continue_read_data(struct hfi1_dms *dms, struct hfi1_dms_rx_tra
 	return 0;
 }
 
-int _dms_rx_rift_continue_write_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker)
+static int _dms_rx_rift_continue_write_start(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker *rx_tracker)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!rx_tracker);
@@ -3233,7 +3184,7 @@ int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, union hfi1_dms_key dms
 	return 0;
 }
 
-void _tracker_rift_release(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker, struct hfi1_dms_rift *rift)
+static void _tracker_rift_release(struct hfi1_dms *dms, union hfi1_dms_tracker *tracker, struct hfi1_dms_rift *rift)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!tracker);
@@ -3298,7 +3249,7 @@ void hfi1_dms_rx_tracker_handle_completion(struct hfi1_dms *dms, struct hfi1_dms
 	hfi1_dms_impl_rx_tracker_free(dms, rx_tracker);
 }
 
-void _order_domain_continue_data_request(struct hfi1_dms *dms, struct hfi1_dms_order_domain *domain)
+static void _order_domain_continue_data_request(struct hfi1_dms *dms, struct hfi1_dms_order_domain *domain)
 {
 	u32 tidset;
 	hfi1_dms_rift_key_t next_rift_key;
@@ -3408,7 +3359,7 @@ void hfi1_dms_handle_data_start_ordered(struct hfi1_dms *dms, union hfi1_dms_16b
 	}
 }
 
-void hfi1_dms_handle_data_start(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
+static void hfi1_dms_handle_data_start(struct hfi1_dms *dms, union hfi1_dms_16b_header *hdr)
 {
 	union hfi1_dms_proto_pkt_data *data;
 	struct hfi1_dms_read_request_state *read_request;
@@ -3871,11 +3822,6 @@ static inline enum hfi1_dms_msg_type hfi1_dms_impl_message_type_get(union hfi1_d
 	return ret;
 }
 
-void hfi1_dms_impl_noop_packet(struct hfi1_packet *packet)
-{
-	(void) packet;
-}
-
 static void _handle_data_packet(struct hfi1_packet *packet)
 {
 	struct hfi1_bulksvc *svc;
@@ -4015,7 +3961,7 @@ static void _noop_handle_packet(struct hfi1_packet *packet)
 }
 
 
-void hfi1_dms_impl_reclaim_ahg(struct hfi1_dms *dms, struct sdma_engine *sde, struct hfi1_dms_sde_rsrc *sde_rsrc)
+static void hfi1_dms_impl_reclaim_ahg(struct hfi1_dms *dms, struct sdma_engine *sde, struct hfi1_dms_sde_rsrc *sde_rsrc)
 {
 	u32 descq_head;
 	u32 descq_tail;
@@ -4066,17 +4012,17 @@ void hfi1_dms_impl_reclaim_ahg(struct hfi1_dms *dms, struct sdma_engine *sde, st
 	}
 }
 
-s64 _tracker_age(union hfi1_dms_tracker const * const tracker, ktime_t const now)
+static s64 _tracker_age(union hfi1_dms_tracker const * const tracker, ktime_t const now)
 {
 	return ktime_to_ns(ktime_sub(now, tracker->hdr.last_activity));
 }
 
-bool _tracker_is_stale(union hfi1_dms_tracker const * const tracker, ktime_t const now)
+static bool _tracker_is_stale(union hfi1_dms_tracker const * const tracker, ktime_t const now)
 {
 	return _tracker_age(tracker, now) > bulksvc_dms_stale_threshold_ns;
 }
 
-bool _tracker_is_dead(union hfi1_dms_tracker const * const tracker, ktime_t const now)
+static bool _tracker_is_dead(union hfi1_dms_tracker const * const tracker, ktime_t const now)
 {
 	bool res = _tracker_age(tracker, now) > bulksvc_dms_dead_elapsed_ns;
 	if (res) {
@@ -4085,7 +4031,7 @@ bool _tracker_is_dead(union hfi1_dms_tracker const * const tracker, ktime_t cons
 	return res;
 }
 
-void hfi1_dms_poll_stale(struct hfi1_dms *dms)
+static void hfi1_dms_poll_stale(struct hfi1_dms *dms)
 {
 	static int const err = -ETIMEDOUT;
 	
@@ -4256,7 +4202,7 @@ int hfi1_dms_poll(struct hfi1_dms *dms, ktime_t const now)
 	return numpkt;
 }
 
-void hfi1_dms_handle_tx_tracker_completion(struct hfi1_dms *dms, hfi1_dms_rift_key_t tx_rift_key, u16 flags, u64 imm_data)
+static void hfi1_dms_handle_tx_tracker_completion(struct hfi1_dms *dms, hfi1_dms_rift_key_t tx_rift_key, u16 flags, u64 imm_data)
 {
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(_rift_key_error(tx_rift_key));
@@ -4306,7 +4252,7 @@ void hfi1_dms_handle_tx_tracker_completion(struct hfi1_dms *dms, hfi1_dms_rift_k
  * we really want them here. Convenience functions for our pre-defined
  * templates
  */
-u64 hfi1_dms_impl_pbc_template_create_16Bc(u8 port_idx, u32 dw_len, u16 sctxt)
+static u64 hfi1_dms_impl_pbc_template_create_16Bc(u8 port_idx, u32 dw_len, u16 sctxt)
 {
 	u64 ret;
 
@@ -4320,7 +4266,7 @@ u64 hfi1_dms_impl_pbc_template_create_16Bc(u8 port_idx, u32 dw_len, u16 sctxt)
 	return ret;
 }
 
-int hfi1_dms_impl_proto_command_template_make(struct hfi1_dms *dms, union hfi1_dms_proto_cmd *cmd, enum hfi1_dms_msg_type msg_type, u32 pkt_len_qws, u16 jkey)
+static int hfi1_dms_impl_proto_command_template_make(struct hfi1_dms *dms, union hfi1_dms_proto_cmd *cmd, enum hfi1_dms_msg_type msg_type, u32 pkt_len_qws, u16 jkey)
 {
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(cmd == NULL);
@@ -4424,7 +4370,7 @@ static inline u32 rcvarray_offset(u32 ctxt, u32 index, u32 type)
 	return ret;
 }
 
-int hfi1_dms_impl_map_tid_entries(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 start_page_index, u64 npages, u32 tid_set)
+static int hfi1_dms_impl_map_tid_entries(struct hfi1_dms *dms, struct hfi1_dms_mr * mr, u64 start_page_index, u64 npages, u32 tid_set)
 {
 	u64 start;
 	u64 tid_entries[HFI1_DMS_TID_SET_SIZE * 2] = {0};
@@ -4581,7 +4527,7 @@ void _tidset_enable(struct hfi1_dms *dms, u32 tid_set, struct hfi1_dms_rx_tracke
 	*tidset_nbytes = nbytes_to_request;
 }
 
-union hfi1_dms_cmd_data_request hfi1_dms_cmd_data_request_make(struct hfi1_dms *dms, u32 tid_info, u32 sbuf_offset,
+static union hfi1_dms_cmd_data_request hfi1_dms_cmd_data_request_make(struct hfi1_dms *dms, u32 tid_info, u32 sbuf_offset,
 		hfi1_dms_rift_key_t tx_rift_key, u32 src_lid, u32 read_size_qw,
 		u8 head_misalignment, u8 tail_misalignment)
 {
@@ -4882,7 +4828,7 @@ void hfi1_dms_impl_handle_read_start_packet(struct hfi1_dms *dms, union hfi1_dms
 	}
 }
 
-int hfi1_dms_impl_handle_data_request(struct hfi1_dms *dms, struct dms_handle_data_request_parameters const *parameters)
+static int hfi1_dms_impl_handle_data_request(struct hfi1_dms *dms, struct dms_handle_data_request_parameters const *parameters)
 {
 	struct hfi1_dms_tx_tracker *tx_tracker;
 
@@ -5324,7 +5270,7 @@ void hfi1_dms_impl_handle_nack_packet(struct hfi1_dms *dms, union hfi1_dms_16b_h
 	}
 }
 
-union hfi1_dms_tracker * _locate_tracker(struct hfi1_dms *dms, struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const local_rift_key, hfi1_dms_rift_key_t const remote_rift_key)
+static union hfi1_dms_tracker * _locate_tracker(struct hfi1_dms *dms, struct hfi1_dms_rift *rift, hfi1_dms_rift_key_t const local_rift_key, hfi1_dms_rift_key_t const remote_rift_key)
 {
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(_rift_key_error(remote_rift_key) != HFI1_DMS_RIFT_ERR_NONE);
@@ -5504,7 +5450,7 @@ void hfi1_dms_impl_pbc_dlid_set(u64 *pbc, u32 dlid)
 	       ((u64) (dlid & PBC_DLID_MASK) << PBC_DLID_SHIFT);
 }
 
-void hfi1_dms_impl_pbc_length_dws_set(u64 *pbc, u32 length_dws)
+static void hfi1_dms_impl_pbc_length_dws_set(u64 *pbc, u32 length_dws)
 {
 	DMS_BUG_ON(pbc == NULL);
 
@@ -5531,7 +5477,7 @@ static u32 hfi1_dms_impl_data_pktlen_dws_from_payload_dws(u32 payload_dws)
 	return ret;
 }
 
-void hfi1_dms_impl_data_packet_header_make(struct hfi1_dms *dms, union hfi1_dms_proto_cmd_data *cmd, u32 nbytes, u32 dlid, u8 rx, u32 tid_info, hfi1_dms_rift_key_t tx_rift_key,
+static void hfi1_dms_impl_data_packet_header_make(struct hfi1_dms *dms, union hfi1_dms_proto_cmd_data *cmd, u32 nbytes, u32 dlid, u8 rx, u32 tid_info, hfi1_dms_rift_key_t tx_rift_key,
 		u64 head, u64 tail, enum hfi1_dms_sdma_type sdma_type)
 {
 	u32 payload_dws;
@@ -5585,7 +5531,7 @@ struct hfi1_dms_impl_fill_state {
  * 
  * this is not quite right, something's up here with the phys page offset
  */
-struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_payload(struct sdma_desc *start_desc, u64 nbytes, u64 sbuf_page_offset, dma_addr_t *phys_addrs)
+static struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_payload(struct sdma_desc *start_desc, u64 nbytes, u64 sbuf_page_offset, dma_addr_t *phys_addrs)
 {
 	u64 PHYS_PAGE_SIZE = PAGE_SIZE;
 	u64 offset;
@@ -5699,7 +5645,7 @@ struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_payload(struct sdma_desc *sta
  * nbytes should be calculated ahead of time such that (nbytes + tid_info.offset * 4) <= MTU_SIZE
  * 
  */
-struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_first_packet_descriptors(struct hfi1_dms *dms, struct hfi1_dms_impl_fill_state initial_fill_state,
+static struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_first_packet_descriptors(struct hfi1_dms *dms, struct hfi1_dms_impl_fill_state initial_fill_state,
 		hfi1_dms_rift_key_t tx_rift_key, u32 nbytes, u32 dlid, u8 rx, u32 tid_info, u8 ahg_idx, struct hfi1_dms_mem_coh *ahg_header,
 		u64 head_qw, u64 tail_qw, enum hfi1_dms_sdma_type sdma_type)
 {
@@ -5751,7 +5697,7 @@ struct hfi1_dms_impl_fill_state hfi1_dms_impl_fill_first_packet_descriptors(stru
 	return fill_state; // Success
 }
 
-struct sdma_engine * _sdma_engine_acquire(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, u64 ndesc_needed)
+static struct sdma_engine * _sdma_engine_acquire(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx const engine_idx, u64 ndesc_needed)
 {
 	s32 cur_sdma_engine;
 	s32 sdma_engine_count;
@@ -5812,7 +5758,7 @@ struct sdma_engine * _sdma_engine_acquire(struct hfi1_dms *dms, enum hfi1_dms_sd
 	return NULL;
 }
 
-u64 _sdma_desc_stack_finalize(struct hfi1_dms *dms, struct hfi1_dms_impl_fill_state current_fill_state)
+static u64 _sdma_desc_stack_finalize(struct hfi1_dms *dms, struct hfi1_dms_impl_fill_state current_fill_state)
 {
 	struct sdma_desc *last_desc;
 	u64 ndesc_filled;
@@ -5843,7 +5789,7 @@ u64 _sdma_desc_stack_finalize(struct hfi1_dms *dms, struct hfi1_dms_impl_fill_st
 	return ndesc_total;
 }
 
-void _sdma_engine_write_desc_stack(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx engine_idx, struct sdma_engine *sdma, u64 ndesc_total, struct hfi1_dms_ahg_header_set *ahg_set)
+static void _sdma_engine_write_desc_stack(struct hfi1_dms *dms, enum hfi1_dms_sdma_engine_idx engine_idx, struct sdma_engine *sdma, u64 ndesc_total, struct hfi1_dms_ahg_header_set *ahg_set)
 {
 	u32 desc_tail;
 	u32 descq_cnt;
@@ -6243,7 +6189,7 @@ union hfi1_dms_tracker * hfi1_dms_impl_tracker_new(struct hfi1_dms *dms, hfi1_dm
 	return tracker;
 }
 
-struct hfi1_dms_sdma_tracker * _sdma_tracker_new(struct hfi1_dms *dms, hfi1_dms_sdma_inject_fn inject,
+static struct hfi1_dms_sdma_tracker * _sdma_tracker_new(struct hfi1_dms *dms, hfi1_dms_sdma_inject_fn inject,
 		struct hfi1_dms_sdma_info const *info, u64 xfer_bytes)
 {
 	hfi1_dms_rift_key_t const no_rift = _rift_key_create_err(HFI1_DMS_RIFT_ERR_KEY_NOT_SET);
@@ -6259,7 +6205,7 @@ struct hfi1_dms_sdma_tracker * _sdma_tracker_new(struct hfi1_dms *dms, hfi1_dms_
 	return waiter;
 }
 
-struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_new(struct hfi1_dms *dms, u32 size,
+static struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_new(struct hfi1_dms *dms, u32 size,
 		u64 byte_offset_from_first_page, u32 remote_lid, hfi1_dms_rift_key_t remote_rift_key, bool ordered, u64 order_key,
 		enum hfi1_dms_xfer_type type, enum hfi1_dms_xfer_op op)
 {
@@ -6308,7 +6254,7 @@ struct hfi1_dms_tx_tracker *hfi1_dms_impl_tx_tracker_write_new(struct hfi1_dms *
 	return tx_tracker;
 }
 
-struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_new(struct hfi1_dms *dms, u32 size, u32 remote_lid,
+static struct hfi1_dms_rx_tracker *hfi1_dms_impl_rx_tracker_new(struct hfi1_dms *dms, u32 size, u32 remote_lid,
 		struct hfi1_dms_mr *rbuf, u64 rbuf_offset, bool const ordered, u64 const order_key,
 		enum hfi1_dms_xfer_type type, enum hfi1_dms_xfer_op op)
 {
@@ -6675,7 +6621,7 @@ int hfi1_dms_impl_slow_read_from_user(struct hfi1_dms_mr *mr, u64 offset, u64 si
 
 // since DMS exclusively uses 16B packets all sizes are QW anyway
 // also this is function assumes we're either doing 1 or 2 PIO blocks
-int hfi1_dms_impl_pio_send(struct hfi1_dms *dms, u64 pbc, void *data, u64 size_qw)
+static int hfi1_dms_impl_pio_send(struct hfi1_dms *dms, u64 pbc, void *data, u64 size_qw)
 {
 	struct send_context *sc = dms->sctxt;
 	if (!(sc->flags & SCF_ENABLED))
@@ -6847,7 +6793,7 @@ static void _pio_waitlist_poll(struct hfi1_dms *dms)
 	}
 }
 
-int _pio_waitlist_work(struct hfi1_dms *dms, struct hfi1_dms_work_item *item)
+static int _pio_waitlist_work(struct hfi1_dms *dms, struct hfi1_dms_work_item *item)
 {
 	_pio_waitlist_poll(dms);
 	return _pio_waitlist_empty(dms) ? 0 : -EAGAIN;
