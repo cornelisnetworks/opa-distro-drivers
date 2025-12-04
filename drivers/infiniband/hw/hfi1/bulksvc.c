@@ -414,7 +414,7 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 	int ret = 0;
 
 
-	dd->bulksvc = kcalloc(sizeof(*dd->bulksvc), 1, GFP_KERNEL);
+	dd->bulksvc = kcalloc(1, sizeof(*dd->bulksvc), GFP_KERNEL);
 	if (!dd->bulksvc) {
 		ret = -ENOMEM;
 		return ret;

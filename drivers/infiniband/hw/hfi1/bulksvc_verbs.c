@@ -1271,7 +1271,7 @@ static int bulksvc_verbs_hotpath_send_one(struct hfi1_bulksvc *svc,
 		cookie->qp = qp; /* calling func grabbed ref */
 		cookie->sge_info = sge_info;
 		cookie->wr_id = wr->wr_id; 
-		cookie->wr_opcode = (enum ib_wc_opcode) wr->opcode;
+		cookie->wr_opcode = wr->opcode;
 		cookie->byte_len = total_wqe_len;
 		bts_verbs_mr_record_get(mr_record);
 		cookie->mr_record = mr_record;
