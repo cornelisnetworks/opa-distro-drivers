@@ -68,7 +68,7 @@ if [[ $build_arg == "norpm" ]]; then
 	fi
 
 	cd ../../hw/hfi1
-	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) NOSTDINC_FLAGS="-nostdinc -I/tmp/tmpbuild/include -I/tmp/tmpbuild/include/uapi -isystem $(gcc -print-file-name=include)" modules
+	make -j 50 -C /lib/modules/$(uname -r)/build M=$(pwd) NOSTDINC_FLAGS="-nostdinc -I/tmp/tmpbuild/include -I/tmp/tmpbuild/include/uapi -isystem $(gcc -print-file-name=include)" KBUILD_EXTRA_SYMBOLS="/tmp/tmpbuild/drivers/infiniband/sw/rdmavt/Module.symvers" modules
 	if [[ $? -ne 0 ]]; then
 		exit $?
 	fi
