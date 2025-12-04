@@ -30,5 +30,6 @@ void verbs_bulksvc_dereg_mr(struct hfi1_bulksvc *svc, struct rvt_mregion *mr);
 
 /* called by work_struct func */
 void _hfi1_bts_handle_verbs_cmpls(struct work_struct *work);
+void hfi1_bts_handle_verbs_cmpls(struct hfi1_bulksvc_verbs_state* state);
 
 #endif /* DEF_HFI1_BULKSVC_RVT_H */
