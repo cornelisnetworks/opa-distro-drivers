@@ -1273,7 +1273,7 @@ bail_qp:
 	return ret;
 }
 
-int __rvt_error_qp_locked(struct rvt_qp *qp, enum ib_wc_status err)
+static int __rvt_error_qp_locked(struct rvt_qp *qp, enum ib_wc_status err)
 {
 	struct ib_wc wc;
 	int ret = 0;
