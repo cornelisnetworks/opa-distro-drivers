@@ -70,7 +70,7 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 	return bulksvc_user_info;
 }
 
-void bulksvc_user_info_event_release(struct kref *ref)
+static void bulksvc_user_info_event_release(struct kref *ref)
 {
 	struct hfi1_bulksvc_user_info* info = container_of(ref, struct hfi1_bulksvc_user_info, refcount);
 	struct hfi1_bulksvc_event_entry *event_entry = kzalloc(sizeof(*event_entry), GFP_KERNEL);

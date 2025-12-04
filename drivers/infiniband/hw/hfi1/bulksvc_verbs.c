@@ -48,7 +48,6 @@ static struct hfi1_bulksvc_verbs_cmpl* hfi1_bulksvc_verbs_access_cmpl_create(
 				u32 user_immdt_be,
 				u16 flags);
 
-void hfi1_bts_handle_verbs_cmpls(struct hfi1_bulksvc_verbs_state* state);
 // Executed in bulksvc thread, will enqueue a completion and schedule for bulksvc_rvt connector
 static void enqueue_and_schedule_bts_rvt_cmpl(
 	struct hfi1_bulksvc* const svc,
@@ -797,11 +796,6 @@ struct hfi1_bulksvc_verbs_cmpl* hfi1_bulksvc_verbs_access_cmpl_create(
 	INIT_LIST_HEAD(&cmpl->node);
 	kref_init(&cmpl->refcount);
 	return cmpl;
-}
-
-void hfi1_bulksvc_verbs_cmpl_get(struct hfi1_bulksvc_verbs_cmpl *cmpl)
-{
-	kref_get(&cmpl->refcount);
 }
 
 static void hfi1_bulksvc_verbs_cmpl_destroy(struct kref *refcount)

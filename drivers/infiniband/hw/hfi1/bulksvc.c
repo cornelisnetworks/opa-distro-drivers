@@ -76,10 +76,6 @@ static enum hrtimer_restart bulksvc_progress_timer_callback(struct hrtimer *time
 static int get_bulksvc_cpu(struct hfi1_devdata *dd);
 static bool get_bulksvc_polling(struct hfi1_devdata *dd);
 
-
-// Defined in bulksvc_user.c - should be called from bulksvc event polling thread only
-void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info);
-
 static int bulksvc_loan_sdma(struct hfi1_devdata *dd, u32 start, u32 end)
 {
 	struct hfi1_bulksvc *svc = dd->bulksvc;
@@ -413,7 +409,7 @@ int hfi1_bulksvc_init(struct hfi1_devdata *dd)
 	int ret = 0;
 
 
-	dd->bulksvc = kcalloc(sizeof(*dd->bulksvc), 1, GFP_KERNEL);
+	dd->bulksvc = kcalloc(1, sizeof(*dd->bulksvc), GFP_KERNEL);
 	if (!dd->bulksvc) {
 		ret = -ENOMEM;
 		return ret;
