@@ -57,6 +57,8 @@ MODULE_DESCRIPTION("Cornelis Omni-Path Express driver");
 #endif
 MODULE_VERSION(HFI1_DRIVER_VERSION_BASE);
 
+MODULE_IMPORT_NS(DMA_BUF);
+
 /*
  * MAX_PKT_RCV is the max # if packets processed per receive interrupt.
  */
