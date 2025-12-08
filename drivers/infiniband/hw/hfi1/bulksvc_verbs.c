@@ -15,19 +15,15 @@
 // #define VERBS_PD_TO_CLIENT_ID(id) (VERBS_CLIENT_ID_START + id)
 #define VERBS_PD_TO_CLIENT_ID(id) (VERBS_CLIENT_ID_START)
 
+static int verbs_host_mr_memcpy_fn(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read);
+
 struct bts_verbs_mr_record {
 	struct list_head list_entry;
 	struct kref refcount;
 	u32 client_id;
 	u32 rkey;
-	enum bts_verbs_mr_record_type {
-		BTS_VERBS_MR_RECORD_TYPE_PERSISTENT,
-		BTS_VERBS_MR_RECORD_TYPE_ONETIME,
-	} type;
-	union {
-		struct rvt_mregion *rvt_mr;
-		struct hfi1_bulksvc_qp_info *qp_info;
-	};
+	struct rvt_mregion *rvt_mr;
+	struct page **pages;
 	struct hfi1_dms_mr dms_mr;
 };
 
@@ -197,12 +193,11 @@ static void bulksvc_on_qp_cmd_rdma_helper(struct hfi1_bulksvc * const svc,
 
 		struct bts_verbs_mr_record* mr_record = NULL;
 		list_for_each_entry(mr_record, &verbs_state->mr_info_records, list_entry) {
-			if (mr_record->type == BTS_VERBS_MR_RECORD_TYPE_PERSISTENT &&
-			mr_record->rvt_mr == mr) {
+			if (mr_record->rvt_mr == mr) {
 				break;
 			}
 		}
-	
+
 		if (WARN_ON(!mr_record)) {
 			pr_err("%s:%d:%s() bulksvc: Failed to find any MR records\n",
 			__FILENAME__, __LINE__, __func__);
@@ -285,7 +280,7 @@ static void bulksvc_on_qp_cmd_rdma_helper(struct hfi1_bulksvc * const svc,
 			rc = hfi1_dms_write_data(&svc->dms, remote_lid, dms_key,
 						remote_addr, sge_size, &mr_record->dms_mr,
 						mr->user_base + user_base_offset,
-						0, 0,						
+						0, 0,
 						completion, true, order_key);
 		} else if (rdma_opcode == IB_WR_BULKSVC_WRITE_WITH_IMM) {
 			u16 flags = HFI1_BULKSVC_VERBS_WRITE_FLAGS_IMMDT;
@@ -307,7 +302,7 @@ static void bulksvc_on_qp_cmd_rdma_helper(struct hfi1_bulksvc * const svc,
 			rc = hfi1_dms_write_data(&svc->dms, remote_lid, dms_key,
 						remote_addr, sge_size, &mr_record->dms_mr,
 						mr->user_base + user_base_offset,
-						flags, imm_data,						
+						flags, imm_data,
 						completion, true, order_key);
 		} else {
 			pr_err("unknown opcode %u\n", rdma_opcode);
@@ -414,7 +409,7 @@ static void bulksvc_on_verbs_mr_accessed (
 
 	struct verbs_mr_accessed_cookie * const accessed_cookie =
 		(struct verbs_mr_accessed_cookie *)cookie;
-		
+
 	if (WARN_ON(!accessed_cookie->svc)) {
 		pr_err("%s:%d:%s() invalid svc\n",
 			__FILENAME__, __LINE__, __func__);
@@ -708,7 +703,7 @@ struct hfi1_bulksvc_verbs_cmd * hfi1_bulksvc_verbs_cmd_mr_reg_create(
 	cmd->op = HFI1_BULKSVC_VERBS_CMD_OP_MR_REG;
 	INIT_LIST_HEAD(&cmd->node);
 	kref_init(&cmd->refcount);
-	
+
 	rvt_get_mr(mr);
 	cmd->mr_reg.mr = mr;
 
@@ -848,7 +843,7 @@ int hfi1_bulksvc_verbs_state_init(struct hfi1_bulksvc_verbs_state *state, struct
 	return 0;
 }
 
-int hfi1_bulksvc_verbs_dms_reg_client_id(struct hfi1_dms* dms) 
+int hfi1_bulksvc_verbs_dms_reg_client_id(struct hfi1_dms* dms)
 {
 	if (hfi1_dms_create_client_key(dms, VERBS_CLIENT_ID_START)) {
 		pr_err("Failed to create DMS client key for verbs %u\n",
@@ -900,7 +895,6 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 
 	// rvt_mr
 	rvt_get_mr(rvt_mr);
-	mr_record->type = BTS_VERBS_MR_RECORD_TYPE_PERSISTENT;
 	mr_record->rvt_mr = rvt_mr;
 
 	for (u64 i = 0; i < rvt_mr->mapsz; ++i) {
@@ -925,12 +919,11 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 	dms_mr->user.len = rvt_mr->length;
 
 	// TODO should we use rvt_mr->page_shift?
-	dms_mr->npages_total = dms_mr->extended_vaddr.len >> PAGE_SHIFT;
 	// Pinned by rvt
-	dms_mr->npages_pinned = dms_mr->npages_total;
+	dms_mr->npages_total = dms_mr->extended_vaddr.len >> PAGE_SHIFT;
 
-	dms_mr->pages = kvcalloc(dms_mr->npages_total, sizeof(struct page*), GFP_KERNEL);
-	if (!dms_mr->pages) {
+	mr_record->pages = kvcalloc(dms_mr->npages_total, sizeof(struct page *), GFP_KERNEL);
+	if (!mr_record->pages) {
 		pr_err("%s:%d:%s() bulksvc: Failed to allocate mr pages array\n",
 		       __FILENAME__, __LINE__, __func__);
 		kfree(mr_record);
@@ -943,7 +936,7 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 		s = i % RVT_SEGSZ;
 		/* sanity check */
 		if (WARN_ON((m * RVT_SEGSZ) + s >= rvt_mr->max_segs)) {
-			kvfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->pages);
 			kfree(mr_record);
 			return NULL;
 		}
@@ -952,7 +945,7 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 			pr_err("%s:%d:%s() bulksvc: Failed to get page for addr %p\n",
 			       __FILENAME__, __LINE__, __func__,
 			       rvt_mr->map[m]->segs[s].vaddr);
-			kvfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->pages);
 			kfree(mr_record);
 			return NULL;
 		}
@@ -960,25 +953,25 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 			pr_err("%s:%d:%s() bulksvc: Unexpected segment length %zu at map %d seg %u\n",
 				__FILENAME__, __LINE__, __func__,
 				rvt_mr->map[m]->segs[s].length, m, s);
-			kvfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->pages);
 			kfree(mr_record);
 			return NULL;
 		}
-		dms_mr->pages[i] = page;
+		mr_record->pages[i] = page;
 	}
 
 	dms_mr->dma_list = kvcalloc(dms_mr->npages_total, sizeof(dma_addr_t), GFP_KERNEL);
 	if (!dms_mr->dma_list) {
 		pr_err("%s:%d:%s() bulksvc: Failed to allocate dma list\n",
 		       __FILENAME__, __LINE__, __func__);
-		kfree(mr_record->dms_mr.pages);
+		kvfree(mr_record->pages);
 		kfree(mr_record);
 		return NULL;
 	}
 
-	for (i = 0; i < dms_mr->npages_pinned; i++) {
+	for (i = 0; i < dms_mr->npages_total; i++) {
 		dms_mr->dma_list[i] = dma_map_page(&dd->pcidev->dev,
-		       dms_mr->pages[i], 0, PAGE_SIZE, // map whole page
+		       mr_record->pages[i], 0, PAGE_SIZE, // map whole page
 		       //we don't know the use so do bidrect
 		       DMA_BIDIRECTIONAL);
 		if (unlikely(dma_mapping_error(&dd->pcidev->dev, dms_mr->dma_list[i]))) {
@@ -986,7 +979,7 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 			       __FILENAME__, __LINE__, __func__, i,
 			       dms_mr->extended_vaddr.addr + (i << PAGE_SHIFT));
 			kvfree(mr_record->dms_mr.dma_list);
-			kvfree(mr_record->dms_mr.pages);
+			kvfree(mr_record->pages);
 			kfree(mr_record);
 			return NULL;
 		}
@@ -996,6 +989,7 @@ static struct bts_verbs_mr_record *bts_verbs_mr_record_create_from_rvtmr(
 	dms_mr->mode = rvt_mr->access_flags & IB_UVERBS_ACCESS_ZERO_BASED ? HFI1_DMS_MR_MODE_OFFSET : HFI1_DMS_MR_MODE_VADDR;
 
 	dms_mr->pinned_check_fn = bts_verbs_pinned_check;
+	dms_mr->dms_mr_memcpy_fn = verbs_host_mr_memcpy_fn;
 
 	kref_init(&mr_record->refcount);
 
@@ -1012,16 +1006,12 @@ static void bts_verbs_mr_record_destroy(struct kref* refcount)\
 	struct bts_verbs_mr_record * const mr_record =
 		container_of(refcount, struct bts_verbs_mr_record, refcount);
 
-	if (mr_record->type == BTS_VERBS_MR_RECORD_TYPE_PERSISTENT && mr_record->rvt_mr) {
+	if (mr_record->rvt_mr) {
 		rvt_put_mr(mr_record->rvt_mr);
 		mr_record->rvt_mr = NULL;
 	}
-	else if (mr_record->type == BTS_VERBS_MR_RECORD_TYPE_ONETIME && mr_record->qp_info) {
-		hfi1_bulksvc_qp_info_put(mr_record->qp_info);
-		mr_record->qp_info = NULL;
-	}
 
-	kvfree(mr_record->dms_mr.pages);
+	kvfree(mr_record->pages);
 	kvfree(mr_record->dms_mr.dma_list);
 	kfree(mr_record);
 }
@@ -1055,7 +1045,7 @@ static void bts_send_cq(struct rvt_qp *qp, u64 wr_id, u32 byte_len,
 	bool need_completion;
 	struct rvt_dev_info *rdi = ib_to_rvt(qp->ibqp.device);
 	spin_lock_irqsave(&qp->s_lock, lflags);
-	
+
 	struct ib_wc w = {
 		.wr_id = wr_id,
 		.status = status,
@@ -1224,13 +1214,12 @@ static int bulksvc_verbs_hotpath_send_one(struct hfi1_bulksvc *svc,
 
 		if (!mr_record || mr_record->rkey != sge->lkey) {
 			list_for_each_entry(mr_record, &verbs_state->mr_info_records, list_entry) {
-				if (mr_record->type == BTS_VERBS_MR_RECORD_TYPE_PERSISTENT &&
-				    mr_record->rkey == sge->lkey) {
+				if (mr_record->rkey == sge->lkey) {
 					break;
 				}
 			}
 		}
-	
+
 		if (WARN_ON(!mr_record)) {
 			pr_err("%s:%d:%s() bulksvc: Failed to find any MR records\n",
 			__FILENAME__, __LINE__, __func__);
@@ -1281,7 +1270,7 @@ static int bulksvc_verbs_hotpath_send_one(struct hfi1_bulksvc *svc,
 
 		cookie->qp = qp; /* calling func grabbed ref */
 		cookie->sge_info = sge_info;
-		cookie->wr_id = wr->wr_id; 
+		cookie->wr_id = wr->wr_id;
 		cookie->wr_opcode = wr->opcode;
 		cookie->byte_len = total_wqe_len;
 		bts_verbs_mr_record_get(mr_record);
@@ -1306,7 +1295,7 @@ static int bulksvc_verbs_hotpath_send_one(struct hfi1_bulksvc *svc,
 						remote_addr, sge_size, &mr_record->dms_mr,
 						mr_record->rvt_mr->user_base +
 						user_base_offset,
-						0, 0,						
+						0, 0,
 						completion, true, order_key);
 		} else if (rdma_opcode == IB_WR_RDMA_WRITE_WITH_IMM) {
 			u16 flags = HFI1_BULKSVC_VERBS_WRITE_FLAGS_IMMDT;
@@ -1329,7 +1318,7 @@ static int bulksvc_verbs_hotpath_send_one(struct hfi1_bulksvc *svc,
 						remote_addr, sge_size, &mr_record->dms_mr,
 						mr_record->rvt_mr->user_base +
 						user_base_offset,
-						flags, imm_data,						
+						flags, imm_data,
 						completion, true, order_key);
 		} else {
 			pr_err("unknown opcode %u\n", rdma_opcode);
@@ -1432,7 +1421,7 @@ void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
 		} else {
 			wr = &swr;
 		}
-		
+
 		ulong flags;
 		bool can_send_hotpath = false;
 
@@ -1448,7 +1437,7 @@ void bulksvc_on_cmd_uverbs_post_send(struct hfi1_bulksvc * const svc,
 			} else {
 				can_send_hotpath = false;
 			}
-	
+
 			if (can_send_hotpath) {
 				if (qp_info->hotpath_rdma_ops_inflight == 0) {
 					qp->s_flags |= HFI1_S_TID_WAIT_INTERLCK;
@@ -1507,4 +1496,37 @@ post_errs:
 		ptr += sizeof(*user_wr) + (user_wr->num_sge * sizeof(*sge));
 	}
 	rvt_put_qp(qp);
+}
+
+static int verbs_host_mr_memcpy_fn(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read)
+{
+	u8 *cdata = (u8 *)data;
+
+	if (WARN_ON(!mr))
+		return -EINVAL;
+
+	if (WARN_ON(offset > mr->extended_vaddr.len || size > mr->extended_vaddr.len - offset))
+		return -EINVAL;
+
+	struct bts_verbs_mr_record *mr_record = container_of(mr, struct bts_verbs_mr_record, dms_mr);
+
+	while (size > 0) {
+		u64 page_index = offset / PAGE_SIZE;
+		u64 offset_in_page = offset % PAGE_SIZE;
+		u64 to_copy = min_t(u64, size, PAGE_SIZE - offset_in_page);
+		struct page *page = mr_record->pages[page_index];
+		void *kaddr = kmap_atomic(page);
+
+		if (is_read)
+			memcpy(cdata, kaddr + offset_in_page, to_copy);
+		else
+			memcpy(kaddr + offset_in_page, cdata, to_copy);
+
+		kunmap_atomic(kaddr);
+
+		size -= to_copy;
+		offset += to_copy;
+		cdata += to_copy;
+	}
+	return 0;
 }

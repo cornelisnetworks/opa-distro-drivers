@@ -545,6 +545,16 @@ static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_SYNCCMD)(struct uverbs_attr_bundle
 		return ret;
 	}
 
+	size_t max_allowed_blocks = 0;
+	if (hdr.op == HFI1_BULKSVC_CMD_MR_OPEN) {
+		max_allowed_blocks = (sizeof(struct hfi1_bulksvc_cmd_hdr) + sizeof(struct hfi1_bulksvc_cmd_mr_open) + (CACHELINE_SIZE - 1)) / CACHELINE_SIZE;
+	}
+
+	if (hdr.num_blocks > max_allowed_blocks) {
+		pr_err("invalid bulksvc cmd num_blocks from user\n");
+		return -EINVAL;
+	}
+
 	struct hfi1_bulksvc_cmd *cmd = kzalloc(hdr.num_blocks * CACHELINE_SIZE, GFP_KERNEL);
 	if (!cmd) {
 		pr_err("failed to allocate bulksvc synccmd\n");
@@ -554,12 +564,12 @@ static int UVERBS_HANDLER(HFI1_METHOD_BULKSVC_SYNCCMD)(struct uverbs_attr_bundle
 	ret = _uverbs_copy_from_or_zero(cmd, attrs, HFI1_ATTR_BULKSVC_SYNCCMD,
 				hdr.num_blocks * CACHELINE_SIZE);
 	if (ret != 0) {
-		pr_err("failed to copy bulksvc cmd from user, rc %d, \n", ret);
+		pr_err("failed to copy bulksvc cmd from user, rc %d\n", ret);
 		kfree(cmd);
 		return ret;
 	}
 
-	ret =  do_bulksvc_synccmd(fd, cmd);
+	ret = do_bulksvc_synccmd(fd, cmd);
 
 	kfree(cmd);
 	return ret;
