@@ -2,13 +2,49 @@
 #include "bulksvc_verbs.h" // to call post_send handler
 #include "bulksvc.h"
 #include "dms.h"
+#include <linux/dma-buf.h>
+#include <linux/dma-resv.h>
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
+// mr_record management
+static struct hfi1_bulksvc_user_mr_record *user_mr_record_create_pinned_and_insert(struct hfi1_bulksvc_user_info *user_info, uintptr_t vaddr, u64 len, u64 flags, u32 hmem_iface, u32 hmem_device, union hfi1_bulksvc_userctxt_cmd_data *cmd_data);
+static void user_mr_record_destroy(struct hfi1_bulksvc_user_mr_record *mr_record);
+static void user_mr_record_get(struct hfi1_bulksvc_user_mr_record *mr_record);
 static void user_mr_record_put(struct hfi1_bulksvc_user_mr_record *mr_record);
-void user_mr_access_record_destroy_and_remove(struct hfi1_bulksvc_user_mr_access_record *access_record);
+static struct hfi1_bulksvc_user_mr_record *
+lookup_user_mr_record(struct hfi1_bulksvc_user_info *user_info,
+		 u32 user_handle);
+static int validate_mr_access(struct hfi1_bulksvc_user_mr_record *mr, u64 offset, u32 len);
 
+// mr_access_record management
+static struct hfi1_bulksvc_user_mr_access_record *
+user_mr_access_record_create_and_insert(struct hfi1_bulksvc_user_info *user_info,
+		 u32 access_key, struct hfi1_bulksvc_user_mr_record *mr_record);
+static void user_mr_access_record_destroy_and_remove(struct hfi1_bulksvc_user_mr_access_record *access_record);
+static struct hfi1_bulksvc_user_mr_access_record *
+lookup_user_mr_access_record(struct hfi1_bulksvc_user_info *user_info,
+		 u32 access_key);
+
+// For use as dms function pointers
+static int dms_mr_host_memcpy(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read);
+static int dms_mr_dmabuf_memcpy(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read);
+static int user_mr_record_host_pinned_check(struct hfi1_dms_mr *mr,
+					 unsigned int start_page_index,
+					 unsigned int npages_to_request);
+
+static int user_mr_record_dmabuf_pinned_check(struct hfi1_dms_mr *mr,
+					 unsigned int start_page_index,
+					 unsigned int npages_to_request);
+
+// Defined in bulksvc.c
 extern uint bulksvc_user_queue_size_pages_log2;
+
+static struct hfi1_bulksvc_queue_record *
+get_cmplq_record(struct hfi1_bulksvc *svc,
+		 struct hfi1_bulksvc_user_info *user_info, u32 cmplq_id);
+
+
 struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedata *fd)
 {
 	pr_debug("hfi1: bulksvc enabled, creating user info\n");
@@ -17,6 +53,10 @@ struct hfi1_bulksvc_user_info* hfi1_bulksvc_user_info_create(struct hfi1_filedat
 	if (!bulksvc_user_info)
 		return NULL;
 	u64 const max_cmds_per_queue = (1 << bulksvc_user_queue_size_pages_log2) * PAGE_SIZE / CACHELINE_SIZE;
+
+	INIT_LIST_HEAD(&bulksvc_user_info->userctxt_cmdq);
+	mutex_init(&bulksvc_user_info->userctxt_cmdq_lock);
+
 	u64 num_overflow = 2 * max(BULKSVC_USER_MAX_NUM_CMDQS, BULKSVC_USER_MAX_NUM_CMPLQS) * max_cmds_per_queue;
 	union hfi1_bulksvc_upd *overflows = kmalloc_array(num_overflow, sizeof(union hfi1_bulksvc_upd), GFP_KERNEL);
 	if (!overflows) {
@@ -136,6 +176,22 @@ void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info)
 			vfree(info->cmdq_records[i].queue_buf);
 		}
 	}
+
+	mutex_lock(&info->userctxt_cmdq_lock);
+	struct hfi1_bulksvc_userctxt_cmd_entry *entry, *tmp;
+	list_for_each_entry_safe(entry, tmp, &info->userctxt_cmdq, node) {
+		list_del(&entry->node);
+		dd_dev_dbg(info->svc->dd, "Sync command unhandled at user info teardown.  user %d, op %d\n", info->client_key, entry->cmd.hdr.op);
+		// Release dma_buf if this is a DMABUF MR_OPEN command
+		if (entry->cmd.hdr.op == HFI1_BULKSVC_CMD_MR_OPEN &&
+			entry->cmd.payld->mr_open.hmem_iface == HFI1_HFISVC_HMEM_IFACE_DMABUF &&
+			entry->data.dmabuf && !IS_ERR(entry->data.dmabuf)) {
+			dma_buf_put(entry->data.dmabuf);
+		}
+		kfree(entry);
+	}
+	mutex_unlock(&info->userctxt_cmdq_lock);
+
 	kfree(info->completion_overflow_records);
 	kfree(info->completion_overflows);
 
@@ -249,15 +305,59 @@ static void give_completion(struct hfi1_bulksvc_user_info *user_info, struct hfi
 	}
 }
 
-static int user_mr_record_pinned_check(struct hfi1_dms_mr *mr,
+static int user_mr_record_host_pinned_check(struct hfi1_dms_mr *mr,
+					 unsigned int start_page_index,
+					 unsigned int npages_to_request)
+{
+	struct hfi1_bulksvc_user_mr_record *user_mr = container_of(mr, struct hfi1_bulksvc_user_mr_record, dms_mr);
+	return hfi1_mem_region_pinned_check(user_mr->mem_region.hfi1_mr, start_page_index, npages_to_request);
+}
+
+static int user_mr_record_dmabuf_pinned_check(struct hfi1_dms_mr *mr,
 					 unsigned int start_page_index,
 					 unsigned int npages_to_request)
 {
 	struct hfi1_bulksvc_user_mr_record* user_mr = container_of(mr, struct hfi1_bulksvc_user_mr_record, dms_mr);
-	return hfi1_mem_region_pinned_check(user_mr->hfi1_mr, start_page_index, npages_to_request);
+	return user_mr->mem_region.sg_table ? 0 : -EINVAL;
 }
 
-static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_insert(struct hfi1_bulksvc_user_info* user_info, uintptr_t vaddr, u64 len, u64 flags)
+static void user_mr_record_destroy(struct hfi1_bulksvc_user_mr_record *mr_record)
+{
+	if (mr_record) {
+		if (mr_record->mr_type == HFI1_BULKSVC_MR_TYPE_DMABUF) {
+			if (mr_record->mem_region.vmap.vaddr_iomem) {
+				dma_buf_vunmap_unlocked(mr_record->mem_region.dma_buf, &mr_record->mem_region.vmap);
+				mr_record->mem_region.vmap.vaddr_iomem = NULL;
+			}
+			if (mr_record->mem_region.sg_table) {
+				dma_buf_unmap_attachment_unlocked(mr_record->mem_region.dma_buf_attachment, mr_record->mem_region.sg_table, DMA_BIDIRECTIONAL);
+				mr_record->mem_region.sg_table = NULL;
+			}
+
+			// This is only allocated for the dmabuf variant, in host variant it is a
+			// weak ref to the hfi1_mem_region one
+			kfree(mr_record->dms_mr.dma_list);
+			mr_record->dms_mr.dma_list = NULL;
+
+			if (mr_record->mem_region.dma_buf_attachment) {
+				dma_buf_detach(mr_record->mem_region.dma_buf, mr_record->mem_region.dma_buf_attachment);
+				mr_record->mem_region.dma_buf_attachment = NULL;
+			}
+			if (mr_record->mem_region.dma_buf) {
+				dma_buf_put(mr_record->mem_region.dma_buf);
+				mr_record->mem_region.dma_buf = NULL;
+			}
+		} else if (mr_record->mr_type == HFI1_BULKSVC_MR_TYPE_HOST) {
+			if (mr_record->mem_region.hfi1_mr) {
+				hfi1_mem_region_put(mr_record->mem_region.hfi1_mr);
+				mr_record->mem_region.hfi1_mr = NULL;
+			}
+		}
+		kfree(mr_record);
+	}
+}
+
+static struct hfi1_bulksvc_user_mr_record *user_mr_record_create_pinned_and_insert(struct hfi1_bulksvc_user_info *user_info, uintptr_t vaddr, u64 len, u64 flags, u32 hmem_iface, u32 hmem_device, union hfi1_bulksvc_userctxt_cmd_data *cmd_data)
 {
 	struct hfi1_bulksvc_user_mr_record *mr_record;
 
@@ -267,12 +367,131 @@ static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_ins
 		return NULL;
 	}
 
-	// TODO, async pin
-	mr_record->hfi1_mr = hfi1_mem_region_pin(user_info->mmu, vaddr, len);
-	if (!mr_record->hfi1_mr) {
-		pr_err("%s:%d:%s() ERROR: Failed to pin memory region\n", __FILENAME__, __LINE__, __func__);
-		kfree(mr_record);
-		return NULL;
+	switch (hmem_iface) {
+	case HFI1_HFISVC_HMEM_IFACE_SYSTEM: {
+		mr_record->mr_type = HFI1_BULKSVC_MR_TYPE_HOST;
+		// TODO, async pin
+		mr_record->mem_region.hfi1_mr = hfi1_mem_region_pin(user_info->mmu, vaddr, len);
+		if (!mr_record->mem_region.hfi1_mr) {
+			pr_err("%s:%d:%s() ERROR: Failed to pin memory region\n", __FILENAME__, __LINE__, __func__);
+			goto error_cleanup;
+		}
+
+		// Weak refs, lifetimes tied
+		struct hfi1_dms_mr *dms_mr = &mr_record->dms_mr;
+		dms_mr->dma_list = mr_record->mem_region.hfi1_mr->dma_list;
+		dms_mr->extended_vaddr.addr = mr_record->mem_region.hfi1_mr->rb.addr;
+		dms_mr->extended_vaddr.len = mr_record->mem_region.hfi1_mr->rb.len;
+		dms_mr->npages_total = mr_record->mem_region.hfi1_mr->npages_total;
+		dms_mr->pinned_check_fn = user_mr_record_host_pinned_check;
+		dms_mr->dms_mr_memcpy_fn = dms_mr_host_memcpy;
+
+		break;
+	}
+	case HFI1_HFISVC_HMEM_IFACE_DMABUF: {
+		mr_record->mr_type = HFI1_BULKSVC_MR_TYPE_DMABUF;
+
+		if (WARN_ON(!cmd_data)) {
+			pr_err("%s:%d:%s() ERROR: cmd_data is NULL for dma buf MR\n", __FILENAME__, __LINE__, __func__);
+			goto error_cleanup;
+		}
+		if (WARN_ON(!cmd_data->dmabuf)) {
+			pr_err("%s:%d:%s() ERROR: cmd_data->dmabuf is NULL for dma buf MR, mr_open for dmabuf must be done through sync cmdq\n", __FILENAME__, __LINE__, __func__);
+			goto error_cleanup;
+		}
+
+		mr_record->mem_region.dma_buf = cmd_data->dmabuf;
+
+		if (!mr_record->mem_region.dma_buf) {
+			pr_err("%s:%d:%s() ERROR: Failed to get dma_buf for fd %u\n", __FILENAME__, __LINE__, __func__, hmem_device);
+			goto error_cleanup;
+		}
+		if (IS_ERR(mr_record->mem_region.dma_buf)) {
+			pr_err("%s:%d:%s() ERROR: dma_buf_get returned error %ld for fd %u\n", __FILENAME__, __LINE__, __func__, PTR_ERR(mr_record->mem_region.dma_buf), hmem_device);
+			mr_record->mem_region.dma_buf = NULL;
+			goto error_cleanup;
+		}
+		mr_record->mem_region.dma_buf_attachment = dma_buf_attach(mr_record->mem_region.dma_buf, &user_info->svc->dd->pcidev->dev);
+		if (!mr_record->mem_region.dma_buf_attachment) {
+			pr_err("%s:%d:%s() ERROR: Failed to attach dma_buf for fd %u\n", __FILENAME__, __LINE__, __func__, hmem_device);
+			goto error_cleanup;
+		}
+		if (IS_ERR(mr_record->mem_region.dma_buf_attachment)) {
+			pr_err("%s:%d:%s() ERROR: dma_buf_attach returned error %ld for fd %u\n", __FILENAME__, __LINE__, __func__, PTR_ERR(mr_record->mem_region.dma_buf_attachment), hmem_device);
+			mr_record->mem_region.dma_buf_attachment = NULL;
+			goto error_cleanup;
+		}
+
+		// TODO do not hold mapping longer than necessary
+		mr_record->mem_region.sg_table = dma_buf_map_attachment_unlocked(mr_record->mem_region.dma_buf_attachment, DMA_BIDIRECTIONAL);
+
+		if (!mr_record->mem_region.sg_table) {
+			pr_err("%s:%d:%s() ERROR: Failed to map dma_buf for fd %u\n", __FILENAME__, __LINE__, __func__, hmem_device);
+			goto error_cleanup;
+		}
+		if (IS_ERR(mr_record->mem_region.sg_table)) {
+			pr_err("%s:%d:%s() ERROR: dma_buf_map_attachment returned error %ld for fd %u\n", __FILENAME__, __LINE__, __func__, PTR_ERR(mr_record->mem_region.sg_table), hmem_device);
+			mr_record->mem_region.sg_table = NULL;
+			goto error_cleanup;
+		}
+
+		u64 const begin_aligned_down = ALIGN_DOWN(vaddr, PAGE_SIZE);
+		u64 const end_aligned_up = ALIGN(vaddr + len, PAGE_SIZE);
+		u64 const extended_input_len = end_aligned_up - begin_aligned_down;
+		if (WARN_ON(extended_input_len < len)) {
+			dd_dev_err(user_info->svc->dd, "Unexpected result of extending user buffer to page size, extended len %llu, orig len %llu\n", extended_input_len, len);
+			goto error_cleanup;
+		}
+
+		struct hfi1_dms_mr *dms_mr = &mr_record->dms_mr;
+
+		u64 const num_pages = extended_input_len / PAGE_SIZE;
+
+		dms_mr->npages_total = num_pages;
+
+		dms_mr->dma_list = kmalloc_array(num_pages, sizeof(dma_addr_t), GFP_KERNEL);
+
+		u64 mapping_pages = 0;
+
+		for (s64 sgl_idx = 0; sgl_idx < mr_record->mem_region.sg_table->nents && mapping_pages < num_pages; ++sgl_idx) {
+			struct scatterlist *sg = &mr_record->mem_region.sg_table->sgl[sgl_idx];
+			if (sg->length % PAGE_SIZE != 0) {
+				dd_dev_err(user_info->svc->dd, "Unexpected non-page-sized sg entry in dma_buf mapping: len %u, offset %u, dma addr 0x%llx\n", sg->length, sg->offset, sg->dma_address);
+				goto error_cleanup;
+			}
+			const u64 sgl_num_pages = sg->length / PAGE_SIZE;
+
+			for (s64 sgl_page_idx = 0; sgl_page_idx < sgl_num_pages && mapping_pages < num_pages; ++sgl_page_idx) {
+				dms_mr->dma_list[mapping_pages] = sg->dma_address + (sgl_page_idx * PAGE_SIZE);
+				++mapping_pages;
+			}
+		}
+
+		if (mapping_pages != num_pages) {
+			dd_dev_err(user_info->svc->dd, "dma_buf mapping smaller than expected: mapping pages %llu, total pages %llu\n", mapping_pages, num_pages);
+			goto error_cleanup;
+		}
+
+		// Do vmap ahead of time for fixups, etc
+		// TODO defer or only map for unaligned accesses
+		int rc = dma_buf_vmap_unlocked(mr_record->mem_region.dma_buf, &mr_record->mem_region.vmap);
+		if (rc != 0) {
+			dd_dev_err(user_info->svc->dd, "dma_buf_vmap failed for fd %u: %d\n", hmem_device, rc);
+			mr_record->mem_region.vmap.vaddr_iomem = NULL;
+			goto error_cleanup;
+		}
+
+		dms_mr->extended_vaddr.addr = begin_aligned_down;
+		dms_mr->extended_vaddr.len = extended_input_len;
+
+		dms_mr->pinned_check_fn = user_mr_record_dmabuf_pinned_check;
+		dms_mr->dms_mr_memcpy_fn = dms_mr_dmabuf_memcpy;
+
+		break;
+	}
+	default:
+		pr_err("%s:%d:%s() ERROR: Unsupported hmem iface %u\n", __FILENAME__, __LINE__, __func__, hmem_iface);
+		goto error_cleanup;
 	}
 
 	mr_record->dms_mr.user.addr = vaddr;
@@ -284,17 +503,6 @@ static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_ins
 		mr_record->dms_mr.mode = HFI1_DMS_MR_MODE_OFFSET;
 	}
 
-	// Weak refs, lifetimes tied
-	mr_record->dms_mr.dma_list = mr_record->hfi1_mr->dma_list;
-	mr_record->dms_mr.pages = mr_record->hfi1_mr->pages;
-	mr_record->dms_mr.extended_vaddr.addr = mr_record->hfi1_mr->rb.addr;
-	mr_record->dms_mr.extended_vaddr.len = mr_record->hfi1_mr->rb.len;
-	mr_record->dms_mr.npages_total = mr_record->hfi1_mr->npages_total;
-	mr_record->dms_mr.npages_pinned = mr_record->hfi1_mr->npages_pinned;
-	mr_record->dms_mr.pinned_check_fn = user_mr_record_pinned_check;
-
-	mr_record->dms_mr.region_offset = mr_record->dms_mr.user.addr & (PAGE_SIZE - 1);
-	mr_record->dms_mr.mode = HFI1_DMS_MR_MODE_OFFSET;
 
 	mr_record->user_handle = user_info->next_user_mr_handle++;
 	kref_init(&mr_record->refcount);
@@ -302,17 +510,17 @@ static struct hfi1_bulksvc_user_mr_record * user_mr_record_create_pinned_and_ins
 	list_add_tail(&mr_record->list_entry, &user_info->user_mr_list);
 
 	return mr_record;
+
+error_cleanup:
+	user_mr_record_destroy(mr_record);
+	return NULL;
 }
 
 static void user_mr_record_destroy_and_remove(struct kref* ref)
 {
 	struct hfi1_bulksvc_user_mr_record *mr_record = container_of(ref, struct hfi1_bulksvc_user_mr_record, refcount);
 	list_del(&mr_record->list_entry);
-
-	hfi1_mem_region_put(mr_record->hfi1_mr);
-	mr_record->hfi1_mr = NULL;
-
-	kfree(mr_record);
+	user_mr_record_destroy(mr_record);
 }
 
 static void user_mr_record_get(struct hfi1_bulksvc_user_mr_record *mr_record)
@@ -361,7 +569,7 @@ user_mr_access_record_create_and_insert(struct hfi1_bulksvc_user_info *user_info
 	return access_record;
 }
 
-void user_mr_access_record_destroy_and_remove(struct hfi1_bulksvc_user_mr_access_record *access_record)
+static void user_mr_access_record_destroy_and_remove(struct hfi1_bulksvc_user_mr_access_record *access_record)
 {
 	list_del(&access_record->list_entry);
 	user_mr_record_put(access_record->mr_record);
@@ -390,7 +598,7 @@ static int validate_mr_access(struct hfi1_bulksvc_user_mr_record *mr, u64 offset
 			return -1;
 		}
 	} else if (mr->dms_mr.mode == HFI1_DMS_MR_MODE_OFFSET) {
-		if (offset + len > mr->hfi1_mr->rb.len) {
+		if (offset + len > mr->dms_mr.extended_vaddr.len) {
 			return -1;
 		}
 	} else {
@@ -443,9 +651,10 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
-		goto exit;
+		// TODO signal bad cmplq ID to user through some other channel
+		return;
 
-	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->size_bytes, cmd->flags);
+	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->size_bytes, cmd->flags, HFI1_HFISVC_HMEM_IFACE_SYSTEM, 0, NULL);
 	if (!mr_record) {
 		struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
@@ -457,7 +666,7 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 		cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
 		cmpl.type_default.access_key = cmd->access_key;
 		give_completion(user_info, cmplq_record, &cmpl);
-		goto exit;
+		return;
 	}
 
 	if (cmd->flags & HFI1_BULKSVC_MR_FLAG_MODE_VADDR) {
@@ -492,7 +701,6 @@ static void bulksvc_on_cmd_reg_dma_buffer(struct hfi1_bulksvc * const svc,
 		user_mr_record_put(mr_record);
 		hfi1_bulksvc_user_info_put(user_info);
 	}
-exit:
 	return;
 }
 
@@ -502,7 +710,8 @@ exit:
 
 static void bulksvc_on_cmd_mr_open(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_user_info * const user_info,
-	struct hfi1_bulksvc_cmd_mr_open const * const cmd)
+	struct hfi1_bulksvc_cmd_mr_open const * const cmd,
+	union hfi1_bulksvc_userctxt_cmd_data * const userctxt_data)
 {
 	struct hfi1_bulksvc_queue_record *cmplq_record;
 	struct hfi1_bulksvc_user_mr_record *mr_record;
@@ -515,7 +724,7 @@ static void bulksvc_on_cmd_mr_open(struct hfi1_bulksvc * const svc,
 	cmpl.app_context = cmd->app_context;
 	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_MR;
 
-	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->len, cmd->flags);
+	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->len, cmd->flags, cmd->hmem_iface, cmd->hmem_device, userctxt_data);
 
 	if (!mr_record) {
 		cmpl.status = -EFAULT;
@@ -540,7 +749,8 @@ static void bulksvc_on_cmd_mr_close(struct hfi1_bulksvc * const svc,
 
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
-		goto exit;
+		// TODO signal to user
+		return;
 
 	struct hfi1_bulksvc_user_mr_record *mr = lookup_user_mr_record(user_info, cmd->mr_key);
 	if (mr) {
@@ -555,8 +765,6 @@ static void bulksvc_on_cmd_mr_close(struct hfi1_bulksvc * const svc,
 	cmpl.type_mr.mr_key = cmd->mr_key;
 
 	give_completion(user_info, cmplq_record, &cmpl);
-exit:
-	return;
 }
 
 ///
@@ -690,7 +898,7 @@ static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 f
 	cmpl.type_notify.flags = flags;
 	cmpl.type_notify.imm_data = imm_data;
 
-		give_completion(access_cookie->user_info, cmplq_record, &cmpl);
+	give_completion(access_cookie->user_info, cmplq_record, &cmpl);
 }
 
 static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
@@ -1011,7 +1219,7 @@ static void bulksvc_on_cmd_rdma_read_va(struct hfi1_bulksvc * const svc,
 
 	hfi1_bulksvc_user_info_get(user_info);
 
-	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->len_bytes, 0);
+	mr_record = user_mr_record_create_pinned_and_insert(user_info, cmd->vaddr, cmd->len_bytes, 0, HFI1_HFISVC_HMEM_IFACE_SYSTEM, 0, NULL);
 	if (!mr_record) {
 		struct hfi1_bulksvc_cmplq_entry cmpl = { 0 };
 
@@ -1059,11 +1267,12 @@ static void bulksvc_on_user_cmd(struct hfi1_bulksvc * const svc,
 	struct hfi1_bulksvc_cmd const * const cmd,
 	union hfi1_bulksvc_userctxt_cmd_data *userctxt_data)
 {
-	if (WARN_ON(userctxt_data && userctxt_data->raw != 0)) {
+	if (WARN_ON(userctxt_data && userctxt_data->raw != 0 && cmd->hdr.op != HFI1_BULKSVC_CMD_MR_OPEN)) {
 		dd_dev_err(svc->dd, "%s:%d:%s() unexpected userctxt_data for cmd op %u\n",
 			   __FILENAME__, __LINE__, __func__, cmd->hdr.op);
 		return;
 	}
+
 	switch (cmd->hdr.op) {
 	case HFI1_BULKSVC_CMD_REG_DMA_BUFFER:
 		bulksvc_on_cmd_reg_dma_buffer(svc, user_info,
@@ -1082,7 +1291,7 @@ static void bulksvc_on_user_cmd(struct hfi1_bulksvc * const svc,
 					  &cmd->payld[0].rdma_write);
 		break;
 	case HFI1_BULKSVC_CMD_MR_OPEN:
-		bulksvc_on_cmd_mr_open(svc, user_info, &cmd->payld[0].mr_open);
+		bulksvc_on_cmd_mr_open(svc, user_info, &cmd->payld[0].mr_open, userctxt_data);
 		break;
 	case HFI1_BULKSVC_CMD_MR_CLOSE:
 		bulksvc_on_cmd_mr_close(svc, user_info,
@@ -1177,11 +1386,11 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 					continue;
 				}
 
+				user_info->num_inflight += 1;
 				bulksvc_on_user_cmd(svc, user_info, next_cmd, NULL);
 				head += next_cmd->hdr.num_blocks;
 				atomic64_set_release(rec->head, head);
 
-				user_info->num_inflight += 1;
 				processed += 1;
 				handled_any = true;
 			}
@@ -1191,12 +1400,12 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 							 struct hfi1_bulksvc_userctxt_cmd_entry,
 							 node);
 
+				user_info->num_inflight += 1;
 				bulksvc_on_user_cmd(svc, user_info, &entry->cmd, &entry->data);
 
 				list_del(&entry->node);
 				kfree(entry);
 
-				user_info->num_inflight += 1;
 				processed += 1;
 				handled_any = true;
 			}
@@ -1206,4 +1415,66 @@ int hfi1_bulksvc_poll_user_cmds(struct hfi1_bulksvc * const svc)
 	}
 	mutex_unlock(&svc->user_info_lock);
 	return processed;
+}
+
+static int dms_mr_host_memcpy(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read)
+{
+	u8 *cdata = (u8 *) data;
+
+	if (WARN_ON(mr == NULL)) {
+		return -EINVAL;
+	}
+
+	if (WARN_ON(offset > mr->extended_vaddr.len || size > mr->extended_vaddr.len - offset))
+		return -EINVAL;
+
+	struct hfi1_bulksvc_user_mr_record *mr_record = container_of(mr, struct hfi1_bulksvc_user_mr_record, dms_mr);
+
+	while (size > 0) {
+		u64 page_index = offset / PAGE_SIZE;
+		u64 offset_in_page = offset % PAGE_SIZE;
+		u64 to_copy = min_t(u64, size, PAGE_SIZE - offset_in_page);
+		struct page *page = mr_record->mem_region.hfi1_mr->pages[page_index];
+		void *kaddr = kmap_atomic(page);
+
+		if (is_read)
+			memcpy(cdata, kaddr + offset_in_page, to_copy);
+		else
+			memcpy(kaddr + offset_in_page, cdata, to_copy);
+
+		kunmap_atomic(kaddr);
+
+		size -= to_copy;
+		offset += to_copy;
+		cdata += to_copy;
+	}
+	return 0;
+}
+
+static int dms_mr_dmabuf_memcpy(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read)
+{
+	if (WARN_ON(!mr) || WARN_ON(!data)) {
+		return -EINVAL;
+	}
+
+	struct hfi1_bulksvc_user_mr_record *mr_record = container_of(mr, struct hfi1_bulksvc_user_mr_record, dms_mr);
+	int rc = dma_buf_begin_cpu_access(mr_record->mem_region.dma_buf, is_read ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
+	if (WARN_ON(rc != 0)) {
+		pr_err("dma_buf_begin_cpu_access failed: %d\n", rc);
+		return rc;
+	}
+
+	u8 *cdata = (u8 *)data;
+
+	if (is_read)
+		memcpy(cdata, ((u8 *)mr_record->mem_region.vmap.vaddr_iomem) + offset, size);
+	else
+		memcpy(((u8 *)mr_record->mem_region.vmap.vaddr_iomem) + offset, cdata, size);
+
+	rc = dma_buf_end_cpu_access(mr_record->mem_region.dma_buf, is_read ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
+	if (WARN_ON(rc != 0)) {
+		pr_err("dma_buf_end_cpu_access failed: %d\n", rc);
+		return rc;
+	}
+	return 0;
 }

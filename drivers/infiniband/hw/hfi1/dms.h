@@ -93,10 +93,8 @@ struct hfi1_dms_mr {
 		unsigned long len;
 	} extended_vaddr;
 	
-	struct page** pages;
 	dma_addr_t *dma_list;
 	unsigned int npages_total;
-	unsigned int npages_pinned;
 
 	struct {
 		unsigned long addr;	// user unaligned vaddr of start of buffer
@@ -107,6 +105,7 @@ struct hfi1_dms_mr {
 	u32 active_count;
 
 	int (*pinned_check_fn)(struct hfi1_dms_mr *mr, unsigned int start_page_index, unsigned int npages_to_request);
+	int (*dms_mr_memcpy_fn)(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read);
 };
 
 enum hfi1_dms_access_type {
