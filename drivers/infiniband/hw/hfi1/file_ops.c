@@ -10,6 +10,7 @@
 #include <linux/io.h>
 #include <linux/sched/mm.h>
 #include <linux/bitmap.h>
+#include <linux/dma-buf.h>
 
 #include <rdma/ib.h>
 
@@ -2461,16 +2462,35 @@ static int ioctl_bulksvc_synccmd(struct hfi1_filedata *fd, unsigned long arg, u3
 	struct hfi1_bulksvc_cmd * const __user cmd_user = (struct hfi1_bulksvc_cmd __user *)arg;
 
 	struct hfi1_bulksvc_cmd_hdr hdr;
+	if (len < sizeof(hdr)) {
+		pr_err("invalid bulksvc cmd size from user\n");
+		return -EINVAL;
+	}
+
 	if (copy_from_user(&hdr, &cmd_user->hdr, sizeof(hdr))) {
 		pr_err("failed to copy bulksvc cmd hdr from user\n");
 		return -EFAULT;
 	}
 
-	struct hfi1_bulksvc_cmd * cmd = kzalloc(hdr.num_blocks * CACHELINE_SIZE, GFP_KERNEL);
+	size_t max_allowed_blocks = 0;
+	if (hdr.op == HFI1_BULKSVC_CMD_MR_OPEN) {
+		max_allowed_blocks = (sizeof(struct hfi1_bulksvc_cmd_hdr) + sizeof(struct hfi1_bulksvc_cmd_mr_open) + (CACHELINE_SIZE - 1)) / CACHELINE_SIZE;
+	}
 
+	if (hdr.num_blocks > max_allowed_blocks) {
+		pr_err("invalid bulksvc cmd num_blocks from user\n");
+		return -EINVAL;
+	}
+
+	struct hfi1_bulksvc_cmd * cmd = kzalloc(hdr.num_blocks * CACHELINE_SIZE, GFP_KERNEL);
+	if (!cmd) {
+		pr_err("failed to allocate bulksvc synccmd\n");
+		return -ENOMEM;
+	}
 	if (copy_from_user(cmd, cmd_user,
 			   hdr.num_blocks * CACHELINE_SIZE)) {
 		pr_err("failed to copy bulksvc cmd from user\n");
+		kfree(cmd);
 		return -EFAULT;
 	}
 
@@ -2494,7 +2514,17 @@ int do_bulksvc_synccmd(struct hfi1_filedata *fd,
 	memcpy(&entry->cmd, cmd, (cmd->hdr.num_blocks * CACHELINE_SIZE));
 
 	switch (entry->cmd.hdr.op) {
-	// Currently reject all opcodes passed as synccmds
+	case HFI1_BULKSVC_CMD_MR_OPEN:
+		if (entry->cmd.payld->mr_open.hmem_iface == HFI1_HFISVC_HMEM_IFACE_DMABUF) {
+			entry->data.dmabuf = dma_buf_get(entry->cmd.payld->mr_open.hmem_device);
+			// Check for errors in bulksvc thread
+		} else {
+			// Currently only accept dma buf mr_opens
+			kfree(entry);
+			return -EINVAL;
+		}
+		break;
+	// Currently reject all other opcodes passed as synccmds
 	default:
 		kfree(entry);
 		return -EINVAL;
@@ -2503,6 +2533,8 @@ int do_bulksvc_synccmd(struct hfi1_filedata *fd,
 	mutex_lock(&fd->bulksvc_user_info->userctxt_cmdq_lock);
 	list_add_tail(&entry->node, &fd->bulksvc_user_info->userctxt_cmdq);
 	mutex_unlock(&fd->bulksvc_user_info->userctxt_cmdq_lock);
+
+	hfi1_bulksvc_schedule(fd->bulksvc_user_info->svc);
 
 	return 0;
 }
