@@ -30,9 +30,6 @@
 #include "sriov.h"
 #include "chip_gen.h"
 
-extern int sriov_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
-			   enum ib_qp_type type, u32 port_num);
-
 static unsigned int hfi1_lkey_table_size = 16;
 module_param_named(lkey_table_size, hfi1_lkey_table_size, uint,
 		   S_IRUGO);
