@@ -51,7 +51,7 @@ static int _fault_stats_seq_show(struct seq_file *s, void *v)
 	int pidx;
 
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
-		for (j = dd->rsrcs.ppd[pidx].rcv_context_base;
+		for (j = dd->rsrcs.ppr[pidx].rcv_context_base;
 		     j < dd->rsrcs.ppr[pidx].first_dyn_alloc_ctxt;
 		     j++) {
 			rcd = hfi1_rcd_get_by_index(dd, j);
