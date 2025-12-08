@@ -887,7 +887,7 @@ static void lb_init_sysfs(struct hfi1_devdata *dd, struct device *class_dev)
 }
 
 /* for additional output to "hw_resources" */
-int lb_sysfs_emit_at(struct hfi1_devdata *dd, char *buf, int at)
+static int lb_sysfs_emit_at(struct hfi1_devdata *dd, char *buf, int at)
 {
 	struct vf2pf_lbdata *lbd = dd->vf2pf;
 	int off = at;
