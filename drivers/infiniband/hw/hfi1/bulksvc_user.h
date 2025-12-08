@@ -1,6 +1,7 @@
 #ifndef DEF_HFI1_BULKSVC_USER_H
 #define DEF_HFI1_BULKSVC_USER_H
 
+#include <linux/iosys-map.h>
 #include <linux/types.h>
 #include <linux/kref.h>
 #include <linux/mutex.h>
@@ -23,11 +24,29 @@ struct hfi1_bulksvc_queue_record {
 #define BULKSVC_USER_MAX_NUM_CMPLQS 16
 #define BULKSVC_USER_MAX_NUM_CMDQS 16
 
+enum hfi1_bulksvc_mr_type {
+	HFI1_BULKSVC_MR_TYPE_HOST,
+	HFI1_BULKSVC_MR_TYPE_DMABUF,
+};
+
 struct hfi1_bulksvc_user_mr_record {
 	struct list_head list_entry;
 	struct kref refcount; // Can have multiple outstanding transactions
 	u32 user_handle;
-	struct hfi1_mem_region *hfi1_mr;
+
+	enum hfi1_bulksvc_mr_type mr_type;
+	union {
+		struct {
+			struct hfi1_mem_region *hfi1_mr;
+		};
+		struct {
+			struct dma_buf *dma_buf;
+			struct dma_buf_attachment *dma_buf_attachment;
+			struct sg_table *sg_table;
+			struct iosys_map vmap; // for fixups
+		};
+	} mem_region;
+
 	struct hfi1_dms_mr dms_mr;
 };
 
@@ -39,6 +58,7 @@ struct hfi1_bulksvc_user_mr_access_record {
 
 union hfi1_bulksvc_userctxt_cmd_data {
 	u64 raw;
+	struct dma_buf *dmabuf;
 };
 
 struct hfi1_bulksvc_userctxt_cmd_entry {

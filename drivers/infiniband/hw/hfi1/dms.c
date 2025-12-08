@@ -6626,44 +6626,14 @@ void _set_ctrl_split_point(struct hfi1_dms *dms, u8 pidx, struct hfi1_ctxtdata *
 
 }
 
-static inline int _mr_memcpy(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data, const bool is_read)
-{
-	u8 *cdata = (u8 *) data;
-
-	DMS_BUG_ON(mr == NULL);
-
-	if (offset > mr->extended_vaddr.len || size > mr->extended_vaddr.len - offset)
-		return -EINVAL;
-
-	while (size > 0) {
-		u64 page_index = offset / PAGE_SIZE;
-		u64 offset_in_page = offset % PAGE_SIZE;
-		u64 to_copy = min_t(u64, size, PAGE_SIZE - offset_in_page);
-		struct page *page = mr->pages[page_index];
-		void *kaddr = kmap_atomic(page);
-
-		if (is_read)
-			memcpy(cdata, kaddr + offset_in_page, to_copy);
-		else
-			memcpy(kaddr + offset_in_page, cdata, to_copy);
-
-		kunmap_atomic(kaddr);
-
-		size -= to_copy;
-		offset += to_copy;
-		cdata += to_copy;
-	}
-	return 0;
-}
-
 int hfi1_dms_impl_slow_write_to_user(struct hfi1_dms_mr *mr, u64 offset, u64 size, const void *data)
 {
-	return _mr_memcpy(mr, offset, size, (void *)data, false);
+	return mr->dms_mr_memcpy_fn(mr, offset, size, (void *)data, false);
 }
 
 int hfi1_dms_impl_slow_read_from_user(struct hfi1_dms_mr *mr, u64 offset, u64 size, void *data)
 {
-	return _mr_memcpy(mr, offset, size, data, true);
+	return mr->dms_mr_memcpy_fn(mr, offset, size, data, true);
 }
 
 
