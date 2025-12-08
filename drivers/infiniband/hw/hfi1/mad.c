@@ -5188,7 +5188,7 @@ static void print_mad(struct hfi1_devdata *dd, u32 port, const struct ib_mad *in
  * Send a MAD to CPORT over MCTXT as a pass-through.
  * We always use 9B for now.
  */
-static int cport_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len)
+int cport_send_only_mad(struct hfi1_devdata *dd, u8 sb, const void *mad, int len)
 {
 	u8 *buf;
 	int size = len + MAD_9B_OFFSET;
