@@ -105,4 +105,6 @@ u32 mtu_from_qp(struct rvt_dev_info *rdi, struct rvt_qp *qp, u32 pmtu);
 int mtu_to_path_mtu(u32 mtu);
 void hfi1_error_port_qps(struct hfi1_ibport *ibp, u8 sl);
 void hfi1_qp_unbusy(struct rvt_qp *qp, struct iowait_work *wait);
+int sriov_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
+		    enum ib_qp_type type, u32 port_num);
 #endif /* _QP_H */
