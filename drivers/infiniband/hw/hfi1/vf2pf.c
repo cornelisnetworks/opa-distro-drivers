@@ -1003,10 +1003,8 @@ int vf2pf_prep(struct hfi1_devdata *dd)
  * It must not depend on any SRIOV configuration being setup,
  * but may call into the sriov module to decide if SRIOV is allowed.
  */
-int vf2pf_init(struct hfi1_devdata *dd)
+int vf2pf_early_init(struct hfi1_devdata *dd)
 {
-	int ret;
-
 	if (dd->params->chip_type == CHIP_WFR || !dd->is_sriov)
 		return 0;
 
@@ -1023,9 +1021,17 @@ int vf2pf_init(struct hfi1_devdata *dd)
 		vf2pf_dev = get_lb_devops();
 #endif
 	/* this may require BARs, must have been mapped by now */
-	ret = hfi1_sriov_set_si(dd);
-	if (ret)
-		return ret;
+	return hfi1_sriov_set_si(dd);
+}
+
+/*
+ * This does the actual vf2pf implementation init,
+ * which may need to be done later.
+ */
+int vf2pf_init(struct hfi1_devdata *dd)
+{
+	if (dd->params->chip_type == CHIP_WFR || !dd->is_sriov)
+		return 0;
 
 	if (!vf2pf_dev->init)
 		return 0;
