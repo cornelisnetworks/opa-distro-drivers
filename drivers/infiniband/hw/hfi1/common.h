@@ -219,6 +219,8 @@ struct diag_pkt {
 #define RHF_JKR_L2_TYPE_SHIFT 54
 #define RHF_JKR_L2_TYPE_MASK 0x3ull
 
+#define RHF_JKR_RHE_VALID (0x1ull << 63)
+
 #define RHF_ERROR_SMASK 0xffe0000000000000ull		/* bits 63:53 */
 
 /* RHF receive types */
@@ -342,5 +344,10 @@ static inline u32 rhf_egr_buf_offset(u64 rhf)
 static inline u32 jkr_rhf_l2_type(u64 rhf)
 {
 	return (u32) ((rhf >> RHF_JKR_L2_TYPE_SHIFT) & RHF_JKR_L2_TYPE_MASK);
+}
+
+static inline bool jkr_rhf_rhe_valid(u64 rhf)
+{
+	return (bool)(rhf & RHF_JKR_RHE_VALID);
 }
 #endif /* _COMMON_H */
