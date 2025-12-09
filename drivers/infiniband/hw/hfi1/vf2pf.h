@@ -12,6 +12,7 @@
 
 #define VF2PF_SI_ALL	(-1)
 
+int vf2pf_early_init(struct hfi1_devdata *dd);
 int vf2pf_init(struct hfi1_devdata *dd);
 int vf2pf_prep(struct hfi1_devdata *dd);
 void vf2pf_deinit(struct hfi1_devdata *dd);

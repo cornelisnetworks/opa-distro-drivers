@@ -16449,10 +16449,20 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	dd->rctxt_mask = (1 << fls(chip_rcv_contexts(dd))) - 1;
 	dd->sctxt_mask = (1 << fls(chip_send_contexts(dd))) - 1;
 
-	/* This must also set the SI */
-	ret = vf2pf_init(dd);
+	ret = vf2pf_early_init(dd);
 	if (ret)
 		goto bail_cleanup;
+	/*
+	 * Only VFs can/must init VF2PF this early.
+	 * The PF must wait until CPORT f/w has reset all
+	 * resources in start_cport().
+	 */
+	if (dd->is_vf) {
+		/* This must also set the SI */
+		ret = vf2pf_init(dd);
+		if (ret)
+			goto bail_cleanup;
+	}
 
 	/*
 	 * must be done before dd->params->find_used_resources()
@@ -16641,9 +16651,23 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	if (ret)
 		goto bail_cleanup;
 
+	/*
+	 * This does a STOP which will reset many things,
+	 * particularly the PF contexts needed for VF2PF.
+	 * The PF must not initialize VF2PF until after this.
+	 */
 	ret = start_cport(dd);
 	if (ret)
 		goto bail_clean_early_intr;
+	if (!dd->is_vf) {
+		/* The PF can safely init resources now */
+		ret = vf2pf_init(dd);
+		if (ret)
+			goto bail_clean_early_intr;
+		ret = vf2pf_init_irq(dd);
+		if (ret)
+			goto bail_clean_early_intr;
+	}
 
 	/* needs to be done before we look for the peer device */
 	dd->params->read_guid(dd);
