@@ -355,7 +355,15 @@ int msix_early_request_irqs(struct hfi1_devdata *dd)
 	ret = msix_request_general_irq(dd);
 	if (ret)
 		return ret;
-	return vf2pf_init_irq(dd);
+	/*
+	 * Only VFs can/must init VF2PF IRQs this early.
+	 * The PF must wait until CPORT f/w has reset all
+	 * resources in start_cport().
+	 */
+	if (dd->is_vf)
+		ret = vf2pf_init_irq(dd);
+
+	return ret;
 }
 
 /**
