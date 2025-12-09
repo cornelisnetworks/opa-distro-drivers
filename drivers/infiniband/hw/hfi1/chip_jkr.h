@@ -106,7 +106,6 @@ int jkr_find_used_resources(struct hfi1_devdata *dd);
 void jkr_read_guid(struct hfi1_devdata *dd);
 int jkr_early_per_chip_init(struct hfi1_devdata *dd);
 int jkr_mid_per_chip_init(struct hfi1_devdata *dd);
-void jkr_init_tids(struct hfi1_devdata *dd);
 void jkr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
 		 u32 type, unsigned long pa, u16 order, bool flush);
 void jkr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type);
