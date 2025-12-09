@@ -10230,7 +10230,7 @@ void wfr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type)
 	}
 }
 
-void wfr_init_tids(struct hfi1_devdata *dd)
+static void wfr_init_tids(struct hfi1_devdata *dd)
 {
 	const u64 reg = RCV_ARRAY_RT_WRITE_ENABLE_SMASK;
 	u32 num_rcv;
@@ -14316,7 +14316,7 @@ static void write_uninitialized_csrs_and_memories(struct hfi1_devdata *dd)
 	}
 
 	/* RcvArray */
-	dd->params->init_tids(dd);
+	wfr_init_tids(dd);
 
 	/* RcvQPMapTable */
 	for (i = 0; i < dd->num_pports; i++) {
