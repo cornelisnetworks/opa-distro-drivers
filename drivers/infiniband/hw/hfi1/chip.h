@@ -1256,7 +1256,6 @@ u64 get_all_cpu_total(u64 __percpu *cntr);
 void hfi1_start_cleanup(struct hfi1_devdata *dd);
 void hfi1_clear_tids(struct hfi1_ctxtdata *rcd);
 void hfi1_init_ctxt(struct send_context *sc);
-void wfr_init_tids(struct hfi1_devdata *dd);
 void wfr_put_tid(struct hfi1_ctxtdata *rcd, u32 index,
 		 u32 type, unsigned long pa, u16 order, bool flush);
 void wfr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type);

@@ -1350,7 +1350,6 @@ struct chip_params {
 	int (*late_per_chip_init)(struct hfi1_devdata *dd);
 	void (*start_port)(struct hfi1_pportdata *ppd);
 	void (*stop_port)(struct hfi1_pportdata *ppd);
-	void (*init_tids)(struct hfi1_devdata *dd);
 	void (*put_tid)(struct hfi1_ctxtdata *rcd, u32 index,
 			u32 type, unsigned long pa, u16 order, bool flush);
 	void (*rcv_array_wc_fill)(struct hfi1_ctxtdata *rcd, u32 index,
