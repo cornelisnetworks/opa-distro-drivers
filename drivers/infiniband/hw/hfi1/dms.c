@@ -3822,6 +3822,36 @@ static inline enum hfi1_dms_msg_type hfi1_dms_impl_message_type_get(union hfi1_d
 	return ret;
 }
 
+static bool _packet_valid(struct hfi1_dms *dms, struct hfi1_packet *packet)
+{
+	u64 const mask = ((u64)RHF_JKR_RHE_VALID) |
+		((u64)RHF_JKR_L2_TYPE_MASK << RHF_JKR_L2_TYPE_SHIFT);
+	u64 const check = (u64)HFI1_L2_TYPE_16B << RHF_JKR_L2_TYPE_SHIFT;
+	u64 const packet_rhf = packet->rhf;
+
+	if ((packet_rhf & mask) == check)
+		return true;
+
+	// We set hardware to drop 9B packets to our rcd
+	DMS_WARN_ON(jkr_rhf_l2_type(packet_rhf) != HFI1_L2_TYPE_16B);
+
+	if (jkr_rhf_rhe_valid(packet_rhf)) {
+		if (rhe_icrc_err(packet))
+			dd_dev_dbg(dms->dd, "DMS data packet dropped due to ICRC error\n");
+		else
+			dd_dev_dbg(dms->dd,
+				   "DMS data packet dropped due to unhandled error (0x%016llx)\n",
+				   packet->err_flags);
+	}
+
+	return false;
+}
+
+void hfi1_dms_impl_noop_packet(struct hfi1_packet *packet)
+{
+	(void) packet;
+}
+
 static void _handle_data_packet(struct hfi1_packet *packet)
 {
 	struct hfi1_bulksvc *svc;
@@ -3835,14 +3865,13 @@ static void _handle_data_packet(struct hfi1_packet *packet)
 	DMS_BUG_ON(packet->rcd->dd == NULL);
 	DMS_BUG_ON(packet->rcd->dd->bulksvc == NULL);
 
-	rcd = packet->rcd;
-	svc = packet->rcd->dd->bulksvc;
 	dms = &svc->dms;
 
-	// We set hardware to drop 9B packets to our rcd
-	if (DMS_WARN_ON(jkr_rhf_l2_type(packet->rhf) != HFI1_L2_TYPE_16B)) {
+	if (!_packet_valid(dms, packet))
 		return;
-	}
+
+	rcd = packet->rcd;
+	svc = packet->rcd->dd->bulksvc;
 
 	WARN_ON_ONCE(packet->ebuf != NULL);
 
@@ -3893,14 +3922,14 @@ static void _handle_ctrl_packet(struct hfi1_packet *packet)
 	DMS_BUG_ON(packet->rcd->dd == NULL);
 	DMS_BUG_ON(packet->rcd->dd->bulksvc == NULL);
 
-	rcd = packet->rcd;
-	svc = packet->rcd->dd->bulksvc;
 	dms = &svc->dms;
 
-	// We set hardware to drop 9B packets to our rcd
-	if (DMS_WARN_ON(jkr_rhf_l2_type(packet->rhf) != HFI1_L2_TYPE_16B)) {
+	if (!_packet_valid(dms, packet))
 		return;
-	}
+
+	rcd = packet->rcd;
+	svc = packet->rcd->dd->bulksvc;
+
 	WARN_ON_ONCE(packet->ebuf != NULL);
 
 	hdr = hfi1_get_16B_header(rcd, packet->rhf_addr);
