@@ -751,40 +751,6 @@ void jkr_rcv_array_wc_fill(struct hfi1_ctxtdata *rcd, u32 index, u32 type)
 		flush_wc();
 }
 
-/*
- * Initialize RcvArray memory by enabling eager access to a range on receive
- * context 239 then writing to that range.  Shift the range to cover the whole
- * RcvArray.
- */
-void jkr_init_tids(struct hfi1_devdata *dd)
-{
-	const u64 value = RCV_ARRAY_RT_WRITE_ENABLE_SMASK;
-	const u32 step_size = 2048;	/* size supported on all chips */
-	const u32 ctxt = 239;		/* target context */
-	u64 save;
-	u64 temp;
-	u32 loops = chip_rcv_array_count(dd) / step_size;
-	u32 i, j;
-	u8 __iomem *addr;
-
-	save = read_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg);
-	for (i = 0; i < loops; i++) {
-		/* set up count and base */
-		temp =   (((u64)(step_size / 8)) <<
-				JKR_RCV_EGR_CTRL_EGR_CNT_SHIFT)
-		       | ((u64)step_size / 8) * i;
-		write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, temp);
-		/* write empty entries */
-		for (j = 0; j < step_size; j++) {
-			addr = rcvarray_addr(dd, ctxt, j, PT_EAGER);
-			writeq(value, addr);
-			if ((j & 3) == 3)
-				flush_wc();
-		}
-	}
-	write_rctxt_csr(dd, ctxt, dd->params->rcv_egr_ctrl_reg, save);
-}
-
 void jkr_ena_rcv_ctxt(struct hfi1_devdata *dd, u8 pidx, u16 ctxt, bool enable)
 {
 	u64 bits = JKR_RCV_PKT_CTRL_RCV_PORT_ENABLE_SMASK |
