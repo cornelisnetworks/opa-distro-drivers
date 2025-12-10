@@ -137,6 +137,7 @@ enum hfi1_dms_err_type {
 	HFI1_DMS_ERR_TYPE_CLIENT_NOT_FOUND,
 	HFI1_DMS_ERR_TYPE_ACCESS_NOT_FOUND,
 	HFI1_DMS_ERR_TYPE_ACCESS_RANGE_VIOLATION,
+	HFI1_DMS_ERR_TYPE_TRANSFER_SIZE_VIOLATION,
 	HFI1_DMS_ERR_TYPE_NO_MEMORY,
 	HFI1_DMS_ERR_TYPE_ACCESS_BUSY,
 
@@ -2381,8 +2382,12 @@ int hfi1_dms_write_data(struct hfi1_dms *dms, u32 dest_lid, union hfi1_dms_key d
 
 	DMS_BUG_ON(dms == NULL);
 	DMS_BUG_ON(mr == NULL);
-	DMS_BUG_ON(dest_lid == 0);
-
+	if (WARN_ON(dest_lid == 0)) {
+		return -EINVAL;
+	}
+	if (WARN_ON(size == 0)) {
+		return -EINVAL;
+	}
 	ret = calculate_mr_page_offset(dms, mr, mr_offset, size, &byte_offset_from_first_page);
 	if (ret < 0) {
 		return ret; // Unable to start rdma write bulk transfer operation
@@ -3152,7 +3157,12 @@ int hfi1_dms_read_data(struct hfi1_dms *dms, u32 src_lid, union hfi1_dms_key dms
 
 	DMS_BUG_ON(!dms);
 	DMS_BUG_ON(!mr);
-	DMS_BUG_ON(src_lid == 0);
+	if (WARN_ON(src_lid == 0)) {
+		return -EINVAL;
+	}
+	if (WARN_ON(size == 0)) {
+		return -EINVAL;
+	}
 
 	start = dms_rdtsc();
 	dms->counters.sending_first_rr = ktime_get();
@@ -4499,7 +4509,6 @@ void _tidset_enable(struct hfi1_dms *dms, u32 tid_set, struct hfi1_dms_rx_tracke
 	DMS_BUG_ON(!rx_tracker);
 	DMS_BUG_ON(!tid_info);
 	DMS_BUG_ON(!tidset_nbytes);
-	DMS_BUG_ON(rx_tracker->total_payload == 0);
 
 	if (rx_tracker->total_payload == rx_tracker->payload_requested) {
 		read_req_state = &dms->read_requests[tid_set];
@@ -4753,6 +4762,11 @@ int hfi1_dms_impl_handle_read_start(struct hfi1_dms *dms, struct hfi1_dms_read_s
 
 	DMS_BUG_ON(dms == NULL);
 
+	if (parameters.tbytes == 0) {
+		reason = HFI1_DMS_ERR_TYPE_TRANSFER_SIZE_VIOLATION;
+		goto nack;
+	}
+
 	start = dms_rdtsc();
 
 	access = hfi1_dms_access_lookup(dms, parameters.dms_key, &client);
@@ -4985,6 +4999,11 @@ int hfi1_dms_impl_handle_write_start(struct hfi1_dms *dms, struct hfi1_dms_write
 
 	DMS_BUG_ON(dms == NULL);
 	enum hfi1_dms_err_type reason = HFI1_DMS_ERR_TYPE_NONE;
+
+	if (parameters.size == 0) {
+		reason = HFI1_DMS_ERR_TYPE_TRANSFER_SIZE_VIOLATION;
+		goto nack;
+	}
 
 	access = hfi1_dms_access_lookup(dms, parameters.dms_key, &client);
 	if (!client) {
@@ -5258,6 +5277,9 @@ void hfi1_dms_impl_handle_nack_packet(struct hfi1_dms *dms, union hfi1_dms_16b_h
 			break;
 		case HFI1_DMS_ERR_TYPE_ACCESS_RANGE_VIOLATION:
 			err = -EACCES;
+			break;
+		case HFI1_DMS_ERR_TYPE_TRANSFER_SIZE_VIOLATION:
+			err = -EINVAL;
 			break;
 		case HFI1_DMS_ERR_TYPE_NO_MEMORY:
 			err = -ENOMEM;
