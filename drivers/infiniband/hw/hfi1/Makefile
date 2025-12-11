@@ -106,6 +106,26 @@ endif
 hfi1-$(CONFIG_HFI1_NVIDIA) += pin_nvidia.o tid_nvidia.o gdr_ops.o
 ccflags-$(CONFIG_HFI1_NVIDIA) += -I$(NVIDIA_DRIVER_SOURCE) -DNVIDIA_GPU_DIRECT
 
+# TODO this is copypasta from above
+# Keep this separate from the legacy CONFIG_HFI1_NVIDIA for now
+ifdef CONFIG_HFI1_NVIDIA_P2P_MEMCPY
+ifndef NVIDIA_DRIVER_SOURCE
+# E.g. from nvidia-driver:open-dkms
+#   $ rpm -ql --whatprovides nvidia-kmod | grep 'nv-p2p.h'
+#   /usr/src/nvidia-open-560.28.03/nvidia-peermem/nv-p2p.h
+#   /usr/src/nvidia-open-560.28.03/nvidia/nv-p2p.h
+# From nvidia-driver:latest-dkms
+#   $ rpm -ql --whatprovides nvidia-kmod | grep 'nv-p2p.h'
+#   /usr/src/nvidia-555.42.06/nvidia-peermem/nv-p2p.h
+#   /usr/src/nvidia-555.42.06/nvidia/nv-p2p.h
+NVIDIA_DRIVER_SOURCE := $(realpath $(dir $(shell rpm -ql --whatprovides nvidia-kmod | grep 'nvidia/nv-p2p.h'))/..)
+endif
+endif
+
+hfi1-$(CONFIG_HFI1_NVIDIA_P2P_MEMCPY) += bulksvc_nvidia.o
+# '-DNVIDIA_GPU_DIRECT' not needed; that is only needed for the legacy uapi/
+ccflags-$(CONFIG_HFI1_NVIDIA_P2P_MEMCPY) += -I$(NVIDIA_DRIVER_SOURCE)
+
 ifdef CONFIG_HFI1_AMD
 ifndef AMDGPU_DRIVER_SOURCE
 AMDGPU_DRIVER_SOURCE := $(shell rpm -ql amdgpu-dkms | grep -E '/usr/src/amdgpu-[^/]+/include/drm/amd_rdma.h$$' | head -n1)
