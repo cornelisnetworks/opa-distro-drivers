@@ -555,8 +555,10 @@ static void bulksvc_on_verbs_cmd_mr_dereg(struct hfi1_bulksvc * const svc,
 	if (rc != 0) {
 		if (rc == -EAGAIN || rc == -EBUSY) {
 			unsigned long flags;
-			dd_dev_dbg(svc->dd, "%s:%d:%s() DMS busy, postponing MR(%d) dereg: %d\n",
-		       __FILENAME__, __LINE__, __func__, mr_record->rkey, rc);
+			dd_dev_dbg_ratelimited(svc->dd,
+					       "%s: DMS busy, postponing MR(%d) dereg: %d\n",
+					       __func__, mr_record->rkey, rc);
+			cmd->mr_dereg.failed_count++;
 			/* requeue */
 			spin_lock_irqsave(&svc->verbs_state.cmd_queue.lock, flags);
 			list_add_tail(&cmd->node, &svc->verbs_state.cmd_queue.list);
@@ -571,6 +573,15 @@ static void bulksvc_on_verbs_cmd_mr_dereg(struct hfi1_bulksvc * const svc,
 		hfi1_bulksvc_verbs_cmd_put(cmd);
 		return;
 	}
+
+	/*
+	 * inform user if succeeded after being postponed this is important
+	 * to observe hung DMS ops
+	 */
+	if (cmd->mr_dereg.failed_count)
+		dd_dev_dbg(svc->dd,
+			   "%s: removed MR (%d) after postponing %u times\n",
+			   __func__, mr_record->rkey, cmd->mr_dereg.failed_count);
 
 	enqueue_and_schedule_bts_rvt_cmpl(svc, hfi1_bulksvc_verbs_cmd_cmpl_create(cmd, 0));
 	hfi1_bulksvc_verbs_cmd_put(cmd);
