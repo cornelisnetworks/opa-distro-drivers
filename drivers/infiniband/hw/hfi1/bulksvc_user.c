@@ -1,3 +1,4 @@
+#include "bulksvc_nvidia.h"
 #include "bulksvc_user.h"
 #include "bulksvc_verbs.h" // to call post_send handler
 #include "bulksvc.h"
@@ -185,8 +186,12 @@ void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info)
 		// Release dma_buf if this is a DMABUF MR_OPEN command
 		if (entry->cmd.hdr.op == HFI1_BULKSVC_CMD_MR_OPEN &&
 			entry->cmd.payld->mr_open.hmem_iface == HFI1_HFISVC_HMEM_IFACE_DMABUF &&
-			entry->data.dmabuf && !IS_ERR(entry->data.dmabuf)) {
-			dma_buf_put(entry->data.dmabuf);
+			entry->data.dmabuf_open.dmabuf && !IS_ERR(entry->data.dmabuf_open.dmabuf)) {
+			dma_buf_put(entry->data.dmabuf_open.dmabuf);
+			if (entry->data.dmabuf_open.nv_pt_info) {
+				bulksvc_unpin_nvidia(entry->data.dmabuf_open.nv_pt_info);
+				kfree(entry->data.dmabuf_open.nv_pt_info);
+			}
 		}
 		kfree(entry);
 	}
@@ -325,10 +330,17 @@ static void user_mr_record_destroy(struct hfi1_bulksvc_user_mr_record *mr_record
 {
 	if (mr_record) {
 		if (mr_record->mr_type == HFI1_BULKSVC_MR_TYPE_DMABUF) {
-			if (mr_record->mem_region.vmap.vaddr_iomem) {
-				dma_buf_vunmap_unlocked(mr_record->mem_region.dma_buf, &mr_record->mem_region.vmap);
-				mr_record->mem_region.vmap.vaddr_iomem = NULL;
+			if (mr_record->mem_region.fixup_mapping_type == HFI1_BULKSVC_FIXUP_CPU_MAPPING_NVPT) {
+				bulksvc_unpin_nvidia(mr_record->mem_region.fixup_mapping.nv_pt_info);
+				kfree(mr_record->mem_region.fixup_mapping.nv_pt_info);
+				mr_record->mem_region.fixup_mapping.nv_pt_info = NULL;
+			} else if (mr_record->mem_region.fixup_mapping_type == HFI1_BULKSVC_FIXUP_CPU_MAPPING_VMAP) {
+				if (mr_record->mem_region.fixup_mapping.vmap.vaddr_iomem) {
+					dma_buf_vunmap_unlocked(mr_record->mem_region.dma_buf, &mr_record->mem_region.fixup_mapping.vmap);
+					mr_record->mem_region.fixup_mapping.vmap.vaddr_iomem = NULL;
+				}
 			}
+
 			if (mr_record->mem_region.sg_table) {
 				dma_buf_unmap_attachment_unlocked(mr_record->mem_region.dma_buf_attachment, mr_record->mem_region.sg_table, DMA_BIDIRECTIONAL);
 				mr_record->mem_region.sg_table = NULL;
@@ -368,6 +380,7 @@ static int user_mr_map_dma_buf(struct hfi1_bulksvc_user_info *uinfo, struct hfi1
 			       union hfi1_bulksvc_userctxt_cmd_data *cmd_data)
 {
 	struct hfi1_dms_mr *dms_mr;
+	struct dma_buf *dmabuf;
 	struct scatterlist *sg;
 	const u64 begin_aligned_down = ALIGN_DOWN(vaddr, PAGE_SIZE);
 	const u64 end_aligned_up = ALIGN(vaddr + len, PAGE_SIZE);
@@ -383,7 +396,7 @@ static int user_mr_map_dma_buf(struct hfi1_bulksvc_user_info *uinfo, struct hfi1
 	if (WARN_ON(!cmd_data)) {
 		pr_err("%s:%d:%s() ERROR: cmd_data is NULL for dma buf MR\n", __FILENAME__, __LINE__, __func__);
 		goto error_cleanup;
-	} else if (WARN_ON(!cmd_data->dmabuf)) {
+	} else if (WARN_ON(!cmd_data->dmabuf_open.dmabuf)) {
 		pr_err("%s:%d:%s() ERROR: cmd_data->dmabuf is NULL for dma buf MR, mr_open for dmabuf must be done through sync cmdq\n", __FILENAME__, __LINE__, __func__);
 		goto error_cleanup;
 	} else if (WARN_ON(extended_input_len < len)) {
@@ -391,7 +404,8 @@ static int user_mr_map_dma_buf(struct hfi1_bulksvc_user_info *uinfo, struct hfi1
 		goto error_cleanup;
 	}
 
-	umr->mem_region.dma_buf = cmd_data->dmabuf;
+	umr->mem_region.dma_buf = cmd_data->dmabuf_open.dmabuf;
+	dmabuf = umr->mem_region.dma_buf;
 	if (IS_ERR_OR_NULL(umr->mem_region.dma_buf)) {
 		pr_err("%s:%d:%s() ERROR: dma_buf_get returned error %pE for fd %u\n",
 		       __FILENAME__, __LINE__, __func__, umr->mem_region.dma_buf,
@@ -455,19 +469,36 @@ static int user_mr_map_dma_buf(struct hfi1_bulksvc_user_info *uinfo, struct hfi1
 		goto error_cleanup;
 	}
 
-	// Do vmap ahead of time for fixups, etc
-	// TODO defer or only map for unaligned accesses
-	ret = dma_buf_vmap_unlocked(umr->mem_region.dma_buf, &umr->mem_region.vmap);
-	if (ret) {
-		dd_dev_err(uinfo->svc->dd, "dma_buf_vmap failed for fd %u: %d\n", hmem_device, ret);
-		umr->mem_region.vmap.vaddr_iomem = NULL;
-		goto error_cleanup;
+	/* NVIDIA does not implement .vmap(), so don't call. NVIDIA will be handled separately. */
+	if (bulksvc_is_nvidia(dmabuf)) {
+		if (WARN_ON(!cmd_data->dmabuf_open.nv_pt_info)) {
+			pr_err("%s:%d:%s() ERROR: Missing NVIDIA pt info for dma buf MR\n", __FILENAME__, __LINE__, __func__);
+			goto error_cleanup;
+		}
+		umr->mem_region.fixup_mapping_type = HFI1_BULKSVC_FIXUP_CPU_MAPPING_NVPT;
+		umr->mem_region.fixup_mapping.nv_pt_info = cmd_data->dmabuf_open.nv_pt_info;
+		cmd_data->dmabuf_open.nv_pt_info = NULL;
+		// already pinned
+	} else {
+		// Do vmap ahead of time for fixups, etc
+		// TODO defer or only map for unaligned accesses
+		umr->mem_region.fixup_mapping_type = HFI1_BULKSVC_FIXUP_CPU_MAPPING_VMAP;
+		ret = dma_buf_vmap_unlocked(umr->mem_region.dma_buf, &umr->mem_region.fixup_mapping.vmap);
+		if (ret) {
+			dd_dev_err(uinfo->svc->dd, "dma_buf_vmap failed for fd %u: %d\n",
+				   hmem_device, ret);
+			umr->mem_region.fixup_mapping.vmap.vaddr_iomem = NULL;
+			goto error_cleanup;
+		}
 	}
 
 	dms_mr->extended_vaddr.addr = begin_aligned_down;
 	dms_mr->extended_vaddr.len = extended_input_len;
 	dms_mr->pinned_check_fn = user_mr_record_dmabuf_pinned_check;
-	dms_mr->dms_mr_memcpy_fn = dms_mr_dmabuf_memcpy;
+	if (bulksvc_is_nvidia(dmabuf))
+		dms_mr->dms_mr_memcpy_fn = bulksvc_nvidia_memcpy;
+	else
+		dms_mr->dms_mr_memcpy_fn = dms_mr_dmabuf_memcpy;
 
 	return 0;
 error_cleanup:
@@ -1482,6 +1513,15 @@ static int dms_mr_dmabuf_memcpy(struct hfi1_dms_mr *mr, u64 offset, u64 size, vo
 	}
 
 	struct hfi1_bulksvc_user_mr_record *mr_record = container_of(mr, struct hfi1_bulksvc_user_mr_record, dms_mr);
+	if (WARN_ON(mr_record->mr_type != HFI1_BULKSVC_MR_TYPE_DMABUF)) {
+		pr_err("dms_mr_dmabuf_memcpy called on unexpected mr_type %d\n", mr_record->mr_type);
+		return -EINVAL;
+	}
+	if (WARN_ON(mr_record->mem_region.fixup_mapping_type != HFI1_BULKSVC_FIXUP_CPU_MAPPING_VMAP)) {
+		pr_err("dms_mr_dmabuf_memcpy called on unexpected fixup_mapping_type %d\n", mr_record->mem_region.fixup_mapping_type);
+		return -EINVAL;
+	}
+
 	int rc = dma_buf_begin_cpu_access(mr_record->mem_region.dma_buf, is_read ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 	if (WARN_ON(rc != 0)) {
 		pr_err("dma_buf_begin_cpu_access failed: %d\n", rc);
@@ -1491,9 +1531,9 @@ static int dms_mr_dmabuf_memcpy(struct hfi1_dms_mr *mr, u64 offset, u64 size, vo
 	u8 *cdata = (u8 *)data;
 
 	if (is_read)
-		memcpy(cdata, ((u8 *)mr_record->mem_region.vmap.vaddr_iomem) + offset, size);
+		memcpy(cdata, ((u8 *)mr_record->mem_region.fixup_mapping.vmap.vaddr_iomem) + offset, size);
 	else
-		memcpy(((u8 *)mr_record->mem_region.vmap.vaddr_iomem) + offset, cdata, size);
+		memcpy(((u8 *)mr_record->mem_region.fixup_mapping.vmap.vaddr_iomem) + offset, cdata, size);
 
 	rc = dma_buf_end_cpu_access(mr_record->mem_region.dma_buf, is_read ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 	if (WARN_ON(rc != 0)) {

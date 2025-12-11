@@ -30,6 +30,7 @@
 #include "uverbs.h"
 
 #include "bulksvc.h"
+#include "bulksvc_nvidia.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -2500,11 +2501,15 @@ static int ioctl_bulksvc_synccmd(struct hfi1_filedata *fd, unsigned long arg, u3
 	return ret;
 }
 
-int do_bulksvc_synccmd(struct hfi1_filedata *fd,
-			struct hfi1_bulksvc_cmd *cmd)
+int do_bulksvc_synccmd(struct hfi1_filedata *fd, struct hfi1_bulksvc_cmd *cmd)
 {
 	struct hfi1_bulksvc_userctxt_cmd_entry *entry;
-	u64 size_to_alloc = sizeof(*entry) - sizeof(entry->cmd) + (cmd->hdr.num_blocks * CACHELINE_SIZE);
+	u64 size_to_alloc = sizeof(*entry) - sizeof(entry->cmd) +
+		(cmd->hdr.num_blocks * CACHELINE_SIZE);
+	u64 vaddr;
+	u64 len;
+	int ret;
+
 	entry = kzalloc(size_to_alloc, GFP_KERNEL);
 	if (!entry) {
 		pr_err("failed to allocate bulksvc synccmd entry\n");
@@ -2512,24 +2517,37 @@ int do_bulksvc_synccmd(struct hfi1_filedata *fd,
 	}
 
 	memcpy(&entry->cmd, cmd, (cmd->hdr.num_blocks * CACHELINE_SIZE));
-
-	switch (entry->cmd.hdr.op) {
-	case HFI1_BULKSVC_CMD_MR_OPEN:
-		if (entry->cmd.payld->mr_open.hmem_iface == HFI1_HFISVC_HMEM_IFACE_DMABUF) {
-			entry->data.dmabuf = dma_buf_get(entry->cmd.payld->mr_open.hmem_device);
-			// Check for errors in bulksvc thread
-		} else {
-			// Currently only accept dma buf mr_opens
-			kfree(entry);
-			return -EINVAL;
-		}
-		break;
-	// Currently reject all other opcodes passed as synccmds
-	default:
+	/* Currently only accept dma buf mr_opens */
+	if (entry->cmd.hdr.op != HFI1_BULKSVC_CMD_MR_OPEN ||
+	    entry->cmd.payld->mr_open.hmem_iface != HFI1_HFISVC_HMEM_IFACE_DMABUF) {
 		kfree(entry);
 		return -EINVAL;
 	}
 
+	vaddr = entry->cmd.payld->mr_open.vaddr;
+	len = entry->cmd.payld->mr_open.len;
+	entry->data.dmabuf_open.dmabuf = dma_buf_get(entry->cmd.payld->mr_open.hmem_device);
+
+	if (!bulksvc_is_nvidia(entry->data.dmabuf_open.dmabuf))
+		goto add_to_list;
+
+	/* NVIDIA only: get NVIDIA pages for CPU-driven copies */
+	entry->data.dmabuf_open.nv_pt_info = kzalloc(sizeof(*entry->data.dmabuf_open.nv_pt_info),
+						     GFP_KERNEL);
+	if (!entry->data.dmabuf_open.nv_pt_info) {
+		kfree(entry);
+		return -ENOMEM;
+	}
+
+	ret = bulksvc_nvidia_pin(entry->data.dmabuf_open.nv_pt_info, vaddr, len);
+	if (ret) {
+		pr_err("failed to pin nvidia mem in bulksvc synccmd\n");
+		kfree(entry->data.dmabuf_open.nv_pt_info);
+		kfree(entry);
+		return ret;
+	}
+
+add_to_list:
 	mutex_lock(&fd->bulksvc_user_info->userctxt_cmdq_lock);
 	list_add_tail(&entry->node, &fd->bulksvc_user_info->userctxt_cmdq);
 	mutex_unlock(&fd->bulksvc_user_info->userctxt_cmdq_lock);
