@@ -7,6 +7,9 @@
 #include <linux/mutex.h>
 
 #include <uapi/rdma/hfi/hfi1_user.h>
+#ifdef CONFIG_HFI1_NVIDIA_P2P_MEMCPY
+#include <nvidia/nv-p2p.h>
+#endif
 
 #include "dms.h"
 
@@ -29,6 +32,18 @@ enum hfi1_bulksvc_mr_type {
 	HFI1_BULKSVC_MR_TYPE_DMABUF,
 };
 
+enum hfi1_bulksvc_fixup_cpu_mapping_type {
+	HFI1_BULKSVC_FIXUP_CPU_MAPPING_NONE,
+	HFI1_BULKSVC_FIXUP_CPU_MAPPING_VMAP,
+	HFI1_BULKSVC_FIXUP_CPU_MAPPING_NVPT,
+};
+
+struct hfi1_bulksvc_nv_pt_info {
+	struct nvidia_p2p_page_table *nv_pt;
+	u64 nv_start;
+	u64 nv_end;
+};
+
 struct hfi1_bulksvc_user_mr_record {
 	struct list_head list_entry;
 	struct kref refcount; // Can have multiple outstanding transactions
@@ -43,7 +58,13 @@ struct hfi1_bulksvc_user_mr_record {
 			struct dma_buf *dma_buf;
 			struct dma_buf_attachment *dma_buf_attachment;
 			struct sg_table *sg_table;
-			struct iosys_map vmap; // for fixups
+			enum hfi1_bulksvc_fixup_cpu_mapping_type fixup_mapping_type;
+
+			union {
+				struct iosys_map vmap;
+				struct hfi1_bulksvc_nv_pt_info *nv_pt_info;
+
+			} fixup_mapping;
 		};
 	} mem_region;
 
@@ -58,7 +79,10 @@ struct hfi1_bulksvc_user_mr_access_record {
 
 union hfi1_bulksvc_userctxt_cmd_data {
 	u64 raw;
-	struct dma_buf *dmabuf;
+	struct {
+		struct dma_buf *dmabuf;
+		struct hfi1_bulksvc_nv_pt_info *nv_pt_info;
+	} dmabuf_open;
 };
 
 struct hfi1_bulksvc_userctxt_cmd_entry {
