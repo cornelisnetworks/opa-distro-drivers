@@ -878,7 +878,7 @@ static void bulksvc_on_cmd_rdma_read(struct hfi1_bulksvc * const svc,
 	BUILD_BUG_ON(sizeof(struct initiated_mr_rdma_transact_completion_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	rc = hfi1_dms_read_data(
 		&svc->dms, cmd->lid,
-		(union hfi1_dms_key) { .access = cmd->access_key, .client = user_info->client_key },
+		(union hfi1_dms_key) { .access = cmd->access_key, .client = cmd->client_key },
 		cmd->remote_offset, cmd->len_bytes, &mr_record->dms_mr, cmd->mr_offset,
 		cmd->flags, cmd->imm_data,
 		(struct hfi1_dms_tracker_completion) {
