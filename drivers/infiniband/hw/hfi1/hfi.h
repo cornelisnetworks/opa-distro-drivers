@@ -2896,6 +2896,10 @@ static inline u64 hfi1_pkt_base_sdma_integrity(struct hfi1_devdata *dd)
 	dev_dbg(&(dd)->pcidev->dev, "%s: " fmt, \
 		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), ##__VA_ARGS__)
 
+#define dd_dev_dbg_ratelimited(dd, fmt, ...) \
+	dev_dbg_ratelimited(&(dd)->pcidev->dev, "%s: " fmt, \
+		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), ##__VA_ARGS__)
+
 #define hfi1_dev_porterr(dd, port, fmt, ...) \
 	dev_err(&(dd)->pcidev->dev, "%s: port %u: " fmt, \
 		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), (port), ##__VA_ARGS__)

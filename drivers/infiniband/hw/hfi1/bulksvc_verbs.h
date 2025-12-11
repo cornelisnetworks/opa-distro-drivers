@@ -31,6 +31,7 @@ struct hfi1_bulksvc_verbs_mr_reg_cmd {
 
 struct hfi1_bulksvc_verbs_mr_dereg_cmd {
 	struct rvt_mregion *mr;
+	u32 failed_count;
 };
 
 enum hfi1_bulksvc_verbs_cmd_op {
