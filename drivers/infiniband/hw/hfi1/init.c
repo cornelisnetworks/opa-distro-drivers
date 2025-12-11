@@ -37,6 +37,7 @@
 #include "bulksvc.h"
 #include "sriov.h"
 #include "vf2pf.h"
+#include "bulksvc_nvidia.h"
 
 #ifdef NVIDIA_GPU_DIRECT
 #include "gdr_ops.h"
@@ -2262,7 +2263,18 @@ static int __init hfi1_mod_init(void)
 	if (ret)
 		goto bail_dev;
 #endif
-
+#ifdef CONFIG_HFI1_NVIDIA_P2P_MEMCPY
+	/*
+	 * -EOPNOTSUPP indicates that nvidia symbols could not be found.
+	 * This is not fatal; hfi1 can work fine without nvidia.
+	 * So suppress this error.
+	 */
+	ret = bulksvc_nvidia_init();
+	if (ret == -EOPNOTSUPP)
+		ret = 0;
+	if (ret)
+		goto bail_dev;
+#endif
 	ret = node_affinity_init();
 	if (ret)
 		goto bail;
@@ -2336,6 +2348,9 @@ static int __init hfi1_mod_init(void)
 	return 0;
 bail_dev:
 	hfi1_dbg_exit();
+#ifdef CONFIG_HFI1_NVIDIA_P2P_MEMCPY
+	bulksvc_nvidia_free();
+#endif
 #ifdef CONFIG_HFI1_NVIDIA
 	hfi1_pin_nvidia_free();
 #endif
@@ -2366,6 +2381,7 @@ static void __exit hfi1_mod_cleanup(void)
 	dispose_firmware();	/* asymmetric with obtain_firmware() */
 	dev_cleanup();
 
+	bulksvc_nvidia_free();
 #ifdef CONFIG_HFI1_NVIDIA
 	hfi1_pin_nvidia_free();
 #endif
