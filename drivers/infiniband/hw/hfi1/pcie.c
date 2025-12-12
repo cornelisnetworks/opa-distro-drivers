@@ -49,6 +49,62 @@ static void mask_aer_unsupported_request(struct pci_dev *pdev)
 	pci_write_config_dword(pdev, aer + PCI_ERR_UNCOR_MASK, mask);
 }
 
+/**
+ * Mask unexpected completion errors on AMD root ports
+ *
+ * @pdev: PCI device
+ *
+ * On AMD platforms, mask the Unexpected Completion error bit in the root port's
+ * AER Uncorrectable Error Mask register to prevent spurious error reporting.
+ *
+ * Returns 0 on success, negative errno on failure, 1 if skipped (non-AMD).
+ */
+static int hfi1_mask_unexpected_completion(struct pci_dev *pdev)
+{
+	struct pci_dev *root_port;
+	int aer_cap;
+	u32 mask;
+
+	/* Find the root port for this device */
+	root_port = pcie_find_root_port(pdev);
+	if (!root_port) {
+		pci_warn(pdev, "Could not find root port\n");
+		return -ENODEV;
+	}
+
+	/* Only apply to AMD root ports */
+	if (root_port->vendor != PCI_VENDOR_ID_AMD) {
+		pci_dbg(pdev, "Non-AMD root port, skipping UC mask\n");
+		return 1;
+	}
+
+	/* Find AER extended capability on root port */
+	aer_cap = pci_find_ext_capability(root_port, PCI_EXT_CAP_ID_ERR);
+	if (!aer_cap) {
+		pci_warn(pdev, "Root port %s lacks AER capability\n",
+			 pci_name(root_port));
+		return -ENOENT;
+	}
+
+	/* Read current uncorrectable error mask */
+	pci_read_config_dword(root_port, aer_cap + PCI_ERR_UNCOR_MASK, &mask);
+
+	/* Check if already masked */
+	if (mask & PCI_ERR_UNC_UNX_COMP) {
+		pci_dbg(pdev, "Unexpected completion already masked on %s\n",
+			pci_name(root_port));
+		return 0;
+	}
+
+	/* Mask unexpected completion errors */
+	mask |= PCI_ERR_UNC_UNX_COMP;
+	pci_write_config_dword(root_port, aer_cap + PCI_ERR_UNCOR_MASK, mask);
+	pci_info(pdev, "Masked unexpected completion errors on AMD root port %s\n",
+		 pci_name(root_port));
+
+	return 0;
+}
+
 /*
  * Do all the common PCIe setup and initialization.
  */
@@ -74,6 +130,9 @@ int hfi1_pcie_init(struct hfi1_devdata *dd)
 		dd_dev_err(dd, "pci enable failed: error %d\n", -ret);
 		return ret;
 	}
+
+	/* Mask unexpected completions on AMD systems */
+	hfi1_mask_unexpected_completion(pdev);
 
 	ret = pci_request_regions(pdev, DRIVER_NAME);
 	if (ret) {
