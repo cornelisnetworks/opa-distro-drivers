@@ -453,16 +453,28 @@ static struct hfi1_bulksvc_user_mr_record *user_mr_record_create_pinned_and_inse
 
 		u64 mapping_pages = 0;
 
-		for (s64 sgl_idx = 0; sgl_idx < mr_record->mem_region.sg_table->nents && mapping_pages < num_pages; ++sgl_idx) {
-			struct scatterlist *sg = &mr_record->mem_region.sg_table->sgl[sgl_idx];
-			if (sg->length % PAGE_SIZE != 0) {
-				dd_dev_err(user_info->svc->dd, "Unexpected non-page-sized sg entry in dma_buf mapping: len %u, offset %u, dma addr 0x%llx\n", sg->length, sg->offset, sg->dma_address);
+		struct scatterlist *sg;
+		int i;
+
+		for_each_sgtable_dma_sg(mr_record->mem_region.sg_table, sg, i) {
+			const u32 sg_len = sg_dma_len(sg);
+			const dma_addr_t sg_addr = sg_dma_address(sg);
+			const u64 sgl_num_pages = sg_len / PAGE_SIZE;
+
+			if (mapping_pages >= num_pages)
+				break;
+
+			if (sg_len % PAGE_SIZE != 0) {
+				dd_dev_err(user_info->svc->dd,
+					   "Unexpected non-page-sized sg entry in dma_buf mapping: len %u, dma addr 0x%llx\n",
+					   sg_len, sg_addr);
 				goto error_cleanup;
 			}
-			const u64 sgl_num_pages = sg->length / PAGE_SIZE;
 
-			for (s64 sgl_page_idx = 0; sgl_page_idx < sgl_num_pages && mapping_pages < num_pages; ++sgl_page_idx) {
-				dms_mr->dma_list[mapping_pages] = sg->dma_address + (sgl_page_idx * PAGE_SIZE);
+			for (u32 sgl_page_idx = 0; sgl_page_idx < sgl_num_pages &&
+			     mapping_pages < num_pages; ++sgl_page_idx) {
+				dms_mr->dma_list[mapping_pages] = sg_addr +
+								  (sgl_page_idx * PAGE_SIZE);
 				++mapping_pages;
 			}
 		}
