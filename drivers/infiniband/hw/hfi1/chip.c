@@ -8578,7 +8578,7 @@ void force_intr(struct hfi1_devdata *dd, u16 nr)
 	/* clear bit first, to be sure it is off */
 	write_csr(dd, dd->params->cce_int_clear_reg + reg, bit);
 	/* force the above write on the chip */
-	read_csr(dd, dd->params->cce_int_clear_reg + reg);
+	read_csr(dd, CCE_REVISION);
 
 	write_csr(dd, dd->params->cce_int_force_reg + reg, bit);
 }
@@ -8595,7 +8595,7 @@ static inline void clear_recv_intr(struct hfi1_ctxtdata *rcd)
 
 	write_csr(dd, addr, rcd->imask);
 	/* force the above write on the chip and get a value back */
-	(void)read_csr(dd, addr);
+	read_csr(dd, CCE_REVISION);
 }
 
 /* force the receive interrupt */
