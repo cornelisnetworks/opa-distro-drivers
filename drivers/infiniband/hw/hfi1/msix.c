@@ -26,15 +26,14 @@ int msix_initialize(struct hfi1_devdata *dd)
 	/*
 	 * MSIx interrupt count:
 	 *	one for the general, "slow path" interrupt
-	 *	as needed for vf2pf
-	 *	one per used SDMA engine
+	 *	three per used SDMA engine
 	 *	one per kernel receive context
 	 *	one for each bulksvc context
 	 *	one for each VNIC context
 	 *	one for the bulksvc doorbell
 	 *      ...any new IRQs should be added here.
 	 */
-	total = 1 + vf2pf_num_irq(dd) + (dr->last_sdma_engine - dr->first_sdma_engine);
+	total = 1 + vf2pf_num_irq(dd) + (3 * (dr->last_sdma_engine - dr->first_sdma_engine));
 	for (pidx = 0; pidx < dd->num_pports; pidx++) {
 		struct hfi1_portrsrcs *pr = &dr->ppr[pidx];
 
@@ -208,17 +207,35 @@ int msix_netdev_request_rcd_irq(struct hfi1_ctxtdata *rcd)
  */
 int msix_request_sdma_irq(struct sdma_engine *sde)
 {
+	struct hfi1_devdata *dd = sde->dd;
 	int nr;
 	char name[MAX_NAME_SIZE];
 
 	snprintf(name, sizeof(name), DRIVER_NAME "_%d sdma%d",
-		 sde->dd->unit, sde->this_idx);
-	nr = msix_request_irq(sde->dd, sde, sdma_interrupt, sdma_interrupt_thr,
+		 dd->unit, sde->this_idx);
+	nr = msix_request_irq(dd, sde, sdma_interrupt, sdma_interrupt_thr,
 			      IRQ_SDMA, name);
 	if (nr < 0)
 		return nr;
-	sde->msix_intr = nr;
-	remap_sdma_interrupts(sde->dd, sde->this_idx, nr);
+	sde->msix_intr[0] = nr;
+
+	snprintf(name, sizeof(name), DRIVER_NAME "_%d sdma_progress%d",
+		 dd->unit, sde->this_idx);
+	nr = msix_request_irq(dd, sde, sdma_progress_interrupt, sdma_progress_interrupt_thr,
+			      IRQ_SDMA, name);
+	if (nr < 0)
+		return nr;
+	sde->msix_intr[1] = nr;
+
+	snprintf(name, sizeof(name), DRIVER_NAME "_%d sdma_idle%d",
+		 dd->unit, sde->this_idx);
+	nr = msix_request_irq(dd, sde, sdma_idle_interrupt, sdma_idle_interrupt_thr,
+			      IRQ_SDMA, name);
+	if (nr < 0)
+		return nr;
+	sde->msix_intr[2] = nr;
+
+	remap_sdma_interrupts(dd, sde->this_idx, sde->msix_intr);
 
 	return 0;
 }
