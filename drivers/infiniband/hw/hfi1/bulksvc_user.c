@@ -357,9 +357,127 @@ static void user_mr_record_destroy(struct hfi1_bulksvc_user_mr_record *mr_record
 	}
 }
 
+/**
+ * Import/attach DMA memory and render per-page DMA addresses into
+ * @umr->dms_mr->dma_list[].
+ *
+ * Returns: 0 on success, non-zero on error.
+ */
+static int user_mr_map_dma_buf(struct hfi1_bulksvc_user_info *uinfo, struct hfi1_bulksvc_user_mr_record *umr,
+			       uintptr_t vaddr, u64 len, u32 hmem_iface, u32 hmem_device,
+			       union hfi1_bulksvc_userctxt_cmd_data *cmd_data)
+{
+	struct hfi1_dms_mr *dms_mr;
+	struct scatterlist *sg;
+	const u64 begin_aligned_down = ALIGN_DOWN(vaddr, PAGE_SIZE);
+	const u64 end_aligned_up = ALIGN(vaddr + len, PAGE_SIZE);
+	const u64 extended_input_len = end_aligned_up - begin_aligned_down;
+	const u64 num_pages = extended_input_len / PAGE_SIZE;
+	u64 mapping_pages = 0;
+	int ret;
+	int i;
+
+	/* Step 1: import and attach memory */
+	umr->mr_type = HFI1_BULKSVC_MR_TYPE_DMABUF;
+
+	if (WARN_ON(!cmd_data)) {
+		pr_err("%s:%d:%s() ERROR: cmd_data is NULL for dma buf MR\n", __FILENAME__, __LINE__, __func__);
+		goto error_cleanup;
+	} else if (WARN_ON(!cmd_data->dmabuf)) {
+		pr_err("%s:%d:%s() ERROR: cmd_data->dmabuf is NULL for dma buf MR, mr_open for dmabuf must be done through sync cmdq\n", __FILENAME__, __LINE__, __func__);
+		goto error_cleanup;
+	} else if (WARN_ON(extended_input_len < len)) {
+		dd_dev_err(uinfo->svc->dd, "Unexpected result of extending user buffer to page size, extended len %llu, orig len %llu\n", extended_input_len, len);
+		goto error_cleanup;
+	}
+
+	umr->mem_region.dma_buf = cmd_data->dmabuf;
+	if (IS_ERR_OR_NULL(umr->mem_region.dma_buf)) {
+		pr_err("%s:%d:%s() ERROR: dma_buf_get returned error %pE for fd %u\n",
+		       __FILENAME__, __LINE__, __func__, umr->mem_region.dma_buf,
+		       hmem_device);
+		umr->mem_region.dma_buf = NULL;
+		goto error_cleanup;
+	}
+
+	umr->mem_region.dma_buf_attachment = dma_buf_attach(umr->mem_region.dma_buf, &uinfo->svc->dd->pcidev->dev);
+	if (IS_ERR_OR_NULL(umr->mem_region.dma_buf_attachment)) {
+		pr_err("%s:%d:%s() ERROR: dma_buf_attach returned error %pE for fd %u\n",
+		       __FILENAME__, __LINE__, __func__, umr->mem_region.dma_buf_attachment,
+		       hmem_device);
+		umr->mem_region.dma_buf_attachment = NULL;
+		goto error_cleanup;
+	}
+
+	// TODO do not hold mapping longer than necessary
+	umr->mem_region.sg_table = dma_buf_map_attachment_unlocked(umr->mem_region.dma_buf_attachment, DMA_BIDIRECTIONAL);
+	if (IS_ERR_OR_NULL(umr->mem_region.sg_table)) {
+		pr_err("%s:%d:%s() ERROR: dma_buf_map_attachment returned error %pE for fd %u\n",
+		       __FILENAME__, __LINE__, __func__, umr->mem_region.sg_table,
+		       hmem_device);
+		umr->mem_region.sg_table = NULL;
+		goto error_cleanup;
+	}
+
+	/* Step 2: render per-page DMA mappings into dma_list[] */
+	dms_mr = &umr->dms_mr;
+	dms_mr->npages_total = num_pages;
+	dms_mr->dma_list = kmalloc_array(num_pages, sizeof(dma_addr_t), GFP_KERNEL);
+	if (WARN_ON(!dms_mr->dma_list))
+		goto error_cleanup;
+
+	for_each_sgtable_dma_sg(umr->mem_region.sg_table, sg, i) {
+		const u32 sg_len = sg_dma_len(sg);
+		const dma_addr_t sg_addr = sg_dma_address(sg);
+		const u64 sgl_num_pages = sg_len / PAGE_SIZE;
+
+		if (mapping_pages >= num_pages)
+			break;
+
+		if (sg_len % PAGE_SIZE != 0) {
+			dd_dev_err(uinfo->svc->dd,
+				   "Unexpected non-page-sized sg entry in dma_buf mapping: len %u, dma addr 0x%llx\n",
+				   sg_len, sg_addr);
+			goto error_cleanup;
+		}
+
+		for (u32 sgl_page_idx = 0; sgl_page_idx < sgl_num_pages &&
+		     mapping_pages < num_pages; ++sgl_page_idx) {
+			dms_mr->dma_list[mapping_pages] = sg_addr +
+							  (sgl_page_idx * PAGE_SIZE);
+			++mapping_pages;
+		}
+	}
+
+	if (mapping_pages != num_pages) {
+		dd_dev_err(uinfo->svc->dd, "dma_buf mapping smaller than expected: mapping pages %llu, total pages %llu\n",
+			   mapping_pages, num_pages);
+		goto error_cleanup;
+	}
+
+	// Do vmap ahead of time for fixups, etc
+	// TODO defer or only map for unaligned accesses
+	ret = dma_buf_vmap_unlocked(umr->mem_region.dma_buf, &umr->mem_region.vmap);
+	if (ret) {
+		dd_dev_err(uinfo->svc->dd, "dma_buf_vmap failed for fd %u: %d\n", hmem_device, ret);
+		umr->mem_region.vmap.vaddr_iomem = NULL;
+		goto error_cleanup;
+	}
+
+	dms_mr->extended_vaddr.addr = begin_aligned_down;
+	dms_mr->extended_vaddr.len = extended_input_len;
+	dms_mr->pinned_check_fn = user_mr_record_dmabuf_pinned_check;
+	dms_mr->dms_mr_memcpy_fn = dms_mr_dmabuf_memcpy;
+
+	return 0;
+error_cleanup:
+	return -EFAULT;
+}
+
 static struct hfi1_bulksvc_user_mr_record *user_mr_record_create_pinned_and_insert(struct hfi1_bulksvc_user_info *user_info, uintptr_t vaddr, u64 len, u64 flags, u32 hmem_iface, u32 hmem_device, union hfi1_bulksvc_userctxt_cmd_data *cmd_data)
 {
 	struct hfi1_bulksvc_user_mr_record *mr_record;
+	int ret;
 
 	mr_record = kzalloc(sizeof(*mr_record), GFP_KERNEL);
 	if (!mr_record) {
@@ -389,116 +507,10 @@ static struct hfi1_bulksvc_user_mr_record *user_mr_record_create_pinned_and_inse
 		break;
 	}
 	case HFI1_HFISVC_HMEM_IFACE_DMABUF: {
-		mr_record->mr_type = HFI1_BULKSVC_MR_TYPE_DMABUF;
-
-		if (WARN_ON(!cmd_data)) {
-			pr_err("%s:%d:%s() ERROR: cmd_data is NULL for dma buf MR\n", __FILENAME__, __LINE__, __func__);
+		ret = user_mr_map_dma_buf(user_info, mr_record, vaddr, len, hmem_iface, hmem_device,
+					  cmd_data);
+		if (ret)
 			goto error_cleanup;
-		}
-		if (WARN_ON(!cmd_data->dmabuf)) {
-			pr_err("%s:%d:%s() ERROR: cmd_data->dmabuf is NULL for dma buf MR, mr_open for dmabuf must be done through sync cmdq\n", __FILENAME__, __LINE__, __func__);
-			goto error_cleanup;
-		}
-
-		mr_record->mem_region.dma_buf = cmd_data->dmabuf;
-
-		if (!mr_record->mem_region.dma_buf) {
-			pr_err("%s:%d:%s() ERROR: Failed to get dma_buf for fd %u\n", __FILENAME__, __LINE__, __func__, hmem_device);
-			goto error_cleanup;
-		}
-		if (IS_ERR(mr_record->mem_region.dma_buf)) {
-			pr_err("%s:%d:%s() ERROR: dma_buf_get returned error %ld for fd %u\n", __FILENAME__, __LINE__, __func__, PTR_ERR(mr_record->mem_region.dma_buf), hmem_device);
-			mr_record->mem_region.dma_buf = NULL;
-			goto error_cleanup;
-		}
-		mr_record->mem_region.dma_buf_attachment = dma_buf_attach(mr_record->mem_region.dma_buf, &user_info->svc->dd->pcidev->dev);
-		if (!mr_record->mem_region.dma_buf_attachment) {
-			pr_err("%s:%d:%s() ERROR: Failed to attach dma_buf for fd %u\n", __FILENAME__, __LINE__, __func__, hmem_device);
-			goto error_cleanup;
-		}
-		if (IS_ERR(mr_record->mem_region.dma_buf_attachment)) {
-			pr_err("%s:%d:%s() ERROR: dma_buf_attach returned error %ld for fd %u\n", __FILENAME__, __LINE__, __func__, PTR_ERR(mr_record->mem_region.dma_buf_attachment), hmem_device);
-			mr_record->mem_region.dma_buf_attachment = NULL;
-			goto error_cleanup;
-		}
-
-		// TODO do not hold mapping longer than necessary
-		mr_record->mem_region.sg_table = dma_buf_map_attachment_unlocked(mr_record->mem_region.dma_buf_attachment, DMA_BIDIRECTIONAL);
-
-		if (!mr_record->mem_region.sg_table) {
-			pr_err("%s:%d:%s() ERROR: Failed to map dma_buf for fd %u\n", __FILENAME__, __LINE__, __func__, hmem_device);
-			goto error_cleanup;
-		}
-		if (IS_ERR(mr_record->mem_region.sg_table)) {
-			pr_err("%s:%d:%s() ERROR: dma_buf_map_attachment returned error %ld for fd %u\n", __FILENAME__, __LINE__, __func__, PTR_ERR(mr_record->mem_region.sg_table), hmem_device);
-			mr_record->mem_region.sg_table = NULL;
-			goto error_cleanup;
-		}
-
-		u64 const begin_aligned_down = ALIGN_DOWN(vaddr, PAGE_SIZE);
-		u64 const end_aligned_up = ALIGN(vaddr + len, PAGE_SIZE);
-		u64 const extended_input_len = end_aligned_up - begin_aligned_down;
-		if (WARN_ON(extended_input_len < len)) {
-			dd_dev_err(user_info->svc->dd, "Unexpected result of extending user buffer to page size, extended len %llu, orig len %llu\n", extended_input_len, len);
-			goto error_cleanup;
-		}
-
-		struct hfi1_dms_mr *dms_mr = &mr_record->dms_mr;
-
-		u64 const num_pages = extended_input_len / PAGE_SIZE;
-
-		dms_mr->npages_total = num_pages;
-
-		dms_mr->dma_list = kmalloc_array(num_pages, sizeof(dma_addr_t), GFP_KERNEL);
-
-		u64 mapping_pages = 0;
-
-		struct scatterlist *sg;
-		int i;
-
-		for_each_sgtable_dma_sg(mr_record->mem_region.sg_table, sg, i) {
-			const u32 sg_len = sg_dma_len(sg);
-			const dma_addr_t sg_addr = sg_dma_address(sg);
-			const u64 sgl_num_pages = sg_len / PAGE_SIZE;
-
-			if (mapping_pages >= num_pages)
-				break;
-
-			if (sg_len % PAGE_SIZE != 0) {
-				dd_dev_err(user_info->svc->dd,
-					   "Unexpected non-page-sized sg entry in dma_buf mapping: len %u, dma addr 0x%llx\n",
-					   sg_len, sg_addr);
-				goto error_cleanup;
-			}
-
-			for (u32 sgl_page_idx = 0; sgl_page_idx < sgl_num_pages &&
-			     mapping_pages < num_pages; ++sgl_page_idx) {
-				dms_mr->dma_list[mapping_pages] = sg_addr +
-								  (sgl_page_idx * PAGE_SIZE);
-				++mapping_pages;
-			}
-		}
-
-		if (mapping_pages != num_pages) {
-			dd_dev_err(user_info->svc->dd, "dma_buf mapping smaller than expected: mapping pages %llu, total pages %llu\n", mapping_pages, num_pages);
-			goto error_cleanup;
-		}
-
-		// Do vmap ahead of time for fixups, etc
-		// TODO defer or only map for unaligned accesses
-		int rc = dma_buf_vmap_unlocked(mr_record->mem_region.dma_buf, &mr_record->mem_region.vmap);
-		if (rc != 0) {
-			dd_dev_err(user_info->svc->dd, "dma_buf_vmap failed for fd %u: %d\n", hmem_device, rc);
-			mr_record->mem_region.vmap.vaddr_iomem = NULL;
-			goto error_cleanup;
-		}
-
-		dms_mr->extended_vaddr.addr = begin_aligned_down;
-		dms_mr->extended_vaddr.len = extended_input_len;
-
-		dms_mr->pinned_check_fn = user_mr_record_dmabuf_pinned_check;
-		dms_mr->dms_mr_memcpy_fn = dms_mr_dmabuf_memcpy;
-
 		break;
 	}
 	default:
