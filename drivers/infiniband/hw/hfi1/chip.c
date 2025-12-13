@@ -8439,11 +8439,9 @@ static inline void __hfi1_sde_eoi_intr(struct sdma_engine *sde, u32 off, u64 sta
 		write_csr(dd, dd->params->cce_int_force_reg + off, sde->int_mask);
 }
 
-irqreturn_t sdma_interrupt(int irq, void *data)
+static irqreturn_t _sdma_interrupt(int irq, struct sdma_engine *sde, u64 status)
 {
-	struct sdma_engine *sde = data;
 	struct hfi1_devdata *dd = sde->dd;
-	u64 status;
 	u32 off;
 
 #ifdef CONFIG_SDMA_VERBOSITY
@@ -8466,54 +8464,80 @@ irqreturn_t sdma_interrupt(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
-	/* This read_csr is really bad in the hot path */
-	status = read_csr(dd, dd->params->cce_int_status_reg + off) & sde->imask;
-	if (likely(status)) {
-		/* handle the interrupt(s) */
-		sdma_engine_interrupt(sde, status);
-		if (sdma_work_pending(sde))
-			return IRQ_WAKE_THREAD;
-		__hfi1_sde_eoi_intr(sde, off, status);
-	} else {
-		dd_dev_info_ratelimited(dd, "SDMA engine %u interrupt, but no status bits set\n",
-					sde->this_idx);
+	/* handle the interrupt(s) */
+	sdma_engine_interrupt(sde, status);
+	if (sdma_work_pending(sde))
+		return IRQ_WAKE_THREAD;
+	__hfi1_sde_eoi_intr(sde, off, status);
+	return IRQ_HANDLED;
+}
+
+irqreturn_t sdma_interrupt(int irq, void *data)
+{
+	struct sdma_engine *sde = data;
+
+	return _sdma_interrupt(irq, sde, sde->int_mask);
+}
+
+irqreturn_t sdma_progress_interrupt(int irq, void *data)
+{
+	struct sdma_engine *sde = data;
+
+	return _sdma_interrupt(irq, sde, sde->progress_mask);
+}
+
+irqreturn_t sdma_idle_interrupt(int irq, void *data)
+{
+	struct sdma_engine *sde = data;
+
+	return _sdma_interrupt(irq, sde, sde->idle_mask);
+}
+
+static irqreturn_t _sdma_interrupt_thr(int irq, struct sdma_engine *sde, u64 status)
+{
+	struct hfi1_devdata *dd = sde->dd;
+	u32 off;
+	unsigned long ty;
+	unsigned long flags;
+
+	off = 8 * (dd->params->is_sdma_start / 64);
+	ty = jiffies + msecs_to_jiffies(sdma_yield);
+again:
+	/* handle the interrupt(s) */
+	sdma_engine_interrupt(sde, status);
+
+	if (sdma_work_pending(sde)) {
+		if (time_after(jiffies, ty)) {
+			cond_resched();
+			ty = jiffies + msecs_to_jiffies(sdma_yield);
+		}
+		goto again;
 	}
+	local_irq_save(flags);
+	__hfi1_sde_eoi_intr(sde, off, status);
+	local_irq_restore(flags);
 	return IRQ_HANDLED;
 }
 
 irqreturn_t sdma_interrupt_thr(int irq, void *data)
 {
 	struct sdma_engine *sde = data;
-	struct hfi1_devdata *dd = sde->dd;
-	u64 status;
-	u32 off;
-	unsigned long ty;
-	unsigned long flags;
 
-	/* This read_csr is really bad in the hot path */
-	off = 8 * (dd->params->is_sdma_start / 64);
-	status = read_csr(dd, dd->params->cce_int_status_reg + off) & sde->imask;
-	ty = jiffies + msecs_to_jiffies(sdma_yield);
-	if (likely(status)) {
-again:
-		/* handle the interrupt(s) */
-		sdma_engine_interrupt(sde, status);
+	return _sdma_interrupt_thr(irq, sde, sde->int_mask);
+}
 
-		if (sdma_work_pending(sde)) {
-			if (time_after(jiffies, ty)) {
-				cond_resched();
-				ty = jiffies + msecs_to_jiffies(sdma_yield);
-			}
-			goto again;
-		}
-		local_irq_save(flags);
-		__hfi1_sde_eoi_intr(sde, off, status);
-		local_irq_restore(flags);
-	} else {
-		dd_dev_info_ratelimited(dd, "SDMA engine %u interrupt, but no status bits set\n",
-					sde->this_idx);
-	}
-	return IRQ_HANDLED;
+irqreturn_t sdma_progress_interrupt_thr(int irq, void *data)
+{
+	struct sdma_engine *sde = data;
+
+	return _sdma_interrupt_thr(irq, sde, sde->progress_mask);
+}
+
+irqreturn_t sdma_idle_interrupt_thr(int irq, void *data)
+{
+	struct sdma_engine *sde = data;
+
+	return _sdma_interrupt_thr(irq, sde, sde->idle_mask);
 }
 
 /*
@@ -13711,7 +13735,7 @@ void remap_intr(struct hfi1_devdata *dd, int isrc, int msix_intr)
 	write_csr(dd, dd->params->cce_msix_int_map_vec_reg + (8 * m), reg);
 }
 
-void remap_sdma_interrupts(struct hfi1_devdata *dd, int engine, int msix_intr)
+void remap_sdma_interrupts(struct hfi1_devdata *dd, int engine, int *msix_intr)
 {
 	/*
 	 * SDMA engine interrupt sources grouped by type, rather than
@@ -13720,9 +13744,9 @@ void remap_sdma_interrupts(struct hfi1_devdata *dd, int engine, int msix_intr)
 	 *	SDMAProgress
 	 *	SDMAIdle
 	 */
-	remap_intr(dd, dd->params->is_sdma_start + engine, msix_intr);
-	remap_intr(dd, dd->params->is_sdma_progress_start + engine, msix_intr);
-	remap_intr(dd, dd->params->is_sdma_idle_start + engine, msix_intr);
+	remap_intr(dd, dd->params->is_sdma_start + engine, msix_intr[0]);
+	remap_intr(dd, dd->params->is_sdma_progress_start + engine, msix_intr[1]);
+	remap_intr(dd, dd->params->is_sdma_idle_start + engine, msix_intr[2]);
 }
 
 /*
