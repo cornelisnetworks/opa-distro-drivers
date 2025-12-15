@@ -1277,6 +1277,29 @@ void write_ctxt_csr(const struct hfi1_devdata *dd, u32 offset, u32 ctxt,
 	writeq(value, ctxt_csr_addr(dd, offset, ctxt, stride));
 }
 
+/*
+ * Serialize all writes to the given offset a single bit at a time.
+ */
+void write_csr_single_bit(const struct hfi1_devdata *dd, u32 offset, u64 value)
+{
+	u64 temp;
+	int bit;
+
+	/* special case: no bits set - do the write but then be done */
+	if (value == 0) {
+		write_csr(dd, offset, 0);
+		return;
+	}
+
+	/* write starting from the least significant bit */
+	do {
+		bit = __builtin_ffsll((unsigned long long)value) - 1;
+		temp = 1ull << bit;
+		write_csr(dd, offset, temp);
+		value &= ~temp;
+	} while (value);
+}
+
 /**
  * get_csr_addr - return te iomem address for offset
  * @dd: the dd device
@@ -8415,7 +8438,7 @@ irqreturn_t general_interrupt(int irq, void *data)
 		regs[i] = read_csr(dd, cce_int_status_reg + (8 * i)) & mask;
 		/* only clear if anything is set */
 		if (regs[i])
-			write_csr(dd, cce_int_clear_reg + (8 * i), regs[i]);
+			write_csr_single_bit(dd, cce_int_clear_reg + (8 * i), regs[i]);
 	}
 
 	/* phase 2: call the appropriate handler */
