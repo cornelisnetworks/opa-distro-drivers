@@ -3877,13 +3877,12 @@ static void _handle_data_packet(struct hfi1_packet *packet)
 	DMS_BUG_ON(packet->rcd->dd == NULL);
 	DMS_BUG_ON(packet->rcd->dd->bulksvc == NULL);
 
+	rcd = packet->rcd;
+	svc = packet->rcd->dd->bulksvc;
 	dms = &svc->dms;
 
 	if (!_packet_valid(dms, packet))
 		return;
-
-	rcd = packet->rcd;
-	svc = packet->rcd->dd->bulksvc;
 
 	WARN_ON_ONCE(packet->ebuf != NULL);
 
@@ -3934,13 +3933,12 @@ static void _handle_ctrl_packet(struct hfi1_packet *packet)
 	DMS_BUG_ON(packet->rcd->dd == NULL);
 	DMS_BUG_ON(packet->rcd->dd->bulksvc == NULL);
 
+	rcd = packet->rcd;
+	svc = packet->rcd->dd->bulksvc;
 	dms = &svc->dms;
 
 	if (!_packet_valid(dms, packet))
 		return;
-
-	rcd = packet->rcd;
-	svc = packet->rcd->dd->bulksvc;
 
 	WARN_ON_ONCE(packet->ebuf != NULL);
 
