@@ -695,7 +695,7 @@ static void bulksvc_clear_interrupts(struct hfi1_bulksvc *svc)
 	hfi1_rcd_eoi_intr(svc->dms.rcd_data);
 	for (int i = 0; i < svc->dms.num_engines; ++i) {
 		struct sdma_engine *sde = svc->dms.sdma_engines[i];
-		write_csr(dd, dd->params->cce_int_clear_reg + off, sde->imask);
+		write_csr_single_bit(dd, dd->params->cce_int_clear_reg + off, sde->imask);
 	}
 	// clear the doorbell is
 	write_csr(dd, dd->params->cce_int_clear_reg + (8 * 5), 1ull << 11);
