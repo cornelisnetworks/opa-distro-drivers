@@ -602,6 +602,7 @@ enum {
 /* read and write hardware registers */
 u64 read_csr(const struct hfi1_devdata *dd, u32 offset);
 void write_csr(const struct hfi1_devdata *dd, u32 offset, u64 value);
+void write_csr_single_bit(const struct hfi1_devdata *dd, u32 offset, u64 value);
 u64 read_ctxt_csr(const struct hfi1_devdata *dd, u32 offset, u32 ctxt,
 		  u32 stride);
 void write_ctxt_csr(const struct hfi1_devdata *dd, u32 offset, u32 ctxt,
