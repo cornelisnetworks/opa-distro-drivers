@@ -498,9 +498,13 @@ static void flush_event_queue(struct hfi1_bulksvc *svc)
 void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 {
 	struct hfi1_bulksvc_user_info *user_info;
-	struct hfi1_devrsrcs *dr = &dd->rsrcs;
+	struct hfi1_devrsrcs *dr;
 	struct hfi1_bulksvc *svc;
 
+	if (!dd)
+		return;
+
+	dr = &dd->rsrcs;
 	/* TODO add logic to wait until it safe to free bulksvc */
 	dd->verbs_dev.rdi.use_bulksvc = false;
 
