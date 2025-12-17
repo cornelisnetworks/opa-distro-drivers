@@ -1976,6 +1976,9 @@ static void hfi1_free_devdata(struct hfi1_devdata *dd)
 	struct hfi1_asic_data *ad;
 	unsigned long flags;
 
+	if (!dd)
+		return;
+
 	xa_lock_irqsave(&hfi1_dev_table, flags);
 	__xa_erase(&hfi1_dev_table, dd->unit);
 	ad = release_asic_data(dd);
