@@ -683,7 +683,7 @@ int hfi1_do_mmap(struct hfi1_filedata *fd, u8 type, struct vm_area_struct *vma)
 		goto done;
 	}
 
-	vm_flags_reset(vma, flags);
+	vma->vm_flags = flags;
 	mmap_cdbg(ctxt, subctxt, type, mapio, vmf, memaddr, memvirt, memdma,
 		  memlen, vma);
 	if (vmf) {
