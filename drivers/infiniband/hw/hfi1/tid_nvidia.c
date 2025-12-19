@@ -108,6 +108,7 @@ struct nvidia_tid_node {
 static void nvidia_user_buf_kref_cb(struct kref *ref);
 
 void hfi1_tid_nvidia_free(void);
+int hfi1_tid_nvidia_init(void);
 
 static int nvidia_node_register_notify(struct tid_rb_node *node)
 {
