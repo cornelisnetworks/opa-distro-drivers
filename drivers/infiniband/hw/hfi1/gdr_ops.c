@@ -793,7 +793,7 @@ pin_success:
  * -EFAULT on bad parameter block address
  * -EINVAL on invalid content of parameter block
  */
-int
+static int
 fetch_user_query_ioctl_params(unsigned long arg,
 			      struct hfi1_gdr_query_params *query_params)
 {
@@ -1329,7 +1329,7 @@ static void remove_gdr_dev(void)
 	}
 }
 
-void put_nvidia_syms(void)
+static void put_nvidia_syms(void)
 {
 #define PUT_SYMBOL(name)			\
 	do { \
