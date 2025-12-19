@@ -3859,11 +3859,6 @@ static bool _packet_valid(struct hfi1_dms *dms, struct hfi1_packet *packet)
 	return false;
 }
 
-void hfi1_dms_impl_noop_packet(struct hfi1_packet *packet)
-{
-	(void) packet;
-}
-
 static void _handle_data_packet(struct hfi1_packet *packet)
 {
 	struct hfi1_bulksvc *svc;
