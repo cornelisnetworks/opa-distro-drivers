@@ -520,8 +520,11 @@ void hfi1_bulksvc_teardown(struct hfi1_devdata *dd)
 		svc->event_workq = NULL;
 	}
 
-	hfi1_bulksvc_verbs_release_client_id(&dd->bulksvc->dms);
-	hfi1_dms_uninit(&dd->bulksvc->dms);
+	/* Only release DMS resources if DMS was initialized */
+	if (dd->bulksvc->dms.dd) {
+		hfi1_bulksvc_verbs_release_client_id(&dd->bulksvc->dms);
+		hfi1_dms_uninit(&dd->bulksvc->dms);
+	}
 
 	if (svc->rsrc.sde_arr)
 		hfi1_bulksvc_return_sdma(dd);

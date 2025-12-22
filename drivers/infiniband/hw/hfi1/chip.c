@@ -16483,41 +16483,24 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 
 	/*
 	 * Decide on number of SDMA engines to use based on hardware
-	 * availability, number of VLs, and module parameter.
+	 * availability and number of VLs.
+	 *
+	 * Note: mod_num_sdma and BTS engine reservation are handled in
+	 * sdma_init() where we have full context for credit allocation.
+	 * Here we just set up the basic chip engine count and device range.
 	 */
 	if (HFI1_CAP_IS_KSET(SDMA)) {
-		u32 sdma_engines = chip_sdma_engines(dd);
+		u32 chip_engines = chip_sdma_engines(dd);
 
-		/* insure num_vls isn't larger than number of sdma engines */
-		if (num_vls > sdma_engines) {
-			dd_dev_err(dd, "num_vls %u too large, using %u VLs\n",
-				   num_vls, sdma_engines);
-			num_vls = sdma_engines;
-		}
+		dd->num_sdma = chip_engines;
 
-		/*
-		 * TODO: use of 'mod_num_sdma' is dubious at best,
-		 * should revisit whether this is supported at all.
-		 * It is not being factored into SRIOV SDMA assignment.
-		 */
-		if (mod_num_sdma &&
-		    /* can't exceed chip support */
-		    mod_num_sdma <= sdma_engines &&
-		    /* count must be >= vls */
-		    mod_num_sdma >= num_vls)
-			sdma_engines = mod_num_sdma;
-		if (dd->bulksvc) {
-			/* don't touch num_sdma yet but do some prequisite
-			 * checks before we reserve credits for these engines
-			 */
-			if (dd->bulksvc->prereqs.num_sdma > sdma_engines - num_vls)
-				hfi1_bulksvc_teardown(dd); /* disable bulksvc */
-		}
-		dd->num_sdma = sdma_engines;
 		if (dr->num_vfs) {
+			/*
+			 * SRIOV: PF0 range already set by hfi1_sriov_set_cfg().
+			 * Validate num_vls fits within assigned engine range.
+			 */
 			int num_sde = dr->last_sdma_engine - dr->first_sdma_engine;
 
-			/* resources already setup by hfi1_sriov_set_cfg() */
 			if (num_vls > num_sde) {
 				dd_dev_err(dd, "SI%d: num_vls %u too large, using %u VLs\n",
 					   dr->si_idx, num_vls, num_sde);
@@ -16525,7 +16508,7 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 			}
 		} else {
 			dr->first_sdma_engine = 0;
-			dr->last_sdma_engine = dd->num_sdma;
+			dr->last_sdma_engine = chip_engines;
 		}
 	} else {
 		HFI1_CAP_CLEAR(SDMA_AHG);
