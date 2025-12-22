@@ -1421,46 +1421,6 @@ void sdma_clean(struct hfi1_devdata *dd)
 	}
 }
 
-static u32 sdma_per_engine_credits(struct hfi1_devdata *dd,
-				   u32 num_engines)
-{
-	u32 per_sdma_credits =
-		chip_sdma_mem_size(dd) / (num_engines * SDMA_BLOCK_SIZE);
-	u32 limit = jkr_sdma_credits_limit < 0 ?
-		JKR_DEFAULT_SDMA_CREDITS_LIMIT :
-		jkr_sdma_credits_limit;
-
-	if (dd->params->chip_type != CHIP_JKR || !jkr_sdma_credits_limit)
-		goto rounddown;
-
-	if (limit > per_sdma_credits) {
-		/*
-		 * Only warn user if they actually set jkr_sdma_credits_limit,
-		 * not if jkr_sdma_credits_limit > per_sdma_credits because of
-		 * num_sdma.
-		 */
-		if (jkr_sdma_credits_limit > 0)
-			dd_dev_info(dd, "Ignoring jkr_sdma_credits_limit (%u) > per_sdma_credits (%u)\n",
-				    limit, per_sdma_credits);
-	} else if (limit < 2) {
-		/* Min 2 to make sure JKR doesn't round down to 0 */
-		dd_dev_info(dd, "Ignoring jkr_sdma_credits_limit %u < 2\n",
-			    limit);
-	} else {
-		u32 was = per_sdma_credits;
-
-		per_sdma_credits = limit & ~1;
-		dd_dev_info(dd, "Setting per_sdma_credits to %u (was %u) from jkr_sdma_credits_limit module param\n",
-			    per_sdma_credits, was);
-	}
-rounddown:
-	/* non-WFR hardware requires an even number of credits */
-	if (dd->params->chip_type != CHIP_WFR && (per_sdma_credits & 1))
-		per_sdma_credits &= ~1;
-
-	return per_sdma_credits;
-}
-
 /* no-op SDMA descriptor */
 static struct hw_sdma_desc sdma_pad;
 
@@ -1485,11 +1445,10 @@ int sdma_init(struct hfi1_devdata *dd)
 	void *curr_head;
 	struct hfi1_pportdata *ppd;
 	u32 per_sdma_credits = 0; /* not used on VFs */
-	u32 bulksvc_num_sdma;
-	u32 blk_start, blk_end;
-	u32 bulksvc_per_sdma_credits;
-	u32 bulksvc_total_sdma_credits = 0;
-	u32 chip_engines;
+	u32 bulksvc_num_sdma = 0;
+	u32 blk_start = 0, blk_end = 0;
+	u32 bulksvc_per_sdma_credits = 0;
+	u32 vf_sdma_start = 0; /* where VFs begin (SRIOV only) */
 	uint idle_cnt = sdma_idle_cnt;
 	size_t num_engines = dd->num_sdma;
 	int ret = -ENOMEM;
@@ -1507,8 +1466,6 @@ int sdma_init(struct hfi1_devdata *dd)
 		dd_dev_info(dd, "SDMA chip_sdma_engines: %u\n", chip_sdma_engines(dd));
 		dd_dev_info(dd, "SDMA chip_sdma_mem_size: %u\n",
 			    chip_sdma_mem_size(dd));
-
-		per_sdma_credits = sdma_per_engine_credits(dd, num_engines);
 	}
 
 	dd->sdma_threshold = sdma_threshold;
@@ -1567,35 +1524,237 @@ int sdma_init(struct hfi1_devdata *dd)
 		    dd->sdma_threshold, dd->pad_sdma_desc,
 		    dd->sdma_align);
 
-	per_sdma_credits = sdma_per_engine_credits(dd, num_engines);
-	/* rebalance if blksvc wants its sde's to have more credits */
-	if (dd->bulksvc) {
-		struct hfi1_bulksvc *b = dd->bulksvc;
-		u32 n = dr->last_sdma_engine - dr->first_sdma_engine;
-		u32 max_credits = per_sdma_credits * n;
+	/*
+	 * PF0 SDMA engine allocation and credit distribution.
+	 *
+	 * Engine layout principle:
+	 *   - VFs are allocated from the END of chip engines (by SRIOV code)
+	 *   - BTS engines come from the END of PF0's available range
+	 *   - mod_num_sdma limits PF0's non-BTS engines only
+	 *   - Gap (if any) exists between PF0+BTS and VFs
+	 *
+	 */
+	if (!dd->is_vf) {
+		u32 chip_engines = chip_sdma_engines(dd);
+		u32 pf0_available; /* engines available to PF0 (before VFs) */
+		u32 pf0_non_bts;   /* PF0's non-BTS engine count */
+		u32 bts_requested = 0;
 
-		bulksvc_num_sdma = b->prereqs.num_sdma;
-		bulksvc_per_sdma_credits = b->prereqs.credits_per_sdma;
-
-		blk_end =  dr->last_sdma_engine;
-		blk_start = blk_end -  bulksvc_num_sdma;
-
-		/* ensure at least 2 credits for remaining smda engines */
-		n -= bulksvc_num_sdma;
-		max_credits -= (n * 2);
-		bulksvc_total_sdma_credits = bulksvc_num_sdma *
-				  bulksvc_per_sdma_credits;
-		if (bulksvc_total_sdma_credits > max_credits) {
-			dd_dev_err(dd, "Bulk service cannot reserve %u*%u credits\n",
-			   bulksvc_num_sdma, bulksvc_per_sdma_credits);
-			hfi1_bulksvc_teardown(dd);
-			bulksvc_total_sdma_credits = 0;
-			bulksvc_num_sdma = 0;
+		/*
+		 * Determine PF0's available engine pool.
+		 * In SRIOV, VFs are allocated from the end of chip engines,
+		 * so dr->last_sdma_engine marks where VFs begin.
+		 * Without SRIOV, PF0 has access to all chip engines.
+		 */
+		if (dr->num_vfs) {
+			vf_sdma_start = dr->last_sdma_engine;
+			pf0_available = vf_sdma_start;
 		} else {
-			max_credits -= bulksvc_total_sdma_credits;
-			/* redistribute remaining credits */
-			per_sdma_credits = (max_credits / n) & ~1;
+			vf_sdma_start = chip_engines; /* no VFs */
+			pf0_available = chip_engines;
 		}
+
+		/*
+		 * Attempt BTS allocation from the END of PF0's range.
+		 * BTS engines are reserved before applying mod_num_sdma.
+		 */
+		if (dd->bulksvc) {
+			struct hfi1_bulksvc *b = dd->bulksvc;
+
+			bts_requested = b->prereqs.num_sdma;
+			bulksvc_per_sdma_credits = b->prereqs.credits_per_sdma;
+
+			/*
+			 * Calculate non-BTS engines if we allocate BTS.
+			 * non_bts_candidate = pf0_available - bts_requested
+			 * Then apply mod_num_sdma limit if set.
+			 */
+			if (bts_requested <= pf0_available) {
+				u32 non_bts_candidate = pf0_available - bts_requested;
+
+				/* Apply mod_num_sdma to limit non-BTS engines */
+				if (mod_num_sdma && mod_num_sdma < non_bts_candidate)
+					non_bts_candidate = mod_num_sdma;
+
+				/*
+				 * Teardown BTS if non-BTS engines < num_vls.
+				 * We must have at least num_vls engines for VL mapping.
+				 */
+				if (non_bts_candidate < num_vls) {
+					dd_dev_err(dd,
+						   "BTS would leave %u non-BTS engines < num_vls (%u), disabling BTS\n",
+						   non_bts_candidate, num_vls);
+					hfi1_bulksvc_teardown(dd);
+					bts_requested = 0;
+					bulksvc_per_sdma_credits = 0;
+				} else {
+					/* BTS allocation succeeds */
+					pf0_non_bts = non_bts_candidate;
+					bulksvc_num_sdma = bts_requested;
+					blk_start = pf0_non_bts;
+					blk_end = pf0_non_bts + bulksvc_num_sdma;
+				}
+			} else {
+				/* Not enough engines for BTS */
+				dd_dev_err(dd,
+					   "BTS requires %u engines but only %u available\n",
+					   bts_requested, pf0_available);
+				hfi1_bulksvc_teardown(dd);
+				bts_requested = 0;
+				bulksvc_per_sdma_credits = 0;
+			}
+		}
+
+		/*
+		 * If no BTS (either not configured or torn down), apply
+		 * mod_num_sdma directly to limit PF0's engine count.
+		 */
+		if (!bts_requested) {
+			bulksvc_num_sdma = 0;
+			blk_start = 0;
+			blk_end = 0;
+
+			pf0_non_bts = pf0_available;
+			if (mod_num_sdma && mod_num_sdma < pf0_non_bts)
+				pf0_non_bts = mod_num_sdma;
+		}
+
+		/*
+		 * Update PF0's engine range to include non-BTS + BTS engines.
+		 * Gap (if any) is between blk_end and vf_sdma_start.
+		 */
+		dr->last_sdma_engine = pf0_non_bts + bulksvc_num_sdma;
+
+		dd_dev_info(dd,
+			    "SDMA PF0: engines 0-%u (non-BTS: %u, BTS: %u [%u-%u), VF start: %u, gap: %u-%u)\n",
+			    dr->last_sdma_engine, pf0_non_bts,
+			    bulksvc_num_sdma,
+			    bulksvc_num_sdma ? blk_start : 0,
+			    bulksvc_num_sdma ? blk_end : 0,
+			    vf_sdma_start,
+			    dr->last_sdma_engine, vf_sdma_start);
+	}
+
+	/*
+	 * Calculate per-engine credits for non-BTS engines.
+	 * PF0 allocates credits for ALL chip engines (PF + VFs).
+	 *
+	 * Credit pool is divided among engines that actually use credits:
+	 *   - PF0 non-BTS engines (0 to blk_start-1, or dr->last_sdma_engine if no BTS)
+	 *   - VF engines (vf_sdma_start to num_engines-1)
+	 * Gap engines get 0 credits and are excluded from the divisor.
+	 */
+	if (!dd->is_vf) {
+		u32 total_credits = chip_sdma_mem_size(dd) / SDMA_BLOCK_SIZE;
+		u32 bts_total_credits = bulksvc_num_sdma * bulksvc_per_sdma_credits;
+		u32 pf0_non_bts_count;
+		u32 vf_engine_count;
+		u32 non_bts_engines;
+
+		/*
+		 * PF0 non-BTS engine count is blk_start (engines 0 to blk_start-1)
+		 * or dr->last_sdma_engine if no BTS.
+		 */
+		pf0_non_bts_count = bulksvc_num_sdma ? blk_start : dr->last_sdma_engine;
+
+		/*
+		 * VF engines run from vf_sdma_start to num_engines.
+		 * In non-SRIOV, vf_sdma_start equals chip_engines and there are no VFs.
+		 */
+		if (dr->num_vfs && vf_sdma_start < num_engines)
+			vf_engine_count = num_engines - vf_sdma_start;
+		else
+			vf_engine_count = 0;
+
+		/*
+		 * Total non-BTS engines that receive per_sdma_credits.
+		 * Gap engines are excluded.
+		 */
+		non_bts_engines = pf0_non_bts_count + vf_engine_count;
+
+		if (non_bts_engines > 0) {
+			/* Validate BTS credit request doesn't exceed available */
+			u32 min_non_bts_credits = non_bts_engines * 2; /* 2 per engine min */
+
+			if (bts_total_credits > total_credits - min_non_bts_credits) {
+				dd_dev_err(dd,
+					   "BTS credits %u*%u exceed available (total=%u, min_other=%u)\n",
+					   bulksvc_num_sdma, bulksvc_per_sdma_credits,
+					   total_credits, min_non_bts_credits);
+				hfi1_bulksvc_teardown(dd);
+				bts_total_credits = 0;
+				bulksvc_num_sdma = 0;
+				bulksvc_per_sdma_credits = 0;
+				blk_start = 0;
+				blk_end = 0;
+
+				/*
+				 * Recalculate PF0 non-BTS count after BTS teardown.
+				 * dr->last_sdma_engine was already set, but we need
+				 * to update it since BTS is gone.
+				 */
+				if (mod_num_sdma && mod_num_sdma < vf_sdma_start)
+					pf0_non_bts_count = mod_num_sdma;
+				else
+					pf0_non_bts_count = vf_sdma_start;
+				dr->last_sdma_engine = pf0_non_bts_count;
+				non_bts_engines = pf0_non_bts_count + vf_engine_count;
+			}
+
+			/*
+			 * Calculate per-engine credits:
+			 * (total - BTS reserved) / non_bts_engines
+			 *
+			 * Non-WFR hardware (JKR) requires even credits.
+			 */
+			per_sdma_credits = (total_credits - bts_total_credits) / non_bts_engines;
+			if (dd->params->chip_type != CHIP_WFR)
+				per_sdma_credits &= ~1;
+
+			/*
+			 * Apply JKR-specific credit limit if configured.
+			 * jkr_sdma_credits_limit:
+			 *   -1 => use JKR_DEFAULT_SDMA_CREDITS_LIMIT
+			 *    0 => no limit
+			 *   >0 => use specified limit
+			 */
+			if (dd->params->chip_type == CHIP_JKR &&
+			    jkr_sdma_credits_limit != 0) {
+				u32 limit = jkr_sdma_credits_limit < 0 ?
+					JKR_DEFAULT_SDMA_CREDITS_LIMIT :
+					(u32)jkr_sdma_credits_limit;
+
+				if (limit >= 2 && limit < per_sdma_credits) {
+					dd_dev_info(dd,
+						    "Limiting per_sdma_credits to %u (was %u) from jkr_sdma_credits_limit\n",
+						    limit & ~1, per_sdma_credits);
+					per_sdma_credits = limit & ~1;
+				} else if (limit < 2) {
+					dd_dev_info(dd,
+						    "Ignoring jkr_sdma_credits_limit %u < 2\n",
+						    limit);
+				} else if (jkr_sdma_credits_limit > 0) {
+					/* User set limit > calculated, warn them */
+					dd_dev_info(dd,
+						    "Ignoring jkr_sdma_credits_limit (%u) > per_sdma_credits (%u)\n",
+						    limit, per_sdma_credits);
+				}
+			}
+
+			if (per_sdma_credits == 0)
+				dd_dev_warn(dd,
+					    "SDMA per_sdma_credits is 0 for %u non-BTS engines\n",
+					    non_bts_engines);
+		} else {
+			/* All engines are BTS (unusual but handle it) */
+			per_sdma_credits = 0;
+		}
+
+		dd_dev_info(dd,
+			    "SDMA credits: per_sdma=%u, BTS=%u*%u=%u, non_bts_engines=%u\n",
+			    per_sdma_credits,
+			    bulksvc_num_sdma, bulksvc_per_sdma_credits,
+			    bts_total_credits, non_bts_engines);
 	}
 	/* set up freeze waitqueue */
 	init_waitqueue_head(&dd->sdma_unfreeze_wq);
@@ -1699,7 +1858,8 @@ int sdma_init(struct hfi1_devdata *dd)
 	}
 	if (!dd->is_vf) {
 		/* Clear SendDmaCfgMemory on disabled engines */
-		chip_engines = chip_sdma_engines(dd);
+		u32 chip_engines = chip_sdma_engines(dd);
+
 		for (this_idx = num_engines; this_idx < chip_engines; ++this_idx)
 			write_sdmacfg_csr(dd, this_idx,
 					  dd->params->send_dma_cfg_memory_reg, 0);
@@ -1727,29 +1887,88 @@ int sdma_init(struct hfi1_devdata *dd)
 
 	/* assign each engine to different cacheline and init registers */
 	curr_head = (void *)dd->sdma_heads_dma;
-	/* setup credits for all SDMA engines, only on PF0 (before SiIdx is set) */
+
+	/*
+	 * Setup credits for all SDMA engines, only on PF0.
+	 * PF0 writes credit CSRs for ALL chip engines (PF + VFs).
+	 *
+	 * Credit layout must account for:
+	 * - PF0 non-BTS engines: per_sdma_credits each
+	 * - BTS engines (blk_start to blk_end): bulksvc_per_sdma_credits each
+	 * - Gap engines (between PF0+BTS and VFs): 0 credits
+	 * - VF engines: per_sdma_credits each
+	 *
+	 * The credit_offset must be accumulated properly since engines
+	 * have different credit counts.
+	 *
+	 * Gap is between dr->last_sdma_engine (end of PF0+BTS) and vf_sdma_start.
+	 * vf_sdma_start was set to chip_engines if no VFs, so gap detection
+	 * works uniformly.
+	 */
 	if (!dd->is_vf) {
+		u32 gap_start = dr->last_sdma_engine; /* end of PF0+BTS range */
+		u32 gap_end = vf_sdma_start; /* where VFs begin (or chip_engines if no VFs) */
+
+		credit_offset = 0;
 		for (this_idx = 0; this_idx < dd->num_sdma; ++this_idx) {
-			/* dd->per_sdma[this_idx] are not initialized for all engines */
-			write_sdmacfg_csr(dd, this_idx, dd->params->send_dma_cfg_memory_reg,
-					  ((u64)per_sdma_credits <<
+			u32 engine_credits;
+
+			if (this_idx >= blk_start && this_idx < blk_end &&
+			    bulksvc_num_sdma > 0) {
+				/* BTS engine */
+				engine_credits = bulksvc_per_sdma_credits;
+			} else if (this_idx >= gap_start && this_idx < gap_end) {
+				/* Gap engine - disabled, 0 credits */
+				engine_credits = 0;
+			} else {
+				/* PF0 non-BTS or VF engine */
+				engine_credits = per_sdma_credits;
+			}
+
+			write_sdmacfg_csr(dd, this_idx,
+					  dd->params->send_dma_cfg_memory_reg,
+					  ((u64)engine_credits <<
 					   SD(MEMORY_SDMA_MEMORY_CNT_SHIFT)) |
-					  ((u64)(per_sdma_credits * this_idx) <<
+					  ((u64)credit_offset <<
 					   SD(MEMORY_SDMA_MEMORY_INDEX_SHIFT)));
+			credit_offset += engine_credits;
 		}
+	}
+
+	/*
+	 * Initialize sde structures for this device's engine range.
+	 */
+	if (!dd->is_vf) {
+		/* PF0: credit_offset starts at 0 since we own engine 0 */
+		credit_offset = 0;
+	} else {
+		/*
+		 * VF: credit_offset must account for all engines before
+		 * our first_sdma_engine. PF0 already wrote the CSRs, so
+		 * we just need to track the offset for init_sdma_regs.
+		 *
+		 * Since VFs don't know the PF0/BTS/gap layout, we compute
+		 * the offset assuming uniform per_sdma_credits. This is wrong
+         * but we only need it for logging in the VFs
+         * */
+		credit_offset = per_sdma_credits * dr->first_sdma_engine;
 	}
 
 	for (this_idx = dr->first_sdma_engine; this_idx < dr->last_sdma_engine; ++this_idx) {
 		unsigned long phys_offset;
 
 		sde = &dd->per_sdma[this_idx];
-		sde->num_credits = per_sdma_credits;
-		/* sde's to be given to bulksvc are special */
-		if (dd->bulksvc) {
-			if (this_idx >= blk_start &&
-			    this_idx < dr->last_sdma_engine)
-				sde->num_credits = bulksvc_per_sdma_credits;
+
+		/* Determine this engine's credit count */
+		if (this_idx >= blk_start && this_idx < blk_end &&
+		    bulksvc_num_sdma > 0) {
+			/* BTS engine */
+			sde->num_credits = bulksvc_per_sdma_credits;
+		} else {
+			/* Non-BTS engine (PF0 or VF) */
+			sde->num_credits = per_sdma_credits;
 		}
+
 		sde->head_dma = curr_head;
 		curr_head += L1_CACHE_BYTES;
 		phys_offset = (unsigned long)sde->head_dma -
@@ -1839,12 +2058,12 @@ void sdma_all_idle(struct hfi1_devdata *dd)
 
 	if (!dd->bulksvc || !dd->bulksvc->rsrc.sde_arr)
 		return;
-	/* bulksvc sde's are not included in first->last smda_engine */
+	/* bulksvc sde's are not included in first->last sdma_engine */
 	for (i = 0; i < dd->bulksvc->prereqs.num_sdma; i++) {
 		sde = dd->bulksvc->rsrc.sde_arr[i];
 		if (!sde)
 			continue;
-		sdma_process_event(sde, sdma_event_e30_go_running);
+		sdma_process_event(sde, sdma_event_e70_go_idle);
 	}
 }
 
