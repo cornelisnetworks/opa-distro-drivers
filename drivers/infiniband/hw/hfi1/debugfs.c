@@ -31,7 +31,7 @@
 #include <linux/atomic.h>
 #include "mem_region.h"
 #include "file_ops.h"
-#include "bulksvc.h" 
+#include "bulksvc.h"
 
 static struct dentry *hfi1_dbg_root;
 
@@ -1400,6 +1400,10 @@ static int bulksvc_dbg_open(struct inode *in, struct file *fp)
 {
 	simple_open(in, fp);
 	struct hfi1_devdata *dd = fp->private_data;
+	if (!dd->bulksvc) {
+		fp->private_data = NULL;
+		return 0;
+	}
 
 	atomic64_t* debug_info_ptr = &dd->bulksvc->debug_info_buf_ptr;
 
@@ -1431,7 +1435,7 @@ static int bulksvc_dbg_open(struct inode *in, struct file *fp)
 		} else {
 			// Lost race, continue looping
 		}
-		
+
 	}
 
 	fp->private_data = info_buf;
