@@ -21,7 +21,7 @@ static int validate_mr_access(struct hfi1_bulksvc_user_mr_record *mr, u64 offset
 // mr_access_record management
 static struct hfi1_bulksvc_user_mr_access_record *
 user_mr_access_record_create_and_insert(struct hfi1_bulksvc_user_info *user_info,
-		 u32 access_key, struct hfi1_bulksvc_user_mr_record *mr_record);
+		 u32 access_key, u64 app_context, u32 cmplq_id, struct hfi1_bulksvc_user_mr_record *mr_record);
 static void user_mr_access_record_destroy_and_remove(struct hfi1_bulksvc_user_mr_access_record *access_record);
 static struct hfi1_bulksvc_user_mr_access_record *
 lookup_user_mr_access_record(struct hfi1_bulksvc_user_info *user_info,
@@ -133,35 +133,34 @@ void bulksvc_user_info_destroy(struct hfi1_bulksvc_user_info* info)
 {
 	pr_debug("destroying user info\n");
 
-
-/** TODO: this will be fixed in a follow up patch, but for now
- * if we actually error here we can potentially "hang" the boxes
- * by printing 16k+ error lines. The boxes don't actually hang but we
- * can't reload the driver or do anything useful during that time
-*/
-#if 0
-	struct hfi1_bulksvc_user_mr_access_record *access_record = list_first_entry(&info->active_access_list, typeof(*access_record), list_entry);
-	struct hfi1_bulksvc_user_mr_access_record *access_record_next;
-	while (!list_entry_is_head(access_record, &info->active_access_list, list_entry)) {
-		access_record_next = list_next_entry(access_record, list_entry);
+	struct hfi1_bulksvc_user_mr_access_record *access_record;
+	struct hfi1_bulksvc_user_mr_access_record *tmp_access;
+	list_for_each_entry_safe(access_record, tmp_access, &info->active_access_list, list_entry) {
 		dd_dev_dbg(info->svc->dd, "%s:%d:%s() bulksvc: Lingering user MR access %u: %p \n",
 			   __FILENAME__, __LINE__, __func__, access_record->access_key, access_record);
-		if (hfi1_dms_dma_access_disable(&info->svc->dms, info->client_key, access_record->access_key) == 0) {
+
+		access_record->user_info = NULL;
+		access_record->released_by_user = true;
+		int rc = hfi1_dms_unregister_access(&info->svc->dms, (union hfi1_dms_key){.access = access_record->access_key, .client = access_record->client_key});
+		if (rc == 0) {
 			user_mr_access_record_destroy_and_remove(access_record);
 		}
-		access_record = access_record_next;
+		else if (rc == -EBUSY) {
+			// Keep alive, will try again when dms gives completion
+			dd_dev_dbg(info->svc->dd, "bulksvc: dms holding access record for operation\n");
+		} else {
+			dd_dev_dbg(info->svc->dd, "%s:%d:%s() bulksvc: Failed to unregister lingering user MR access %u: %d \n",
+				   __FILENAME__, __LINE__, __func__, access_record->access_key, rc);
+		}
 	}
 
-	struct hfi1_bulksvc_user_mr_record* mr_record = list_first_entry(&info->user_mr_list, typeof(*mr_record), list_entry);
-	struct hfi1_bulksvc_user_mr_record *mr_record_next;
-	while (!list_entry_is_head(mr_record, &info->user_mr_list, list_entry)) {
-		mr_record_next = list_next_entry(mr_record, list_entry);
+	struct hfi1_bulksvc_user_mr_record* mr_record;
+	struct hfi1_bulksvc_user_mr_record* tmp_mr;
+	list_for_each_entry_safe(mr_record, tmp_mr, &info->user_mr_list, list_entry) {
 		dd_dev_dbg(info->svc->dd, "%s:%d:%s() bulksvc: Lingering user MR %u: %p \n",
 			   __FILENAME__, __LINE__, __func__, mr_record->user_handle, mr_record);
 		user_mr_record_put(mr_record);
-		mr_record = mr_record_next;
 	}
-#endif
 
 	for (int i = 0; i < BULKSVC_USER_MAX_NUM_CMPLQS; i++) {
 		if (info->cmplq_records[i].active) {
@@ -603,8 +602,9 @@ lookup_user_mr_record(struct hfi1_bulksvc_user_info *user_info,
 
 static struct hfi1_bulksvc_user_mr_access_record *
 user_mr_access_record_create_and_insert(struct hfi1_bulksvc_user_info *user_info,
-		 u32 access_key, struct hfi1_bulksvc_user_mr_record *mr_record)
+		 u32 access_key, u64 app_context, u32 cmplq_id, struct hfi1_bulksvc_user_mr_record *mr_record)
 {
+	pr_err("HERE001\n");
 	struct hfi1_bulksvc_user_mr_access_record *access_record;
 
 	access_record = kzalloc(sizeof(*access_record), GFP_KERNEL);
@@ -614,7 +614,12 @@ user_mr_access_record_create_and_insert(struct hfi1_bulksvc_user_info *user_info
 	}
 
 	access_record->access_key = access_key;
+	access_record->app_context = app_context;
+	access_record->cmplq_id = cmplq_id;
 	access_record->mr_record = mr_record;
+	access_record->user_info = user_info;
+	access_record->client_key = user_info->client_key;
+	access_record->released_by_user = false;
 
 	list_add_tail(&access_record->list_entry, &user_info->active_access_list);
 
@@ -926,10 +931,7 @@ compl_error:
 
 struct dma_access_notify_cookie {
 	struct hfi1_bulksvc * const svc;
-	struct hfi1_bulksvc_user_info* user_info;
-	u32 cmplq_id;
-	u64 app_context;
-	u32 access_key;
+	struct hfi1_bulksvc_user_mr_access_record *access_record;
 };
 
 static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 flags, u64 imm_data, int status)
@@ -939,21 +941,61 @@ static void on_dma_access_notify(union hfi1_dms_completion_cookie *cookie, u16 f
 
 	BUILD_BUG_ON(sizeof(struct dma_access_notify_cookie) > sizeof(union hfi1_dms_completion_cookie));
 	struct dma_access_notify_cookie *access_cookie = (struct dma_access_notify_cookie *)cookie;
+	struct hfi1_bulksvc_user_mr_access_record *access_record = access_cookie->access_record;
 
-	cmplq_record = get_cmplq_record(access_cookie->svc, access_cookie->user_info, access_cookie->cmplq_id);
-	if (!cmplq_record) {
-		pr_err("%s:%d:%s() ERROR: Unable to get cmplq record for notify\n", __FILENAME__, __LINE__, __func__);
+	if (access_record == NULL) {
+		pr_err("%s:%d:%s() ERROR: access_record is NULL in notify\n", __FILENAME__, __LINE__, __func__);
 		return;
 	}
 
-	cmpl.app_context = access_cookie->app_context;
-	cmpl.status = status;
-	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_NOTIFY;
-	cmpl.type_notify.access_key = access_cookie->access_key;
-	cmpl.type_notify.flags = flags;
-	cmpl.type_notify.imm_data = imm_data;
+	struct hfi1_bulksvc_user_info *user_info = access_record->user_info;
 
-	give_completion(access_cookie->user_info, cmplq_record, &cmpl);
+	// User info needs notification
+	if (user_info != NULL) {
+		cmplq_record = get_cmplq_record(access_cookie->svc, access_record->user_info, access_record->cmplq_id);
+		if (!cmplq_record) {
+			pr_err("%s:%d:%s() ERROR: Unable to get cmplq record for notify\n", __FILENAME__, __LINE__, __func__);
+			goto maybe_release_access;
+		}
+
+		cmpl.app_context = access_record->app_context;
+		cmpl.status = status;
+		cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_NOTIFY;
+		cmpl.type_notify.access_key = access_record->access_key;
+		cmpl.type_notify.flags = flags;
+		cmpl.type_notify.imm_data = imm_data;
+
+		give_completion(user_info, cmplq_record, &cmpl);
+	}
+
+	maybe_release_access:
+
+	// Need to retry dms release
+	if (access_record->released_by_user) {
+
+		int rc = hfi1_dms_unregister_access(&access_cookie->svc->dms, (union hfi1_dms_key){.access = access_record->access_key, .client = access_record->client_key});
+
+		if (rc == 0) {
+			// Grab before freeing
+			const u64 app_context = access_record->app_context;
+			u32 access_key = access_record->access_key;
+
+			user_mr_access_record_destroy_and_remove(access_record);
+			// Also need to notify user of completion of release
+			if (user_info != NULL) {
+				cmpl.app_context = app_context;
+				cmpl.status = 0;
+				cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
+				cmpl.type_default.access_key = access_key;
+
+				give_completion(user_info, cmplq_record, &cmpl);
+				return;
+			}
+		} else {
+			// Otherwise release in the next pending notify callback
+			return;
+		}
+	}
 }
 
 static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
@@ -967,17 +1009,6 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 	cmplq_record = get_cmplq_record(svc, user_info, cmd->cmplq_id);
 	if (!cmplq_record)
 		goto exit;
-
-	struct hfi1_dms_access_completion notification = {
-		.fn = on_dma_access_notify,
-		.cookie = *(union hfi1_dms_completion_cookie*)&(struct dma_access_notify_cookie) {
-			.svc = svc,
-			.user_info = user_info,
-			.cmplq_id = cmd->notification_cmplq_id,
-			.app_context = cmd->notification_app_context,
-			.access_key = cmd->access_key,
-		}
-	};
 
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = -EINVAL;
@@ -1001,13 +1032,21 @@ static void bulksvc_on_cmd_dma_access_enable(struct hfi1_bulksvc * const svc,
 		goto exit;
 	}
 
-	access_record = user_mr_access_record_create_and_insert(user_info, cmd->access_key, mr_record);
+	access_record = user_mr_access_record_create_and_insert(user_info, cmd->access_key, cmd->app_context, cmd->cmplq_id, mr_record);
 	if (!access_record) {
 		pr_err("%s:%d:%s() failed to create access record for key %u\n",
 		       __FILENAME__, __LINE__, __func__, cmd->access_key);
 		cmpl.status = -ENOMEM;
 		goto exit;
 	}
+
+	struct hfi1_dms_access_completion notification = {
+		.fn = on_dma_access_notify,
+		.cookie = *(union hfi1_dms_completion_cookie*)&(struct dma_access_notify_cookie) {
+			.svc = svc,
+			.access_record = access_record,
+		}
+	};
 
 	union hfi1_dms_key const dms_key = {
 		.client = user_info->client_key,
@@ -1056,19 +1095,20 @@ static void bulksvc_on_cmd_dma_access_disable(struct hfi1_bulksvc * const svc,
 		goto exit;
 	}
 
+	access_record->released_by_user = true;
+
 	union hfi1_dms_key const dms_key = {
 		.client = user_info->client_key,
 		.access = cmd->access_key,
 	};
 	rc = hfi1_dms_unregister_access(&svc->dms, dms_key);
 
-	if (rc == 0) {
-		user_mr_access_record_destroy_and_remove(access_record);
-	} else {
-		pr_err("%s:%d:%s() failed to disable DMA access for key %u: %d\n",
-		       __FILENAME__, __LINE__, __func__, cmd->access_key, rc);
+	if (rc != 0) {
+		// Release in the pending notify callback
+		return;
 	}
 
+	user_mr_access_record_destroy_and_remove(access_record);
 	cmpl.app_context = cmd->app_context;
 	cmpl.status = rc;
 	cmpl.type = HFI1_HFISVC_CQ_ENTRY_TYPE_DEFAULT;
