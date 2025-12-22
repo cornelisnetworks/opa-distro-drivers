@@ -157,8 +157,7 @@ mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
 # make sure rpm component strings are clean, should be no-ops
 rpmname=$(echo "$rpmname" | sed -e 's/[.]/_/g')
-rpmversion=$(echo "$DEFAULT_KERNEL_VERSION" | sed -e 's/-/_/g')
-rpmrequires=$(echo "$DEFAULT_KERNEL_VERSION" | sed -e 's/.[^.]*$//')
+rpmversion=$DEFAULT_KERNEL_VERSION
 
 # get kernel(-devel) rpm version and release values
 if [ $distro = 'rhel' ] || [ $distro = 'rocky' ]

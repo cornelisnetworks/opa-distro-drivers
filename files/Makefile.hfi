@@ -13,7 +13,7 @@ NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi
 ifdef CONFIG_HFI1_NVIDIA
 ifndef NVIDIA_DRIVER_SOURCE
 NVIDIA_NAME:=$(shell zypper search nvidia-driver 2>&1 | grep "^i" | awk '{ print $$3 }')
-NVIDIA_VERSION:=$(shell rpm -q $$NVIDIA_NAME | cut -d '-' -f 4)
+NVIDIA_VERSION:=$(shell rpm -q $(NVIDIA_NAME) | cut -d '-' -f 4)
 NVIDIA_DRIVER_SOURCE:=/usr/src/nvidia-$(NVIDIA_VERSION)
 endif
 NOSTDINC_FLAGS += -I$(NVIDIA_DRIVER_SOURCE) -DCONFIG_HFI1_NVIDIA -DCONFIG_HFI1_NVIDIA_P2P_MEMCPY

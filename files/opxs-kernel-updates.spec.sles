@@ -18,7 +18,7 @@ BuildRequires:  %kernel_module_package_buildreqs
 %define debug_package %{nil}
 
 %define arch %(uname -p)
-Requires:	kernel = %(echo %{kver} | sed -e 's/\(.*\)\.%{arch}/\1/g')
+Requires:	kernel-default = %(rpm -q kernel-default | cut -f 3- -d '-')
 
 %kernel_module_package -f %{SOURCE1} default
 
