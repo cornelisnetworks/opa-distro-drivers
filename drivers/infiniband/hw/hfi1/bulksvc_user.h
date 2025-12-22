@@ -13,6 +13,8 @@
 
 #include "dms.h"
 
+struct hfi1_bulksvc_user_info;
+
 struct hfi1_bulksvc_queue_record {
 	bool active;
 	struct hfi1_bulksvc_queue_info queue_info;
@@ -73,8 +75,13 @@ struct hfi1_bulksvc_user_mr_record {
 
 struct hfi1_bulksvc_user_mr_access_record {
 	struct list_head list_entry;
+	u64 app_context;
 	u32 access_key;
+	u32 cmplq_id;
 	struct hfi1_bulksvc_user_mr_record *mr_record;
+	struct hfi1_bulksvc_user_info *user_info;
+	u32 client_key;
+	bool released_by_user;
 };
 
 union hfi1_bulksvc_userctxt_cmd_data {
