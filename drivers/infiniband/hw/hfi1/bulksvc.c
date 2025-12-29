@@ -779,7 +779,7 @@ static void bulksvc_rsm_write_map_table(struct hfi1_devdata *dd, u8 idx, u8 valu
 	u64 reg;
 
 	reg = read_csr(dd, dd->params->rcv_rsm_map_table_reg + (8 * regidx));
-	reg &= ~(dd->params->rsm_map_table_entry_mask << regoff);
+	reg &= ~((u64)dd->params->rsm_map_table_entry_mask << regoff);
 	reg |= ((u64)value) << regoff;
 	write_csr(dd, dd->params->rcv_rsm_map_table_reg + (8 * regidx), reg);
 }
@@ -801,6 +801,8 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
 			   __FILENAME__, __LINE__, __func__);
 		return;
 	}
+
+	mutex_lock(&hfi1_mutex);
 
 	for (int i = 0; i < dd->num_pports; ++i) {
 		struct hfi1_pportdata *ppd = &dd->pport[i];
@@ -851,6 +853,8 @@ void bulksvc_rsm_init(struct hfi1_bulksvc *svc)
 			    __FILENAME__, __LINE__, __func__,
 			    rule_index, i, offset, rcd->ctxt);
 	}
+
+	mutex_unlock(&hfi1_mutex);
 
 	dd_dev_warn(dd, "%s:%d:%s() bulksvc: Finished registering RSM rules for bulksvc\n",
 		    __FILENAME__, __LINE__, __func__);
