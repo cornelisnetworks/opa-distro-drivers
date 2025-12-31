@@ -5204,6 +5204,11 @@ void hfi1_dms_rx_tracker_cancel(struct hfi1_dms *dms, struct hfi1_dms_rx_tracker
 			}
 		}
 
+		// For ordered flows, also remove from the ordering domain's tidset wait list.
+		if (rx_tracker->hdr.ordered && rx_tracker->hdr.order_domain) {
+			_rift_keyring_remove(&rx_tracker->hdr.order_domain->tidsets.wait, rx_tracker->hdr.local_rift_key);
+		}
+
 		// even with/without tidset waiter(s) there might be one or more active tidsets that must be disabled.
 		u32 const sz = HFI1_DMS_ARRAY_SIZE(dms->read_requests);
 		for (u32 tid_set = 0; tid_set < sz; ++tid_set) {
